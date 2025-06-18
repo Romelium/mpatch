@@ -11,7 +11,7 @@
 //!
 //! ## Core Features
 //!
-//! - **Markdown-Aware:** Directly parses unified diffs from within ````diff` code blocks.
+//! - **Markdown-Aware:** Directly parses unified diffs from within ````diff ` code blocks.
 //! - **Context-Driven:** Ignores `@@ ... @@` line numbers, finding patch locations by
 //!   matching context lines.
 //! - **Fuzzy Matching:** If an exact context match isn't found, `mpatch` uses a
@@ -109,7 +109,7 @@ pub enum PatchError {
     /// a file creation patch.
     #[error("Target file not found for patching: {0}")]
     TargetNotFound(PathBuf),
-    /// A ````diff` block was found, but it was missing the `--- a/path/to/file`
+    /// A ````diff ` block was found, but it was missing the `--- a/path/to/file`
     /// header required to identify the target file.
     #[error("A diff block was found without a file path header (e.g., '--- a/path/to/file')")]
     MissingFileHeader,
@@ -205,7 +205,7 @@ impl Hunk {
 
 /// Represents all the changes to be applied to a single file.
 ///
-/// A `Patch` is derived from a `--- a/path/to/file` section within a ````diff`
+/// A `Patch` is derived from a `--- a/path/to/file` section within a ````diff `
 /// block and contains one or more [`Hunk`]s.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Patch {
@@ -221,7 +221,7 @@ pub struct Patch {
 
 // --- Core Logic ---
 
-/// Parses a string containing one or more ````diff` blocks into a vector of [`Patch`] objects.
+/// Parses a string containing one or more ````diff ` blocks into a vector of [`Patch`] objects.
 ///
 /// This function scans the input `content` for markdown-style diff blocks
 /// (i.e., ```diff ... ```). It can handle multiple blocks in one string, and

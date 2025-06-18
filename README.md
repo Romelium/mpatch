@@ -31,7 +31,7 @@ This same logic makes it perfect for other common developer scenarios where patc
 
 ## Core Features
 
-*   **Markdown-Aware:** Directly parses unified diffs from within ````diff` code blocks in any text or markdown file.
+*   **Markdown-Aware:** Directly parses unified diffs from within ````diff ` code blocks in any text or markdown file.
 *   **Context-Driven:** Ignores `@@ ... @@` line numbers, finding patch locations by matching context lines. This makes it resilient to minor preceding changes in a file.
 *   **Fuzzy Matching:** If an exact context match isn't found, `mpatch` can use a similarity algorithm to find the *best* fuzzy match, allowing patches to apply even if the source has slightly diverged.
 *   **Safe & Secure:** Includes a `--dry-run` mode to preview changes and built-in protection against path traversal attacks.
