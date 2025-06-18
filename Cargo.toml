@@ -1,6 +1,33 @@
 [package]
 name = "mpatch"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+description = "A smart, context-aware patch tool that applies diffs using fuzzy matching, ideal for AI-generated code."
+authors = ["Romelium author@romelium.com>"]
+repository = "https://github.com/romelium/mpatch"
+license = "MIT OR Apache-2.0"
+keywords = ["patch", "diff", "cli", "fuzzy", "llm"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "README.md"
+
 
 [dependencies]
+anyhow = "1.0.98"
+clap = { version = "4.5.40", features = ["derive"] }
+colored = "2.2.0"
+env_logger = "0.11.8"
+log = "0.4.27"
+similar = "2.7.0"
+thiserror = "1.0.69"
+
+[dev-dependencies]
+indoc = "2.0.6"
+tempfile = "3.20.0"
+
+[[bin]]
+name = "mpatch"
+path = "src/main.rs"
+
+[lib]
+name = "mpatch"
+path = "src/lib.rs"
