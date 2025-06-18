@@ -715,3 +715,178 @@ fn test_file_creation_with_spaces_in_path() {
     let content = fs::read_to_string(file_path).unwrap();
     assert_eq!(content, "content\n");
 }
+
+// --- NEW EDGE CASE TESTS ---
+
+#[test]
+fn test_apply_hunk_to_file_beginning() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("test.txt");
+    fs::write(&file_path, "line 1\nline 2\n").unwrap();
+
+    let diff = indoc! {"
+        ```diff
+        --- a/test.txt
+        +++ b/test.txt
+        @@ -1,2 +1,3 @@
+        +new first line
+         line 1
+         line 2
+        ```
+    "};
+    let patch = &parse_diffs(diff).unwrap()[0];
+    let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
+
+    assert!(result);
+    let content = fs::read_to_string(file_path).unwrap();
+    assert_eq!(content, "new first line\nline 1\nline 2\n");
+}
+
+#[test]
+fn test_apply_hunk_to_file_end() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("test.txt");
+    fs::write(&file_path, "line 1\nline 2\n").unwrap();
+
+    let diff = indoc! {"
+        ```diff
+        --- a/test.txt
+        +++ b/test.txt
+        @@ -1,2 +1,3 @@
+         line 1
+         line 2
+        +new last line
+        ```
+    "};
+    let patch = &parse_diffs(diff).unwrap()[0];
+    let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
+
+    assert!(result);
+    let content = fs::read_to_string(file_path).unwrap();
+    assert_eq!(content, "line 1\nline 2\nnew last line\n");
+}
+
+#[test]
+fn test_parse_diff_with_git_headers() {
+    let diff = indoc! {r#"
+        ```diff
+        diff --git a/src/main.rs b/src/main.rs
+        index 1234567..abcdefg 100644
+        --- a/src/main.rs
+        +++ b/src/main.rs
+        @@ -1,3 +1,3 @@
+         fn main() {
+        -    println!("Hello, world!");
+        +    println!("Hello, mpatch!");
+         }
+        ```
+    "#};
+    let patches = parse_diffs(diff).unwrap();
+    assert_eq!(patches.len(), 1);
+    let patch = &patches[0];
+    assert_eq!(patch.file_path.to_str().unwrap(), "src/main.rs");
+    assert_eq!(patch.hunks.len(), 1);
+    assert_eq!(patch.hunks[0].get_replace_block(), vec!["fn main() {", "    println!(\"Hello, mpatch!\");", "}"]);
+}
+
+#[test]
+fn test_path_normalization_within_project() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let src_dir = dir.path().join("src");
+    fs::create_dir(&src_dir).unwrap();
+    let file_path = dir.path().join("main.rs");
+    fs::write(&file_path, "fn main() {}\n").unwrap();
+
+    // This patch uses a path that contains '..' but normalizes
+    // to a path still within the project root.
+    let diff = indoc! {"
+        ```diff
+        --- a/src/../main.rs
+        +++ b/src/../main.rs
+        @@ -1 +1 @@
+        -fn main() {}
+        +fn main() { /* changed */ }
+        ```
+    "};
+    let patch = &parse_diffs(diff).unwrap()[0];
+    // The patch is applied from the project root (`dir`).
+    let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
+
+    assert!(result, "Patch with '..' that resolves inside the project should apply");
+    let content = fs::read_to_string(file_path).unwrap();
+    assert_eq!(content, "fn main() { /* changed */ }\n");
+}
+
+#[test]
+fn test_apply_hunk_with_single_line_match_block() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("test.txt");
+    fs::write(&file_path, "unique_line\n").unwrap();
+
+    let diff = indoc! {"
+        ```diff
+        --- a/test.txt
+        +++ b/test.txt
+        @@ -1,1 +1,1 @@
+        -unique_line
+        +changed_line
+        ```
+    "};
+    let patch = &parse_diffs(diff).unwrap()[0];
+    assert_eq!(patch.hunks[0].get_match_block(), vec!["unique_line"]);
+    let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
+
+    assert!(result);
+    let content = fs::read_to_string(file_path).unwrap();
+    assert_eq!(content, "changed_line\n");
+}
+
+#[test]
+fn test_file_creation_with_unicode_path() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_name = "文件.txt";
+    let file_path = dir.path().join(file_name);
+
+    let diff = format!(indoc! {r#"
+        ```diff
+        --- a/{}
+        +++ b/{}
+        @@ -0,0 +1 @@
+        +内容
+        ```
+    "#}, file_name, file_name);
+
+    let patch = &parse_diffs(&diff).unwrap()[0];
+    assert_eq!(patch.file_path.to_str().unwrap(), file_name);
+    let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
+
+    assert!(result, "Patch should be applied successfully");
+    assert!(file_path.exists(), "File with unicode name should be created");
+    let content = fs::read_to_string(file_path).unwrap();
+    assert_eq!(content, "内容\n");
+}
+
+#[test]
+#[cfg(unix)] // Behavior of absolute paths in `join` is platform-specific.
+fn test_path_traversal_with_absolute_path_is_blocked() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    // This diff attempts to write to an absolute path.
+    let diff = indoc! {"
+        ```diff
+        --- a//etc/evil.txt
+        +++ b//etc/evil.txt
+        @@ -0,0 +1 @@
+        +hacked
+        ```
+    "};
+    let patch = &parse_diffs(diff).unwrap()[0];
+    let result = apply_patch(patch, dir.path(), false, 0.0);
+
+    assert!(matches!(result, Err(PatchError::PathTraversal(_))));
+}

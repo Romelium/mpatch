@@ -262,14 +262,16 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, PatchError> {
     let mut all_patches = Vec::new();
     let mut lines = content.lines().peekable();
 
-    while let Some(_) = lines.by_ref().find(|l| l.trim().starts_with("```diff")) {
+    // The `any` call consumes the iterator until it finds the start of a diff block.
+    // The loop continues searching for more blocks from where the last one ended.
+    while lines.by_ref().any(|l| l.trim().starts_with("```diff")) {
         let mut current_file: Option<PathBuf> = None;
         let mut current_hunks: Vec<Hunk> = Vec::new();
         let mut current_hunk_lines: Vec<String> = Vec::new();
         let mut ends_with_newline_for_block = true;
 
         // Consume lines within the ```diff block
-        while let Some(line) = lines.next() {
+        for line in lines.by_ref() {
             if line.trim() == "```" {
                 break; // End of block
             }
@@ -415,7 +417,8 @@ pub fn apply_patch(
         (content, lines)
     } else {
         // File doesn't exist. This is only okay if it's a file creation patch.
-        if patch.hunks.get(0).map_or(true, |h| !h.get_match_block().is_empty()) {
+        // A creation patch has a first hunk with an empty match block.
+        if patch.hunks.first().is_none_or(|h| !h.get_match_block().is_empty()) {
             return Err(PatchError::TargetNotFound(target_file_path));
         }
         info!("  Target file does not exist. Assuming file creation.");
@@ -605,10 +608,10 @@ fn find_hunk_location(
                 "    Found best fuzzy match at index {} (similarity: {:.3}).",
                 best_index, best_ratio
             );
-            return Some(best_index);
+            Some(best_index)
         } else {
             warn!("    Ambiguous fuzzy match: Hunk context found at multiple locations with same top similarity ({:.3}): {:?}. Skipping.", best_ratio, potential_matches);
-            return None;
+            None
         }
     } else {
         if !potential_matches.is_empty() {
@@ -616,6 +619,6 @@ fn find_hunk_location(
         } else {
             debug!("    Fuzzy match: Could not find any potential match location.");
         }
-        return None;
+        None
     }
 }
