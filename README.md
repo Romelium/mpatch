@@ -17,7 +17,7 @@
 
 The primary motivation for `mpatch` comes from working with Large Language Models (LLMs).
 
-When you ask an AI like ChatGPT, Claude, or Copilot to refactor code, it often provides the changes in a convenient markdown format with ````diff` blocks. **However, you can't trust that the line numbers are correct.** Sometimes, even the surrounding context lines aren't a perfect, character-for-character match to your current code. A standard `patch` command will often fail in these situations.
+When you ask an AI like ChatGPT, Claude, or Copilot to refactor code, it often provides the changes in a convenient markdown format with ` ```diff` blocks. **However, you can't trust that the line numbers are correct.** Sometimes, even the surrounding context lines aren't a perfect, character-for-character match to your current code. A standard `patch` command will often fail in these situations.
 
 **This is the core problem `mpatch` was built to solve.**
 
