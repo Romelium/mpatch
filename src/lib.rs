@@ -265,10 +265,14 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, PatchError> {
     // The `any` call consumes the iterator until it finds the start of a diff block.
     // The loop continues searching for more blocks from where the last one ended.
     while lines.by_ref().any(|l| l.trim().starts_with("```diff")) {
+        // This temporary vec will hold all patch sections found in this block,
+        // even if they are for the same file. They will be merged later.
+        let mut unmerged_block_patches: Vec<Patch> = Vec::new();
+
         let mut current_file: Option<PathBuf> = None;
         let mut current_hunks: Vec<Hunk> = Vec::new();
         let mut current_hunk_lines: Vec<String> = Vec::new();
-        let mut ends_with_newline_for_block = true;
+        let mut ends_with_newline_for_section = true;
 
         // Consume lines within the ```diff block
         for line in lines.by_ref() {
@@ -279,59 +283,73 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, PatchError> {
             if let Some(path_str) = line.strip_prefix("--- a/") {
                 let new_file = PathBuf::from(path_str.trim());
                 if let Some(existing_file) = &current_file {
-                    // This is a new file path within the same ```diff block.
-                    // Finalize the previous file's patch.
+                    // This is a new file section within the same ```diff block.
+                    // Finalize the previous file's patch section.
                     if !current_hunk_lines.is_empty() {
                         current_hunks.push(Hunk {
                             lines: current_hunk_lines,
                         });
                     }
                     if !current_hunks.is_empty() {
-                        all_patches.push(Patch {
+                        unmerged_block_patches.push(Patch {
                             file_path: existing_file.clone(),
                             hunks: current_hunks,
-                            ends_with_newline: ends_with_newline_for_block,
+                            ends_with_newline: ends_with_newline_for_section,
                         });
                     }
-                    // Reset for the new file
+                    // Reset for the new file section
                     current_hunks = Vec::new();
                     current_hunk_lines = Vec::new();
-                    ends_with_newline_for_block = true;
+                    ends_with_newline_for_section = true;
                 }
                 current_file = Some(new_file);
             } else if line.starts_with("+++") {
                 // Ignore +++ lines, they are part of the header but don't contain patch data.
             } else if line.starts_with("@@") {
                 if !current_hunk_lines.is_empty() {
-                    current_hunks.push(Hunk {
-                        lines: std::mem::take(&mut current_hunk_lines),
-                    });
+                    current_hunks.push(Hunk { lines: std::mem::take(&mut current_hunk_lines) });
                 }
             } else if line.starts_with(['+', '-', ' ']) {
                 current_hunk_lines.push(line.to_string());
             } else if line.starts_with('\\') {
-                ends_with_newline_for_block = false;
+                ends_with_newline_for_section = false;
             }
         }
 
-        // Finalize the last hunk and patch for the block
+        // Finalize the last hunk and patch section for the block
         if !current_hunk_lines.is_empty() {
-            current_hunks.push(Hunk {
-                lines: current_hunk_lines,
-            });
+            current_hunks.push(Hunk { lines: current_hunk_lines });
         }
 
         if let Some(file_path) = current_file {
             if !current_hunks.is_empty() {
-                all_patches.push(Patch {
+                unmerged_block_patches.push(Patch {
                     file_path,
                     hunks: current_hunks,
-                    ends_with_newline: ends_with_newline_for_block,
+                    ends_with_newline: ends_with_newline_for_section,
                 });
             }
         } else if !current_hunks.is_empty() {
             return Err(PatchError::MissingFileHeader);
         }
+
+        // Merge the collected patch sections from this block. This handles cases
+        // where multiple `--- a/file` sections for the same file exist within
+        // one ```diff block.
+        let mut merged_block_patches: Vec<Patch> = Vec::new();
+        for patch_section in unmerged_block_patches {
+            if let Some(existing_patch) = merged_block_patches
+                .iter_mut()
+                .find(|p| p.file_path == patch_section.file_path)
+            {
+                existing_patch.hunks.extend(patch_section.hunks);
+                // The 'ends_with_newline' from the *last* section for a file wins.
+                existing_patch.ends_with_newline = patch_section.ends_with_newline;
+            } else {
+                merged_block_patches.push(patch_section);
+            }
+        }
+        all_patches.extend(merged_block_patches);
     }
 
     Ok(all_patches)

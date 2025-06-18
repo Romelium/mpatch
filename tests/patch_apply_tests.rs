@@ -95,6 +95,33 @@ fn test_parse_multiple_files_in_one_block() {
 }
 
 #[test]
+fn test_parse_multiple_sections_for_same_file_in_one_block() {
+    let diff = indoc! {r#"
+        ```diff
+        --- a/same_file.txt
+        +++ b/same_file.txt
+        @@ -1 +1 @@
+        -hunk1
+        +hunk one
+        --- a/same_file.txt
+        +++ b/same_file.txt
+        @@ -10 +10 @@
+        -hunk2
+        +hunk two
+        ```
+    "#};
+    let patches = parse_diffs(diff).unwrap();
+    // This is the key assertion: it should be parsed as ONE patch for the file,
+    // not two separate patches.
+    assert_eq!(patches.len(), 1, "Should produce a single patch for the same file");
+
+    assert_eq!(patches[0].file_path.to_str().unwrap(), "same_file.txt");
+    assert_eq!(patches[0].hunks.len(), 2, "Should contain two hunks");
+    assert_eq!(patches[0].hunks[0].get_replace_block(), vec!["hunk one"]);
+    assert_eq!(patches[0].hunks[1].get_replace_block(), vec!["hunk two"]);
+}
+
+#[test]
 fn test_parse_error_on_missing_file_header() {
     let diff = indoc! {"
         ```diff
