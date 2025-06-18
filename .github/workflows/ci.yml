@@ -1,0 +1,88 @@
+name: Rust CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build_and_test:
+    name: Build and Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        # Fetch depth 0 is needed for changed-files to correctly compare PR base/head or push history
+        with:
+          fetch-depth: 0
+
+      - name: Get changed files
+        id: changed_files
+        uses: tj-actions/changed-files@ed68ef82c095e0d48ec87eccea555d944a631a4c # v46
+        with:
+          # Define file sets. Output will be like steps.changed-files-yaml.outputs.code_any_changed == 'true'
+          files_yaml: |
+            rust_code:
+              - src/**/*.rs
+              - tests/**/*.rs
+            manifest:
+              - Cargo.toml
+              - Cargo.lock
+            # Combined group for convenience
+            code:
+              - src/**/*.rs
+              - tests/**/*.rs
+              - Cargo.toml
+              - Cargo.lock
+            ci:
+              - .github/workflows/**
+              - .pre-commit-config.yaml
+            docs:
+              - README.md
+              - COMMIT.md
+              - LICENSE
+
+      - name: Install Rust toolchain (stable)
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          cache: 'cargo'
+          components: clippy, rustfmt
+        # This step always runs, as caching makes it fast, and subsequent steps might need it.
+
+      - name: Check Formatting (cargo fmt)
+        # Only run if Rust code or manifest files changed
+        if: steps.changed-files-yaml.outputs.code_any_changed == 'true'
+        run: cargo fmt --all -- --check
+
+      - name: Linting (cargo clippy)
+        if: steps.changed-files-yaml.outputs.code_any_changed == 'true'
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run Tests (cargo test)
+        if: steps.changed-files-yaml.outputs.code_any_changed == 'true'
+        run: cargo test --all-targets --verbose
+
+      - name: Build (Debug)
+        if: steps.changed-files-yaml.outputs.code_any_changed == 'true'
+        run: cargo build --verbose
+
+      - name: Build (Release)
+        if: steps.changed-files-yaml.outputs.code_any_changed == 'true'
+        run: cargo build --release --verbose
+
+      - name: Indicate checks skipped (if applicable)
+        if: steps.changed_files.outputs.any_code_changed == 'false'
+        run: echo "Rust checks skipped as no relevant code changes were detected."
