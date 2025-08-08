@@ -280,34 +280,51 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, PatchError> {
                 break; // End of block
             }
 
-            if let Some(path_str) = line.strip_prefix("--- a/") {
-                let new_file = PathBuf::from(path_str.trim());
+            if let Some(stripped_line) = line.strip_prefix("--- ") {
+                // A `---` line always signals a new file section.
+                // Finalize the previous file's patch section if it exists.
                 if let Some(existing_file) = &current_file {
-                    // This is a new file section within the same ```diff block.
-                    // Finalize the previous file's patch section.
                     if !current_hunk_lines.is_empty() {
                         current_hunks.push(Hunk {
-                            lines: current_hunk_lines,
+                            lines: std::mem::take(&mut current_hunk_lines),
                         });
                     }
                     if !current_hunks.is_empty() {
                         unmerged_block_patches.push(Patch {
                             file_path: existing_file.clone(),
-                            hunks: current_hunks,
+                            hunks: std::mem::take(&mut current_hunks),
                             ends_with_newline: ends_with_newline_for_section,
                         });
                     }
-                    // Reset for the new file section
-                    current_hunks = Vec::new();
-                    current_hunk_lines = Vec::new();
-                    ends_with_newline_for_section = true;
                 }
-                current_file = Some(new_file);
-            } else if line.starts_with("+++") {
-                // Ignore +++ lines, they are part of the header but don't contain patch data.
+
+                // Reset for the new file section.
+                // `current_file` is cleared and will be set by this `---` line or a subsequent `+++` line.
+                current_file = None;
+                current_hunk_lines.clear();
+                ends_with_newline_for_section = true;
+
+                let path_part = stripped_line.trim();
+                if path_part == "/dev/null" || path_part == "a/dev/null" {
+                    // This is a file creation patch. The path will be in the `+++` line.
+                    // `current_file` remains `None` for now.
+                } else if let Some(path_str) = path_part.strip_prefix("a/") {
+                    current_file = Some(PathBuf::from(path_str.trim()));
+                }
+            } else if line.starts_with("+++ ") {
+                // If `current_file` is `None`, it means we saw `--- /dev/null` (or an unrecognised ---)
+                // and are expecting the file path from this `+++` line.
+                if current_file.is_none() {
+                    if let Some(path_str) = line.strip_prefix("+++ b/") {
+                        current_file = Some(PathBuf::from(path_str.trim()));
+                    }
+                }
+                // Otherwise, we already have the path from the `---` line, so we ignore this `+++` line.
             } else if line.starts_with("@@") {
                 if !current_hunk_lines.is_empty() {
-                    current_hunks.push(Hunk { lines: std::mem::take(&mut current_hunk_lines) });
+                    current_hunks.push(Hunk {
+                        lines: std::mem::take(&mut current_hunk_lines),
+                    });
                 }
             } else if line.starts_with(['+', '-', ' ']) {
                 current_hunk_lines.push(line.to_string());
@@ -318,7 +335,9 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, PatchError> {
 
         // Finalize the last hunk and patch section for the block
         if !current_hunk_lines.is_empty() {
-            current_hunks.push(Hunk { lines: current_hunk_lines });
+            current_hunks.push(Hunk {
+                lines: current_hunk_lines,
+            });
         }
 
         if let Some(file_path) = current_file {
@@ -404,10 +423,15 @@ pub fn apply_patch(
     } else {
         // For new files, canonicalize the parent and append the filename
         let parent = target_file_path.parent().unwrap_or(Path::new(""));
-        fs::create_dir_all(parent)
-            .map_err(|e| PatchError::Io { path: parent.to_path_buf(), source: e })?;
+        fs::create_dir_all(parent).map_err(|e| PatchError::Io {
+            path: parent.to_path_buf(),
+            source: e,
+        })?;
         fs::canonicalize(parent)
-            .map_err(|e| PatchError::Io { path: parent.to_path_buf(), source: e })?
+            .map_err(|e| PatchError::Io {
+                path: parent.to_path_buf(),
+                source: e,
+            })?
             .join(target_file_path.file_name().unwrap_or_default())
     };
 
@@ -436,7 +460,11 @@ pub fn apply_patch(
     } else {
         // File doesn't exist. This is only okay if it's a file creation patch.
         // A creation patch has a first hunk with an empty match block.
-        if patch.hunks.first().is_none_or(|h| !h.get_match_block().is_empty()) {
+        if patch
+            .hunks
+            .first()
+            .is_none_or(|h| !h.get_match_block().is_empty())
+        {
             return Err(PatchError::TargetNotFound(target_file_path));
         }
         info!("  Target file does not exist. Assuming file creation.");
@@ -456,11 +484,7 @@ pub fn apply_patch(
             );
             continue;
         }
-        info!(
-            "  Applying Hunk {}/{}...",
-            hunk_index,
-            patch.hunks.len()
-        );
+        info!("  Applying Hunk {}/{}...", hunk_index, patch.hunks.len());
 
         let match_block = hunk.get_match_block();
         let replace_block = hunk.get_replace_block();
@@ -512,8 +536,10 @@ pub fn apply_patch(
         println!("------------------------------------");
     } else {
         if let Some(parent) = target_file_path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| PatchError::Io { path: parent.to_path_buf(), source: e })?;
+            fs::create_dir_all(parent).map_err(|e| PatchError::Io {
+                path: parent.to_path_buf(),
+                source: e,
+            })?;
         }
         fs::write(&target_file_path, new_content).map_err(|e| PatchError::Io {
             path: target_file_path.clone(),
@@ -543,7 +569,11 @@ fn find_hunk_location(
 ) -> Option<usize> {
     if match_block.is_empty() {
         // An empty match block (file creation) can only be applied to an empty file.
-        return if target_lines.is_empty() { Some(0) } else { None };
+        return if target_lines.is_empty() {
+            Some(0)
+        } else {
+            None
+        };
     }
     if match_block.len() > target_lines.len() {
         return None;
@@ -562,7 +592,10 @@ fn find_hunk_location(
         return Some(exact_matches[0]);
     }
     if exact_matches.len() > 1 {
-        warn!("    Ambiguous exact match: Hunk context found at multiple locations: {:?}. Skipping.", exact_matches);
+        warn!(
+            "    Ambiguous exact match: Hunk context found at multiple locations: {:?}. Skipping.",
+            exact_matches
+        );
         return None;
     }
 

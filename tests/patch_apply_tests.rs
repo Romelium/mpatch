@@ -26,8 +26,14 @@ fn test_parse_simple_diff() {
     assert!(patch.ends_with_newline);
     let hunk = &patch.hunks[0];
     assert_eq!(hunk.lines.len(), 4);
-    assert_eq!(hunk.get_match_block(), vec!["fn main() {", "    println!(\"Hello, world!\");", "}"]);
-    assert_eq!(hunk.get_replace_block(), vec!["fn main() {", "    println!(\"Hello, mpatch!\");", "}"]);
+    assert_eq!(
+        hunk.get_match_block(),
+        vec!["fn main() {", "    println!(\"Hello, world!\");", "}"]
+    );
+    assert_eq!(
+        hunk.get_replace_block(),
+        vec!["fn main() {", "    println!(\"Hello, mpatch!\");", "}"]
+    );
 }
 
 #[test]
@@ -113,12 +119,54 @@ fn test_parse_multiple_sections_for_same_file_in_one_block() {
     let patches = parse_diffs(diff).unwrap();
     // This is the key assertion: it should be parsed as ONE patch for the file,
     // not two separate patches.
-    assert_eq!(patches.len(), 1, "Should produce a single patch for the same file");
+    assert_eq!(
+        patches.len(),
+        1,
+        "Should produce a single patch for the same file"
+    );
 
     assert_eq!(patches[0].file_path.to_str().unwrap(), "same_file.txt");
     assert_eq!(patches[0].hunks.len(), 2, "Should contain two hunks");
     assert_eq!(patches[0].hunks[0].get_replace_block(), vec!["hunk one"]);
     assert_eq!(patches[0].hunks[1].get_replace_block(), vec!["hunk two"]);
+}
+
+#[test]
+fn test_parse_file_creation_with_dev_null() {
+    let diff = indoc! {r#"
+        ```diff
+        --- /dev/null
+        +++ b/new_from_null.txt
+        @@ -0,0 +1,2 @@
+        +hello
+        +world
+        ```
+    "#};
+    let patches = parse_diffs(diff).unwrap();
+    assert_eq!(patches.len(), 1);
+    let patch = &patches[0];
+    assert_eq!(patch.file_path.to_str().unwrap(), "new_from_null.txt");
+    assert_eq!(patch.hunks.len(), 1);
+    assert_eq!(patch.hunks[0].get_replace_block(), vec!["hello", "world"]);
+    assert!(patch.ends_with_newline);
+}
+
+#[test]
+fn test_parse_file_creation_with_a_dev_null() {
+    let diff = indoc! {r#"
+        ```diff
+        --- a/dev/null
+        +++ b/another_new.txt
+        @@ -0,0 +1 @@
+        +content
+        ```
+    "#};
+    let patches = parse_diffs(diff).unwrap();
+    assert_eq!(patches.len(), 1);
+    let patch = &patches[0];
+    assert_eq!(patch.file_path.to_str().unwrap(), "another_new.txt");
+    assert_eq!(patch.hunks.len(), 1);
+    assert_eq!(patch.hunks[0].get_replace_block(), vec!["content"]);
 }
 
 #[test]
@@ -189,7 +237,8 @@ fn test_apply_multiple_hunks_in_one_file() {
 
     assert!(result);
     let content = fs::read_to_string(file_path).unwrap();
-    let expected_content = "New Header\n\nunchanged line 1\n\nMiddle\n\nunchanged line 2\n\nNew Footer\n";
+    let expected_content =
+        "New Header\n\nunchanged line 1\n\nMiddle\n\nunchanged line 2\n\nNew Footer\n";
     assert_eq!(content, expected_content);
 }
 
@@ -375,7 +424,11 @@ fn test_ambiguous_match_fails() {
     let _ = env_logger::builder().is_test(true).try_init();
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("test.txt");
-    fs::write(&file_path, "header\nchange me\nfooter\nheader\nchange me\nfooter\n").unwrap();
+    fs::write(
+        &file_path,
+        "header\nchange me\nfooter\nheader\nchange me\nfooter\n",
+    )
+    .unwrap();
 
     let diff = indoc! {"
         ```diff
@@ -395,7 +448,10 @@ fn test_ambiguous_match_fails() {
     assert!(!result, "Patch should have failed due to ambiguity");
     // Ensure file is unchanged
     let content = fs::read_to_string(file_path).unwrap();
-    assert_eq!(content, "header\nchange me\nfooter\nheader\nchange me\nfooter\n");
+    assert_eq!(
+        content,
+        "header\nchange me\nfooter\nheader\nchange me\nfooter\n"
+    );
 }
 
 #[test]
@@ -404,7 +460,8 @@ fn test_ambiguous_fuzzy_match_fails() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("test.txt");
     // Two sections that are "equally different" from the patch context
-    let original_content = "section one\ncommon line\nDIFFERENT A\n\nsection two\ncommon line\nDIFFERENT B\n";
+    let original_content =
+        "section one\ncommon line\nDIFFERENT A\n\nsection two\ncommon line\nDIFFERENT B\n";
     fs::write(&file_path, original_content).unwrap();
 
     let diff = indoc! {"
@@ -427,7 +484,6 @@ fn test_ambiguous_fuzzy_match_fails() {
     let content = fs::read_to_string(file_path).unwrap();
     assert_eq!(content, original_content);
 }
-
 
 #[test]
 fn test_dry_run() {
@@ -617,7 +673,10 @@ fn test_parse_empty_diff_block() {
         More text.
     "};
     let patches = parse_diffs(diff).unwrap();
-    assert!(patches.is_empty(), "Parsing an empty diff block should result in no patches");
+    assert!(
+        patches.is_empty(),
+        "Parsing an empty diff block should result in no patches"
+    );
 }
 
 #[test]
@@ -629,7 +688,10 @@ fn test_parse_diff_block_with_header_only() {
         ```
     "};
     let patches = parse_diffs(diff).unwrap();
-    assert!(patches.is_empty(), "Parsing a diff block with only a header should result in no patches");
+    assert!(
+        patches.is_empty(),
+        "Parsing a diff block with only a header should result in no patches"
+    );
 }
 
 #[test]
@@ -655,7 +717,10 @@ fn test_fuzzy_match_fails_below_threshold() {
     // Use a high fuzz factor that will not be met
     let result = apply_patch(patch, dir.path(), false, 0.9).unwrap();
 
-    assert!(!result, "Patch should fail to apply as no hunk meets the fuzzy threshold");
+    assert!(
+        !result,
+        "Patch should fail to apply as no hunk meets the fuzzy threshold"
+    );
     let content = fs::read_to_string(file_path).unwrap();
     assert_eq!(content, original_content, "File should be unchanged");
 }
@@ -686,7 +751,10 @@ fn test_apply_to_readonly_file_fails() {
     let patch = &parse_diffs(diff).unwrap()[0];
     let result = apply_patch(patch, dir.path(), false, 0.0);
 
-    assert!(matches!(result, Err(PatchError::Io { .. })), "Applying patch to a read-only file should result in an I/O error");
+    assert!(
+        matches!(result, Err(PatchError::Io { .. })),
+        "Applying patch to a read-only file should result in an I/O error"
+    );
 
     // Reset permissions to allow cleanup by tempdir
     let mut perms = fs::metadata(&file_path).unwrap().permissions();
@@ -694,7 +762,10 @@ fn test_apply_to_readonly_file_fails() {
     fs::set_permissions(&file_path, perms).unwrap();
 
     let content = fs::read_to_string(file_path).unwrap();
-    assert_eq!(content, original_content, "Read-only file should not be changed");
+    assert_eq!(
+        content, original_content,
+        "Read-only file should not be changed"
+    );
 }
 
 #[test]
@@ -717,7 +788,10 @@ fn test_apply_to_path_that_is_a_directory() {
     let result = apply_patch(patch, dir.path(), false, 0.0);
 
     // Reading the original file content will fail because it's a directory.
-    assert!(matches!(result, Err(PatchError::Io { .. })), "Applying patch to a path that is a directory should fail");
+    assert!(
+        matches!(result, Err(PatchError::Io { .. })),
+        "Applying patch to a path that is a directory should fail"
+    );
 }
 
 #[test]
@@ -738,7 +812,10 @@ fn test_file_creation_with_spaces_in_path() {
     let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
 
     assert!(result, "Patch should be applied successfully");
-    assert!(file_path.exists(), "File with spaces in name should be created");
+    assert!(
+        file_path.exists(),
+        "File with spaces in name should be created"
+    );
     let content = fs::read_to_string(file_path).unwrap();
     assert_eq!(content, "content\n");
 }
@@ -815,7 +892,10 @@ fn test_parse_diff_with_git_headers() {
     let patch = &patches[0];
     assert_eq!(patch.file_path.to_str().unwrap(), "src/main.rs");
     assert_eq!(patch.hunks.len(), 1);
-    assert_eq!(patch.hunks[0].get_replace_block(), vec!["fn main() {", "    println!(\"Hello, mpatch!\");", "}"]);
+    assert_eq!(
+        patch.hunks[0].get_replace_block(),
+        vec!["fn main() {", "    println!(\"Hello, mpatch!\");", "}"]
+    );
 }
 
 #[test]
@@ -842,7 +922,10 @@ fn test_path_normalization_within_project() {
     // The patch is applied from the project root (`dir`).
     let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
 
-    assert!(result, "Patch with '..' that resolves inside the project should apply");
+    assert!(
+        result,
+        "Patch with '..' that resolves inside the project should apply"
+    );
     let content = fs::read_to_string(file_path).unwrap();
     assert_eq!(content, "fn main() { /* changed */ }\n");
 }
@@ -879,21 +962,27 @@ fn test_file_creation_with_unicode_path() {
     let file_name = "文件.txt";
     let file_path = dir.path().join(file_name);
 
-    let diff = format!(indoc! {r#"
+    let diff = format!(
+        indoc! {r#"
         ```diff
         --- a/{}
         +++ b/{}
         @@ -0,0 +1 @@
         +内容
         ```
-    "#}, file_name, file_name);
+    "#},
+        file_name, file_name
+    );
 
     let patch = &parse_diffs(&diff).unwrap()[0];
     assert_eq!(patch.file_path.to_str().unwrap(), file_name);
     let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
 
     assert!(result, "Patch should be applied successfully");
-    assert!(file_path.exists(), "File with unicode name should be created");
+    assert!(
+        file_path.exists(),
+        "File with unicode name should be created"
+    );
     let content = fs::read_to_string(file_path).unwrap();
     assert_eq!(content, "内容\n");
 }

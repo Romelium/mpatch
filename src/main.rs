@@ -24,7 +24,11 @@ struct Args {
     /// Path to the target directory to apply patches.
     target_dir: PathBuf,
 
-    #[arg(short = 'n', long, help = "Show what would be done, but don't modify files.")]
+    #[arg(
+        short = 'n',
+        long,
+        help = "Show what would be done, but don't modify files."
+    )]
     dry_run: bool,
 
     #[arg(
@@ -58,19 +62,20 @@ fn main() -> Result<()> {
 
     Builder::new()
         .filter_level(log_level)
-        .format(|buf, record| {
-            match record.level() {
-                Level::Error => writeln!(buf, "{} {}", "error:".red().bold(), record.args()),
-                Level::Warn => writeln!(buf, "{} {}", "warning:".yellow().bold(), record.args()),
-                Level::Info => writeln!(buf, "{}", record.args()),
-                Level::Debug => writeln!(buf, "{} {}", "debug:".blue().bold(), record.args()),
-                Level::Trace => writeln!(buf, "{} {}", "trace:".cyan().bold(), record.args()),
-            }
+        .format(|buf, record| match record.level() {
+            Level::Error => writeln!(buf, "{} {}", "error:".red().bold(), record.args()),
+            Level::Warn => writeln!(buf, "{} {}", "warning:".yellow().bold(), record.args()),
+            Level::Info => writeln!(buf, "{}", record.args()),
+            Level::Debug => writeln!(buf, "{} {}", "debug:".blue().bold(), record.args()),
+            Level::Trace => writeln!(buf, "{} {}", "trace:".cyan().bold(), record.args()),
         })
         .init();
 
     if !args.target_dir.is_dir() {
-        anyhow::bail!("Target directory '{}' not found or is not a directory.", args.target_dir.display());
+        anyhow::bail!(
+            "Target directory '{}' not found or is not a directory.",
+            args.target_dir.display()
+        );
     }
 
     if !(0.0..=1.0).contains(&args.fuzz_factor) {
@@ -90,7 +95,10 @@ fn main() -> Result<()> {
     println!(); // Vertical spacing
     info!("Found {} patch operation(s) to perform.", all_patches.len());
     if args.fuzz_factor > 0.0 {
-        info!("Fuzzy matching enabled with threshold: {:.2}", args.fuzz_factor);
+        info!(
+            "Fuzzy matching enabled with threshold: {:.2}",
+            args.fuzz_factor
+        );
     } else {
         info!("Fuzzy matching disabled.");
     }
@@ -105,12 +113,18 @@ fn main() -> Result<()> {
             Ok(true) => success_count += 1,
             Ok(false) => {
                 fail_count += 1;
-                error!("--- FAILED to apply patch for: {}", patch.file_path.display());
+                error!(
+                    "--- FAILED to apply patch for: {}",
+                    patch.file_path.display()
+                );
             }
             Err(e) => {
                 // The `fail_count` is not incremented here because the program will
                 // exit immediately with an error, and the summary will not be printed.
-                error!("--- FAILED with hard error while applying patch for: {}", patch.file_path.display());
+                error!(
+                    "--- FAILED with hard error while applying patch for: {}",
+                    patch.file_path.display()
+                );
                 // Propagate hard errors like IO or path traversal
                 return Err(e.into());
             }
