@@ -105,8 +105,8 @@ pub enum PatchError {
     /// unintended files.
     #[error("Path '{0}' resolves outside the target directory. Aborting for security.")]
     PathTraversal(PathBuf),
-    /// The target file for a patch could not be found, and the patch was not
-    /// a file creation patch.
+    /// The target file for a patch could not be found, and the patch did not
+    /// begin with a file creation hunk (a hunk with an empty match block).
     #[error("Target file not found for patching: {0}")]
     TargetNotFound(PathBuf),
     /// A ````diff ` block was found, but it was missing the `--- a/path/to/file`
