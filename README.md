@@ -17,7 +17,7 @@
 
 The primary motivation for `mpatch` comes from working with Large Language Models (LLMs).
 
-When you ask an AI like ChatGPT, Claude, or Copilot to refactor code, it often provides the changes in a convenient markdown format with ` ```diff` blocks. **However, you can't trust that the line numbers are correct.** Sometimes, even the surrounding context lines aren't a perfect, character-for-character match to your current code. A standard `patch` command will often fail in these situations.
+When you ask an AI like ChatGPT, Claude, or Copilot to refactor code, it often provides the changes in a convenient markdown format with ` ```diff` or ` ```patch` blocks. **However, you can't trust that the line numbers are correct.** Sometimes, even the surrounding context lines aren't a perfect, character-for-character match to your current code. A standard `patch` command will often fail in these situations.
 
 **This is the core problem `mpatch` was built to solve.**
 
@@ -31,7 +31,7 @@ This same logic makes it perfect for other common developer scenarios where patc
 
 ## Core Features
 
-*   **Markdown-Aware:** Directly parses unified diffs from within ````diff ` code blocks in any text or markdown file.
+*   **Markdown-Aware:** Directly parses unified diffs from within ````diff ` or ````patch ` code blocks in any text or markdown file.
 *   **Context-Driven:** Ignores `@@ ... @@` line numbers, finding patch locations by matching context lines. This makes it resilient to minor preceding changes in a file.
 *   **Fuzzy Matching:** If an exact context match isn't found, `mpatch` can use a similarity algorithm to find the *best* fuzzy match, allowing patches to apply even if the source has slightly diverged.
 *   **Safe & Secure:** Includes a `--dry-run` mode to preview changes and built-in protection against path traversal attacks.

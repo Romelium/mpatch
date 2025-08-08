@@ -37,6 +37,39 @@ fn test_parse_simple_diff() {
 }
 
 #[test]
+fn test_parse_patch_block_header() {
+    let diff = indoc! {"
+        Some text before.
+        ```patch
+        --- a/src/main.rs
+        +++ b/src/main.rs
+        @@ -1,5 +1,5 @@
+         fn main() {
+        -    println!(\"Hello, world!\");
+        +    println!(\"Hello, mpatch!\");
+         }
+        ```
+        Some text after.
+    "};
+    let patches = parse_diffs(diff).unwrap();
+    assert_eq!(patches.len(), 1);
+    let patch = &patches[0];
+    assert_eq!(patch.file_path.to_str().unwrap(), "src/main.rs");
+    assert_eq!(patch.hunks.len(), 1);
+    assert!(patch.ends_with_newline);
+    let hunk = &patch.hunks[0];
+    assert_eq!(hunk.lines.len(), 4);
+    assert_eq!(
+        hunk.get_match_block(),
+        vec!["fn main() {", "    println!(\"Hello, world!\");", "}"]
+    );
+    assert_eq!(
+        hunk.get_replace_block(),
+        vec!["fn main() {", "    println!(\"Hello, mpatch!\");", "}"]
+    );
+}
+
+#[test]
 fn test_parse_multiple_diff_blocks() {
     let diff = indoc! {r#"
         First change:

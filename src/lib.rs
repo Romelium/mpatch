@@ -11,7 +11,7 @@
 //!
 //! ## Core Features
 //!
-//! - **Markdown-Aware:** Directly parses unified diffs from within ````diff ` code blocks.
+//! - **Markdown-Aware:** Directly parses unified diffs from within ````diff ` or ````patch ` code blocks.
 //! - **Context-Driven:** Ignores `@@ ... @@` line numbers, finding patch locations by
 //!   matching context lines.
 //! - **Fuzzy Matching:** If an exact context match isn't found, `mpatch` uses a
@@ -264,7 +264,10 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, PatchError> {
 
     // The `any` call consumes the iterator until it finds the start of a diff block.
     // The loop continues searching for more blocks from where the last one ended.
-    while lines.by_ref().any(|l| l.trim().starts_with("```diff")) {
+    while lines.by_ref().any(|l| {
+        let trimmed = l.trim();
+        trimmed.starts_with("```diff") || trimmed.starts_with("```patch")
+    }) {
         // This temporary vec will hold all patch sections found in this block,
         // even if they are for the same file. They will be merged later.
         let mut unmerged_block_patches: Vec<Patch> = Vec::new();

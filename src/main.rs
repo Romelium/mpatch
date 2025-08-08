@@ -15,7 +15,7 @@ const DEFAULT_FUZZ_THRESHOLD: f32 = 0.7;
     author,
     version,
     about = "Apply diff hunks from a file to a target directory based on context, ignoring line numbers.",
-    long_about = "Uses fuzzy matching if exact context fails. Parses unified diffs inside ```diff markdown blocks."
+    long_about = "Uses fuzzy matching if exact context fails. Parses unified diffs inside ```diff or ```patch markdown blocks."
 )]
 struct Args {
     /// Path to the input file containing ```diff blocks.
