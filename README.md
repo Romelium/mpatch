@@ -42,7 +42,21 @@ This same logic makes it perfect for other common developer scenarios where patc
 
 ## Installation
 
-### Method 1: From GitHub Releases (Easiest)
+### Method 1: Using `cargo-binstall` (Recommended)
+
+For users with the [Rust toolchain](https://rustup.rs/), `cargo-binstall` is the fastest way to install `mpatch`. It downloads pre-compiled binaries, avoiding a local build.
+
+First, install `cargo-binstall` if you don't have it:
+```bash
+cargo install cargo-binstall
+```
+
+Then, install `mpatch`:
+```bash
+cargo binstall mpatch
+```
+
+### Method 2: From GitHub Releases (Manual)
 
 For users who don't need to build from source, pre-compiled binaries are the simplest option.
 
@@ -51,15 +65,15 @@ For users who don't need to build from source, pre-compiled binaries are the sim
 3.  Extract the `mpatch` executable.
 4.  Move the executable to a directory in your system's `PATH` (e.g., `/usr/local/bin` on Linux/macOS, or `~/.cargo/bin`).
 
-### Method 2: From Crates.io (Requires Rust)
+### Method 3: From Crates.io (Build from Source)
 
-If you have the [Rust toolchain](https://rustup.rs/) installed, you can install `mpatch` directly from the official package registry:
+If you have the [Rust toolchain](https://rustup.rs/) installed, you can compile and install `mpatch` from the official package registry:
 
 ```bash
 cargo install mpatch
 ```
 
-### Method 3: From Source (for Developers)
+### Method 4: From Source (for Developers)
 
 To build the very latest development version or to contribute to the project:
 
