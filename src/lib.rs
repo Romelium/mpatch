@@ -308,16 +308,19 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, PatchError> {
                 if path_part == "/dev/null" || path_part == "a/dev/null" {
                     // This is a file creation patch. The path will be in the `+++` line.
                     // `current_file` remains `None` for now.
-                } else if let Some(path_str) = path_part.strip_prefix("a/") {
+                } else {
+                    // The path could be `a/path/to/file` or just `path/to/file`.
+                    let path_str = path_part.strip_prefix("a/").unwrap_or(path_part);
                     current_file = Some(PathBuf::from(path_str.trim()));
                 }
-            } else if line.starts_with("+++ ") {
+            } else if let Some(stripped_line) = line.strip_prefix("+++ ") {
                 // If `current_file` is `None`, it means we saw `--- /dev/null` (or an unrecognised ---)
                 // and are expecting the file path from this `+++` line.
                 if current_file.is_none() {
-                    if let Some(path_str) = line.strip_prefix("+++ b/") {
-                        current_file = Some(PathBuf::from(path_str.trim()));
-                    }
+                    let path_part = stripped_line.trim();
+                    // The path could be `b/path/to/file` or just `path/to/file`.
+                    let path_str = path_part.strip_prefix("b/").unwrap_or(path_part);
+                    current_file = Some(PathBuf::from(path_str.trim()));
                 }
                 // Otherwise, we already have the path from the `---` line, so we ignore this `+++` line.
             } else if line.starts_with("@@") {

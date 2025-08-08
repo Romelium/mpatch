@@ -170,6 +170,43 @@ fn test_parse_file_creation_with_a_dev_null() {
 }
 
 #[test]
+fn test_parse_diff_without_ab_prefix() {
+    let diff = indoc! {r#"
+        ```diff
+        --- path/to/file.txt
+        +++ path/to/file.txt
+        @@ -1 +1 @@
+        -old
+        +new
+        ```
+    "#};
+    let patches = parse_diffs(diff).unwrap();
+    assert_eq!(patches.len(), 1);
+    let patch = &patches[0];
+    assert_eq!(patch.file_path.to_str().unwrap(), "path/to/file.txt");
+    assert_eq!(patch.hunks.len(), 1);
+    assert_eq!(patch.hunks[0].get_replace_block(), vec!["new"]);
+}
+
+#[test]
+fn test_parse_file_creation_without_b_prefix() {
+    let diff = indoc! {r#"
+        ```diff
+        --- /dev/null
+        +++ new_file.txt
+        @@ -0,0 +1 @@
+        +content
+        ```
+    "#};
+    let patches = parse_diffs(diff).unwrap();
+    assert_eq!(patches.len(), 1);
+    let patch = &patches[0];
+    assert_eq!(patch.file_path.to_str().unwrap(), "new_file.txt");
+    assert_eq!(patch.hunks.len(), 1);
+    assert_eq!(patch.hunks[0].get_replace_block(), vec!["content"]);
+}
+
+#[test]
 fn test_parse_error_on_missing_file_header() {
     let diff = indoc! {"
         ```diff
