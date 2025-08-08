@@ -1,6 +1,6 @@
 [package]
 name = "mpatch"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 description = "A smart, context-aware patch tool that applies diffs using fuzzy matching, ideal for AI-generated code."
 authors = ["Romelium author@romelium.com>"]
