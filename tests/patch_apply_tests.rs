@@ -869,8 +869,11 @@ fn test_apply_to_readonly_file_fails() {
     let original_content = "don't change me\n";
     fs::write(&file_path, original_content).unwrap();
 
+    // Get original permissions to restore them later
+    let original_perms = fs::metadata(&file_path).unwrap().permissions();
+
     // Set file to read-only
-    let mut perms = fs::metadata(&file_path).unwrap().permissions();
+    let mut perms = original_perms.clone();
     perms.set_readonly(true);
     fs::set_permissions(&file_path, perms).unwrap();
 
@@ -892,9 +895,7 @@ fn test_apply_to_readonly_file_fails() {
     );
 
     // Reset permissions to allow cleanup by tempdir
-    let mut perms = fs::metadata(&file_path).unwrap().permissions();
-    perms.set_readonly(false);
-    fs::set_permissions(&file_path, perms).unwrap();
+    fs::set_permissions(&file_path, original_perms).unwrap();
 
     let content = fs::read_to_string(file_path).unwrap();
     assert_eq!(
