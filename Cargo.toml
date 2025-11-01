@@ -12,17 +12,17 @@ readme = "README.md"
 
 
 [dependencies]
-anyhow = "1.0.98"
-clap = { version = "4.5.43", features = ["derive"] }
+anyhow = "1.0.100"
+clap = { version = "4.5.51", features = ["derive"] }
 colored = "2.2.0"
 env_logger = "0.11.8"
-log = "0.4.27"
+log = "0.4.28"
 similar = "2.7.0"
 thiserror = "1.0.69"
 
 [dev-dependencies]
-indoc = "2.0.6"
-tempfile = "3.20.0"
+indoc = "2.0.7"
+tempfile = "3.23.0"
 
 [[bin]]
 name = "mpatch"
