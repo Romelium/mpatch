@@ -29,10 +29,10 @@ jobs:
           fetch-depth: 0
 
       - name: Get changed files
-        id: changed_files
+        id: changed_files # The ID for this step is 'changed_files'
         uses: tj-actions/changed-files@ed68ef82c095e0d48ec87eccea555d944a631a4c # v46
         with:
-          # Define file sets. Output will be like steps.changed-files-yaml.outputs.code_any_changed == 'true'
+          # Define file sets. Output will be like steps.changed-files.outputs.code_any_changed == 'true'
           files_yaml: |
             rust_code:
               - src/**/*.rs
@@ -64,25 +64,29 @@ jobs:
 
       - name: Check Formatting (cargo fmt)
         # Only run if Rust code or manifest files changed
-        if: steps.changed-files-yaml.outputs.code_any_changed == 'true'
+        if: steps.changed_files.outputs.code_any_changed == 'true'
         run: cargo fmt --all -- --check
 
       - name: Linting (cargo clippy)
-        if: steps.changed-files-yaml.outputs.code_any_changed == 'true'
+        if: steps.changed_files.outputs.code_any_changed == 'true'
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Run Tests (cargo test)
-        if: steps.changed-files-yaml.outputs.code_any_changed == 'true'
+        if: steps.changed_files.outputs.code_any_changed == 'true'
         run: cargo test --all-targets --verbose
 
+      - name: Run ignored (network-dependent) tests
+        if: steps.changed_files.outputs.code_any_changed == 'true'
+        run: cargo test --all-targets -- --ignored
+
       - name: Build (Debug)
-        if: steps.changed-files-yaml.outputs.code_any_changed == 'true'
+        if: steps.changed_files.outputs.code_any_changed == 'true'
         run: cargo build --verbose
 
       - name: Build (Release)
-        if: steps.changed-files-yaml.outputs.code_any_changed == 'true'
+        if: steps.changed_files.outputs.code_any_changed == 'true'
         run: cargo build --release --verbose
 
       - name: Indicate checks skipped (if applicable)
-        if: steps.changed_files.outputs.any_code_changed == 'false'
+        if: steps.changed_files.outputs.code_any_changed == 'false'
         run: echo "Rust checks skipped as no relevant code changes were detected."
