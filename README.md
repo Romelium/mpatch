@@ -33,7 +33,7 @@ This same logic makes it perfect for other common developer scenarios where patc
 
 *   **Markdown-Aware:** Directly parses unified diffs from within ````diff ` or ````patch ` code blocks in any text or markdown file.
 *   **Context-Driven:** Ignores `@@ ... @@` line numbers, finding patch locations by matching context lines. This makes it resilient to minor preceding changes in a file.
-*   **Fuzzy Matching:** If an exact context match isn't found, `mpatch` can use a similarity algorithm to find the *best* fuzzy match, allowing patches to apply even if the source has slightly diverged.
+*   **Fuzzy Matching:** If an exact context match isn't found, `mpatch` uses a sophisticated similarity algorithm to find the *best* fuzzy match. This logic can handle cases where lines have been added or removed near the patch location, allowing patches to apply even when the surrounding context has moderately diverged.
 *   **Safe & Secure:** Includes a `--dry-run` mode to preview changes and built-in protection against path traversal attacks.
 *   **Flexible:** Handles multiple files and multiple hunks in a single pass. It correctly processes file creations, modifications, and deletions (by removing all content from a file).
 *   **Informative Logging:** Adjustable verbosity levels (`-v`, `-vv`) to see exactly what `mpatch` is doing.
@@ -150,7 +150,31 @@ Failed operations:     0
 
 *   `-n`, `--dry-run`: Show what changes would be made without modifying any files.
 *   `-f`, `--fuzz-factor <FACTOR>`: Set the similarity threshold for fuzzy matching, from `0.0` (disabled) to `1.0` (exact match). Default is `0.7`.
-*   `-v`, `--verbose`: Increase logging output. Use `-v` for general info, `-vv` for debug details, and `-vvv` for trace-level inspection.
+*   `-v`, `--verbose`: Increase logging output. Use `-v` for info, `-vv` for debug, `-vvv` for trace, and `-vvvv` to generate a comprehensive debug report file.
+
+---
+
+## Troubleshooting
+
+If a patch doesn't apply as expected, the best first step is to increase the logging verbosity to understand what `mpatch` is doing.
+
+*   **Run with `-v`:** This shows which files and hunks are being processed.
+*   **Run with `-vv`:** This provides detailed debug information, including why a hunk might have failed to apply (e.g., "ambiguous match", "context not found").
+*   **Run with `-vvv`:** This enables trace-level logging, showing the fuzzy matching scores and every step of the decision-making process.
+
+### Generating a Debug Report
+
+For complex issues, the easiest way to gather all necessary information for a bug report is to use the `-vvvv` flag.
+
+```bash
+mpatch -vvvv changes.md my-project/
+```
+
+This command will:
+1.  Print full trace logs to your terminal.
+2.  Create a file named `mpatch-debug-report-[timestamp].md` in your current directory.
+
+This single markdown file contains everything needed to reproduce the issue: the command you ran, system information, the full input patch file, the original content of all target files, and the complete trace log.
 
 ---
 
@@ -160,4 +184,29 @@ This project is licensed under [MIT LICENSE](LICENSE)
 
 ## Contributing
 
-Contributions are welcome! Feel free to open an issue or submit a pull request.
+Contributions are welcome! Whether it's a bug report, a feature request, or a pull request, your input is valued.
+
+### Reporting Issues
+
+When opening an issue, the best way to help us is to provide a debug report.
+
+1.  Run your command again with the `-vvvv` flag.
+    ```bash
+    mpatch -vvvv [YOUR_ARGS]
+    ```
+2.  This will create a `mpatch-debug-report-[timestamp].md` file.
+3.  Create a new issue on GitHub.
+4.  Drag and drop the generated `.md` file into the issue description to attach it.
+5.  Add any additional comments about what you expected to happen versus what actually happened.
+
+This self-contained report gives us all the context we need to investigate the problem efficiently.
+
+### Pull Requests
+
+1.  Fork the repository.
+2.  Create a new branch for your feature or bug fix.
+3.  Make your changes.
+4.  Add tests for your changes in the `tests/` directory.
+5.  Ensure all tests pass by running `cargo test`.
+6.  Format your code with `cargo fmt`.
+7.  Submit a pull request with a clear description of your changes.

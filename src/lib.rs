@@ -273,16 +273,13 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, PatchError> {
     let mut all_patches = Vec::new();
     let mut lines = content.lines().enumerate().peekable();
 
-    // The `any` call consumes the iterator until it finds the start of a diff block.
+    // The `find` call consumes the iterator until it finds the start of a diff block.
     // The loop continues searching for more blocks from where the last one ended.
-    loop {
-        // Find the start of the next diff block.
-        let diff_block_start_line = match lines.by_ref().find(|(_, l)| {
-            l.starts_with("```diff") || l.starts_with("```patch")
-        }) {
-            Some((line_index, _)) => line_index + 1, // Convert 0-based index to 1-based line number
-            None => break,                          // No more diff blocks found, exit the loop.
-        };
+    while let Some((line_index, _)) = lines
+        .by_ref()
+        .find(|(_, l)| l.starts_with("```diff") || l.starts_with("```patch"))
+    {
+        let diff_block_start_line = line_index + 1; // Convert 0-based index to 1-based line number
 
         // This temporary vec will hold all patch sections found in this block,
         // even if they are for the same file. They will be merged later.
@@ -441,12 +438,14 @@ pub fn apply_patch(
     info!("Applying patch to: {}", patch.file_path.display());
 
     // --- Path Safety Check ---
-    trace!("  Checking path safety for '{}'", target_file_path.display());
+    trace!(
+        "  Checking path safety for relative path '{}'",
+        patch.file_path.display()
+    );
     let base_path = fs::canonicalize(target_dir).map_err(|e| PatchError::Io {
         path: target_dir.to_path_buf(),
         source: e,
     })?;
-    trace!("    Base path canonicalized to '{}'", base_path.display());
     let final_path = if target_file_path.exists() {
         fs::canonicalize(&target_file_path).map_err(|e| PatchError::Io {
             path: target_file_path.clone(),
@@ -466,7 +465,6 @@ pub fn apply_patch(
             })?
             .join(target_file_path.file_name().unwrap_or_default())
     };
-    trace!("    Final path canonicalized to '{}'", final_path.display());
 
     if !final_path.starts_with(&base_path) {
         return Err(PatchError::PathTraversal(patch.file_path.clone()));
@@ -485,7 +483,7 @@ pub fn apply_patch(
     }
 
     let (original_content, mut current_lines) = if target_file_path.is_file() {
-        trace!("  Reading target file '{}'", target_file_path.display());
+        trace!("  Reading target file '{}'", patch.file_path.display());
         let content = fs::read_to_string(&target_file_path).map_err(|e| PatchError::Io {
             path: target_file_path.clone(),
             source: e,
@@ -538,7 +536,11 @@ pub fn apply_patch(
 
         match find_hunk_location(&match_block, &current_lines, fuzz_factor, hunk.start_line) {
             Some((start_index, match_len)) => {
-                trace!("    Found location: start_index={}, match_len={}", start_index, match_len);
+                trace!(
+                    "    Found location: start_index={}, match_len={}",
+                    start_index,
+                    match_len
+                );
                 // Special case: end-of-file fuzzy match where the file is shorter than the context.
                 // In this scenario, we treat it as a command to replace the entire file's content
                 // with the hunk's replacement block.
@@ -548,9 +550,7 @@ pub fn apply_patch(
                     && current_lines.len() < match_block.len();
 
                 if is_short_file_eof_match {
-                    debug!(
-                        "    Applying as full-file replacement due to end-of-file fuzzy match."
-                    );
+                    debug!("    Applying as full-file replacement due to end-of-file fuzzy match.");
                     current_lines.clear();
                     current_lines.extend(replace_block.into_iter().map(String::from));
                 } else {
@@ -584,7 +584,7 @@ pub fn apply_patch(
     if dry_run {
         info!(
             "  DRY RUN: Would write changes to '{}'",
-            target_file_path.display()
+            patch.file_path.display()
         );
         let diff = unified_diff(
             similar::Algorithm::default(),
@@ -613,13 +613,10 @@ pub fn apply_patch(
         if all_hunks_applied_cleanly {
             info!(
                 "  Successfully wrote changes to '{}'",
-                target_file_path.display()
+                patch.file_path.display()
             );
         } else {
-            warn!(
-                "  Wrote partial changes to '{}'",
-                target_file_path.display()
-            );
+            warn!("  Wrote partial changes to '{}'", patch.file_path.display());
         }
     }
 
@@ -734,7 +731,7 @@ fn find_hunk_location(
         let len = match_block.len();
         // Define how far to search for different-sized windows.
         // Proportional to hunk size, but with reasonable bounds.
-        let fuzz_distance = (len / 4).max(3).min(8);
+        let fuzz_distance = (len / 4).clamp(3, 8);
         let min_len = len.saturating_sub(fuzz_distance).max(1);
         let max_len = len.saturating_add(fuzz_distance);
         trace!(
@@ -749,7 +746,8 @@ fn find_hunk_location(
             if window_len > target_lines.len() {
                 trace!(
                     "      Skipping window_len {} (larger than target_lines {}).",
-                    window_len, target_lines.len()
+                    window_len,
+                    target_lines.len()
                 );
                 continue;
             }
@@ -850,51 +848,51 @@ fn find_hunk_location(
                 );
                 return Some((start, len));
             }
-                // AMBIGUOUS FUZZY MATCH - TRY TO TIE-BREAK
-                if let Some(line) = start_line {
-                    trace!(
+            // AMBIGUOUS FUZZY MATCH - TRY TO TIE-BREAK
+            if let Some(line) = start_line {
+                trace!(
                             "    Ambiguous fuzzy match found at {:?}. Attempting to tie-break using line number hint: {}",
                             potential_matches,
                             line
                         );
-                    let mut closest_match: Option<(usize, usize)> = None;
-                    let mut min_distance = usize::MAX;
-                    let mut is_tie = false;
+                let mut closest_match: Option<(usize, usize)> = None;
+                let mut min_distance = usize::MAX;
+                let mut is_tie = false;
 
-                    for &(match_index, match_len) in &potential_matches {
-                        // Hunk line numbers are 1-based, indices are 0-based.
-                        trace!(
-                            "      Candidate {:?}: distance from line hint is {}",
-                            (match_index, match_len),
-                            (match_index + 1).abs_diff(line)
-                        );
-                        let distance = (match_index + 1).abs_diff(line);
-                        if distance < min_distance {
-                            min_distance = distance;
-                            closest_match = Some((match_index, match_len));
-                            is_tie = false;
-                        } else if distance == min_distance {
-                            is_tie = true;
-                        }
+                for &(match_index, match_len) in &potential_matches {
+                    // Hunk line numbers are 1-based, indices are 0-based.
+                    trace!(
+                        "      Candidate {:?}: distance from line hint is {}",
+                        (match_index, match_len),
+                        (match_index + 1).abs_diff(line)
+                    );
+                    let distance = (match_index + 1).abs_diff(line);
+                    if distance < min_distance {
+                        min_distance = distance;
+                        closest_match = Some((match_index, match_len));
+                        is_tie = false;
+                    } else if distance == min_distance {
+                        is_tie = true;
                     }
+                }
 
-                    if !is_tie {
-                        if let Some((start, len)) = closest_match {
-                            debug!(
+                if !is_tie {
+                    if let Some((start, len)) = closest_match {
+                        debug!(
                                     "    Tie-broke ambiguous fuzzy match using line number. Best match is at index {} (length {}, similarity: {:.3}).",
                                     start, len, best_ratio_at_best_score
                                 );
-                            return Some((start, len));
-                        }
-                    } else {
-                        trace!("    Tie-breaking failed: multiple fuzzy matches are equidistant from the line number hint.");
+                        return Some((start, len));
                     }
+                } else {
+                    trace!("    Tie-breaking failed: multiple fuzzy matches are equidistant from the line number hint.");
                 }
+            }
             warn!("    Ambiguous fuzzy match: Multiple locations found with same top score ({:.3}): {:?}. Skipping.", best_ratio_at_best_score, potential_matches);
             debug!("    Failed to apply hunk: Ambiguous fuzzy match could not be resolved.");
             return None;
         } else if best_ratio_at_best_score >= 0.0 {
-                // Did not meet threshold
+            // Did not meet threshold
             let (start, len) = potential_matches[0];
             trace!(
                 "    Fuzzy match: Best location (index {}, len {}, similarity {:.3}) did not meet threshold of {:.2}.",
@@ -912,10 +910,7 @@ fn find_hunk_location(
     // This handles cases where the entire file is a good fuzzy match for the
     // start of the hunk context, which can happen if the file is missing
     // context lines that the patch expects to be there at the end.
-    if !target_lines.is_empty()
-        && target_lines.len() < match_block.len()
-        && fuzz_threshold > 0.0
-    {
+    if !target_lines.is_empty() && target_lines.len() < match_block.len() && fuzz_threshold > 0.0 {
         trace!("    Target file is shorter than hunk. Attempting end-of-file fuzzy match...");
         let target_stripped: Vec<_> = target_lines.iter().map(|s| s.trim_end()).collect();
         let match_stripped: Vec<_> = match_block.iter().map(|s| s.trim_end()).collect();
@@ -939,7 +934,8 @@ fn find_hunk_location(
         } else {
             trace!(
                 "    End-of-file fuzzy match ratio {:.3} did not meet effective threshold {:.3}.",
-                ratio, effective_threshold
+                ratio,
+                effective_threshold
             );
         }
     }
@@ -957,7 +953,10 @@ fn tie_break_with_line_number(
     match_type: &str,
 ) -> Option<usize> {
     if matches.is_empty() {
-        trace!("    tie_break: No matches to evaluate for '{}' match.", match_type);
+        trace!(
+            "    tie_break: No matches to evaluate for '{}' match.",
+            match_type
+        );
         return None;
     }
     if matches.len() == 1 {
@@ -1006,7 +1005,9 @@ fn tie_break_with_line_number(
             );
             return Some(closest_index);
         }
-        trace!("    Tie-breaking failed: multiple matches are equidistant from the line number hint.");
+        trace!(
+            "    Tie-breaking failed: multiple matches are equidistant from the line number hint."
+        );
     } else {
         trace!(
             "    tie_break: Ambiguous '{}' match, but no line number hint provided.",

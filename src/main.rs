@@ -1,98 +1,69 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use colored::Colorize;
 use env_logger::Builder;
-use log::{error, info, Level, LevelFilter};
-use mpatch::{apply_patch, parse_diffs};
-use std::fs;
-use std::io::Write;
+use log::{error, info, warn, Level, LevelFilter};
+use mpatch::apply_patch;
+use mpatch::{parse_diffs, Patch};
+use std::fs::{self, File};
+use std::io::{self, Write};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_FUZZ_THRESHOLD: f32 = 0.7;
 
-#[derive(Parser, Debug)]
-#[command(
-    author,
-    version,
-    about = "Apply diff hunks from a file to a target directory based on context, ignoring line numbers.",
-    long_about = "Uses fuzzy matching if exact context fails. Parses unified diffs inside ```diff or ```patch markdown blocks."
-)]
-struct Args {
-    /// Path to the input file containing ```diff blocks.
-    input_file: PathBuf,
+// --- Main Application Entry Point ---
 
-    /// Path to the target directory to apply patches.
-    target_dir: PathBuf,
-
-    #[arg(
-        short = 'n',
-        long,
-        help = "Show what would be done, but don't modify files."
-    )]
-    dry_run: bool,
-
-    #[arg(
-        short = 'f',
-        long,
-        default_value_t = DEFAULT_FUZZ_THRESHOLD,
-        help = "Similarity threshold for fuzzy matching (0.0 to 1.0). Higher is stricter. 0 disables fuzzy matching."
-    )]
-    fuzz_factor: f32,
-
-    /// Increase logging verbosity. Can be used multiple times (e.g., -v, -vv).
-    #[arg(
-        short,
-        long,
-        action = clap::ArgAction::Count,
-        long_help = "Increase logging verbosity.\n-v for info, -vv for debug, -vvv for trace.\nBy default, only warnings and errors are shown."
-    )]
-    verbose: u8,
-}
-
-fn main() -> Result<()> {
+fn main() {
+    // 1. Parse arguments.
     let args = Args::parse();
 
-    // --- Logger Initialization ---
-    let log_level = match args.verbose {
-        0 => LevelFilter::Warn,
-        1 => LevelFilter::Info,
-        2 => LevelFilter::Debug,
-        _ => LevelFilter::Trace,
-    };
+    // 2. Call the main logic function.
+    //    All complex logic and error handling is inside `run`.
+    if let Err(e) = run(args) {
+        // 3. If `run` returns an error, it has already been logged by the time it gets here
+        //    (unless the logger itself failed). We just need to print a user-facing
+        //    message and set the exit code.
+        //    Using {:?} ensures the full error chain from `anyhow` is printed.
+        eprintln!("{} {:?}", "error:".red().bold(), e);
+        std::process::exit(1);
+    }
+}
 
-    Builder::new()
-        .filter_level(log_level)
-        .format(|buf, record| match record.level() {
-            Level::Error => writeln!(buf, "{} {}", "error:".red().bold(), record.args()),
-            Level::Warn => writeln!(buf, "{} {}", "warning:".yellow().bold(), record.args()),
-            Level::Info => writeln!(buf, "{}", record.args()),
-            Level::Debug => writeln!(buf, "{} {}", "debug:".blue().bold(), record.args()),
-            Level::Trace => writeln!(buf, "{} {}", "trace:".cyan().bold(), record.args()),
-        })
-        .init();
-
+/// Contains the primary logic of the application.
+fn run(args: Args) -> Result<()> {
+    // --- Argument Validation ---
     if !args.target_dir.is_dir() {
-        anyhow::bail!(
+        return Err(anyhow!(
             "Target directory '{}' not found or is not a directory.",
             args.target_dir.display()
-        );
+        ));
     }
-
     if !(0.0..=1.0).contains(&args.fuzz_factor) {
-        anyhow::bail!("Fuzz factor must be between 0.0 and 1.0.");
+        return Err(anyhow!("Fuzz factor must be between 0.0 and 1.0."));
     }
 
+    // --- File Parsing ---
     let content = fs::read_to_string(&args.input_file)
         .with_context(|| format!("Failed to read input file '{}'", args.input_file.display()))?;
-
     let all_patches = parse_diffs(&content)?;
 
+    // --- Setup Logging and Reporting ---
+    // This sets up the logger and, if needed, creates a report file.
+    // The `_finalizer` is a "drop guard". When it goes out of scope at the end of
+    // this function (no matter how it exits), its `drop` method is called,
+    // which guarantees the report file is correctly finalized.
+    let report_arc = setup_logging_and_reporting(&args, &content, &all_patches)?;
+    let _finalizer = ReportFinalizer::new(report_arc);
+
+    // --- Core Patching Logic ---
     if all_patches.is_empty() {
-        println!("No valid diff blocks found or processed in the input file.");
+        info!("No valid diff blocks found or processed in the input file.");
         return Ok(());
     }
 
-    println!(); // Vertical spacing
+    info!(""); // Vertical spacing for readability
     info!("Found {} patch operation(s) to perform.", all_patches.len());
     if args.fuzz_factor > 0.0 {
         info!(
@@ -107,7 +78,7 @@ fn main() -> Result<()> {
     let mut fail_count = 0;
 
     for (i, patch) in all_patches.iter().enumerate() {
-        println!(); // Vertical spacing
+        info!(""); // Vertical spacing
         info!(">>> Operation {}/{}", i + 1, all_patches.len());
         match apply_patch(patch, &args.target_dir, args.dry_run, args.fuzz_factor) {
             Ok(true) => success_count += 1,
@@ -119,31 +90,233 @@ fn main() -> Result<()> {
                 );
             }
             Err(e) => {
-                // The `fail_count` is not incremented here because the program will
-                // exit immediately with an error, and the summary will not be printed.
-                error!(
-                    "--- FAILED with hard error while applying patch for: {}",
-                    patch.file_path.display()
-                );
-                // Propagate hard errors like IO or path traversal
-                return Err(e.into());
+                // A hard error occurred during patching. Convert to anyhow::Error and add context.
+                return Err(anyhow::Error::from(e)).with_context(|| {
+                    format!(
+                        "A fatal error occurred while applying patch for: {}",
+                        patch.file_path.display()
+                    )
+                });
             }
         }
     }
 
-    println!("\n--- Summary ---");
-    println!("Successful operations: {}", success_count);
-    println!("Failed operations:     {}", fail_count);
-    if fail_count > 0 {
-        eprintln!("Review the log for errors. Some files may be in a partially patched state if a later hunk in the same patch failed.");
-    }
+    // --- Final Summary ---
+    info!("\n--- Summary ---");
+    info!("Successful operations: {}", success_count);
+    info!("Failed operations:     {}", fail_count);
     if args.dry_run {
-        println!("DRY RUN completed. No files were modified.");
+        info!("DRY RUN completed. No files were modified.");
     }
 
     if fail_count > 0 {
-        std::process::exit(1);
+        warn!("Review the log for errors. Some files may be in a partially patched state.");
+        return Err(anyhow!(
+            "Completed with {} failed patch operations.",
+            fail_count
+        ));
     }
 
     Ok(())
+}
+
+// --- Helper Structs and Functions ---
+
+#[derive(Parser, Debug)]
+#[command(
+    author,
+    version,
+    about = "Apply diff hunks from a file to a target directory based on context, ignoring line numbers.",
+    long_about = "Uses fuzzy matching if exact context fails. Parses unified diffs inside ```diff or ```patch markdown blocks."
+)]
+struct Args {
+    /// Path to the input file containing ```diff blocks.
+    input_file: PathBuf,
+    /// Path to the target directory to apply patches.
+    target_dir: PathBuf,
+    #[arg(
+        short = 'n',
+        long,
+        help = "Show what would be done, but don't modify files."
+    )]
+    dry_run: bool,
+    #[arg(short = 'f', long, default_value_t = DEFAULT_FUZZ_THRESHOLD, help = "Similarity threshold for fuzzy matching (0.0 to 1.0). Higher is stricter. 0 disables fuzzy matching.")]
+    fuzz_factor: f32,
+    /// Increase logging verbosity. Can be used multiple times (e.g., -v, -vv).
+    #[arg(short, long, action = clap::ArgAction::Count, long_help = "Increase logging verbosity.\n-v for info, -vv for debug, -vvv for trace.\n-vvvv to generate a comprehensive debug report file.")]
+    verbose: u8,
+}
+
+/// A "Tee" writer that sends output to both stderr and a shared file.
+struct TeeWriter {
+    file: Arc<Mutex<File>>,
+}
+
+impl Write for TeeWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        io::stderr().write_all(buf)?;
+        self.file.lock().unwrap().write_all(buf)?;
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        io::stderr().flush()?;
+        self.file.lock().unwrap().flush()?;
+        Ok(())
+    }
+}
+
+/// A "Drop Guard" to ensure the report file is always finalized correctly.
+struct ReportFinalizer {
+    file_arc: Option<Arc<Mutex<File>>>,
+}
+impl ReportFinalizer {
+    fn new(file_arc: Option<Arc<Mutex<File>>>) -> Self {
+        Self { file_arc }
+    }
+}
+impl Drop for ReportFinalizer {
+    fn drop(&mut self) {
+        if let Some(arc) = &self.file_arc {
+            log::logger().flush();
+            let mut file = arc.lock().unwrap();
+            // Use `let _ = ...` to ignore potential write errors during cleanup.
+            let _ = writeln!(file, "````");
+        }
+    }
+}
+
+/// Sets up the global logger, creating a report file if verbosity is >= 4.
+fn setup_logging_and_reporting(
+    args: &Args,
+    patch_content: &str,
+    patches: &[Patch],
+) -> Result<Option<Arc<Mutex<File>>>> {
+    let mut builder = Builder::new();
+    let report_arc = if args.verbose >= 4 {
+        // --- Create and Write Report Header ---
+        let arc = create_report_file(args, patch_content, patches)?;
+        // --- Configure Logger to Tee to the Report File ---
+        builder
+            .filter_level(LevelFilter::Trace)
+            .target(env_logger::Target::Pipe(Box::new(TeeWriter {
+                file: arc.clone(),
+            })));
+        Some(arc)
+    } else {
+        // --- Configure Standard Logger ---
+        let log_level = match args.verbose {
+            0 => LevelFilter::Warn,
+            1 => LevelFilter::Info,
+            2 => LevelFilter::Debug,
+            _ => LevelFilter::Trace,
+        };
+        builder.filter_level(log_level);
+        None
+    };
+
+    builder
+        .format(|buf, record| match record.level() {
+            Level::Error => writeln!(buf, "{} {}", "error:".red().bold(), record.args()),
+            Level::Warn => writeln!(buf, "{} {}", "warning:".yellow().bold(), record.args()),
+            Level::Info => writeln!(buf, "{}", record.args()),
+            Level::Debug => writeln!(buf, "{} {}", "debug:".blue().bold(), record.args()),
+            Level::Trace => writeln!(buf, "{} {}", "trace:".cyan().bold(), record.args()),
+        })
+        .init();
+
+    Ok(report_arc)
+}
+
+/// Creates the report file, writes the header, and returns a shared pointer to it.
+fn create_report_file(
+    args: &Args,
+    patch_content: &str,
+    patches: &[Patch],
+) -> Result<Arc<Mutex<File>>> {
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let report_filename = format!("mpatch-debug-report-{}.md", timestamp);
+    let mut file = File::create(&report_filename)
+        .with_context(|| format!("Failed to create debug report file '{}'", report_filename))?;
+
+    info!(
+        "Debug report mode enabled. Generating comprehensive report to '{}'...",
+        report_filename
+    );
+
+    // --- Write Metadata ---
+    writeln!(file, "# Mpatch Debug Report\n")?;
+    writeln!(file, "> **Note:** This report has been partially anonymized. Please review for any remaining sensitive information before sharing.\n")?;
+    writeln!(
+        file,
+        "- **Mpatch Version:** `{}`",
+        env!("CARGO_PKG_VERSION")
+    )?;
+    writeln!(file, "- **OS:** `{}`", std::env::consts::OS)?;
+    writeln!(file, "- **Architecture:** `{}`", std::env::consts::ARCH)?;
+    writeln!(file, "- **Timestamp (Unix):** `{}`", timestamp)?;
+
+    // --- Write Anonymized Command ---
+    writeln!(file, "\n## Command Line\n")?;
+    writeln!(file, "```sh")?;
+    writeln!(file, "{}", anonymize_command_args(args))?;
+    writeln!(file, "```")?;
+
+    // --- Write Input Patch File ---
+    writeln!(file, "\n## Input Patch File\n")?;
+    writeln!(file, "````markdown")?;
+    writeln!(file, "{}", patch_content)?;
+    writeln!(file, "````")?;
+
+    // --- Write Original Target Files ---
+    writeln!(file, "\n## Original Target File(s)\n")?;
+    for patch in patches {
+        let target_file_path = args.target_dir.join(&patch.file_path);
+        writeln!(file, "### File: `{}`\n", patch.file_path.display())?;
+        match fs::read_to_string(&target_file_path) {
+            Ok(file_content) => {
+                let lang = target_file_path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("");
+                writeln!(file, "````{}", lang)?;
+                writeln!(file, "{}", file_content)?;
+                writeln!(file, "````")?;
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                writeln!(file, "*File does not exist.*")?;
+            }
+            Err(e) => writeln!(file, "*Error reading file: {}*", e)?,
+        }
+    }
+
+    // --- Prepare for Log ---
+    writeln!(file, "\n## Full Trace Log\n")?;
+    writeln!(file, "````log")?;
+
+    Ok(Arc::new(Mutex::new(file)))
+}
+
+/// Replaces sensitive paths in command line arguments with placeholders.
+fn anonymize_command_args(args: &Args) -> String {
+    let mut anonymized_args = Vec::new();
+    let mut args_iter = std::env::args();
+    anonymized_args.push(args_iter.next().unwrap_or_else(|| "mpatch".to_string()));
+
+    for arg in args_iter {
+        let arg_path = PathBuf::from(&arg);
+        let canonical_arg = fs::canonicalize(&arg_path).unwrap_or(arg_path);
+        let canonical_input =
+            fs::canonicalize(&args.input_file).unwrap_or_else(|_| args.input_file.clone());
+        let canonical_target =
+            fs::canonicalize(&args.target_dir).unwrap_or_else(|_| args.target_dir.clone());
+
+        if canonical_arg == canonical_input {
+            anonymized_args.push("<INPUT_FILE>".to_string());
+        } else if canonical_arg == canonical_target {
+            anonymized_args.push("<TARGET_DIR>".to_string());
+        } else {
+            anonymized_args.push(arg);
+        }
+    }
+    anonymized_args.join(" ")
 }
