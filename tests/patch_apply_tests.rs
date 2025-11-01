@@ -180,6 +180,7 @@ fn test_parse_file_creation_with_dev_null() {
     let patch = &patches[0];
     assert_eq!(patch.file_path.to_str().unwrap(), "new_from_null.txt");
     assert_eq!(patch.hunks.len(), 1);
+    assert_eq!(patch.hunks[0].start_line, Some(0));
     assert_eq!(patch.hunks[0].get_replace_block(), vec!["hello", "world"]);
     assert!(patch.ends_with_newline);
 }
@@ -199,6 +200,7 @@ fn test_parse_file_creation_with_a_dev_null() {
     let patch = &patches[0];
     assert_eq!(patch.file_path.to_str().unwrap(), "another_new.txt");
     assert_eq!(patch.hunks.len(), 1);
+    assert_eq!(patch.hunks[0].start_line, Some(0));
     assert_eq!(patch.hunks[0].get_replace_block(), vec!["content"]);
 }
 
@@ -218,6 +220,7 @@ fn test_parse_diff_without_ab_prefix() {
     let patch = &patches[0];
     assert_eq!(patch.file_path.to_str().unwrap(), "path/to/file.txt");
     assert_eq!(patch.hunks.len(), 1);
+    assert_eq!(patch.hunks[0].start_line, Some(1));
     assert_eq!(patch.hunks[0].get_replace_block(), vec!["new"]);
 }
 
@@ -236,12 +239,14 @@ fn test_parse_file_creation_without_b_prefix() {
     let patch = &patches[0];
     assert_eq!(patch.file_path.to_str().unwrap(), "new_file.txt");
     assert_eq!(patch.hunks.len(), 1);
+    assert_eq!(patch.hunks[0].start_line, Some(0));
     assert_eq!(patch.hunks[0].get_replace_block(), vec!["content"]);
 }
 
 #[test]
 fn test_parse_error_on_missing_file_header() {
     let diff = indoc! {"
+        Some text on line 1.
         ```diff
         @@ -1,2 +1,2 @@
         -foo
@@ -249,7 +254,10 @@ fn test_parse_error_on_missing_file_header() {
         ```
     "};
     let result = parse_diffs(diff);
-    assert!(matches!(result, Err(PatchError::MissingFileHeader)));
+    assert!(matches!(
+        result,
+        Err(PatchError::MissingFileHeader { line: _ })
+    ));
 }
 
 #[test]
@@ -462,6 +470,42 @@ fn test_fuzzy_match_succeeds() {
 }
 
 #[test]
+fn test_fuzzy_match_with_internal_insertion() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("test.txt");
+    // The file has an extra line "inserted line" compared to the patch's context.
+    fs::write(
+        &file_path,
+        "context A\ninserted line\nline to change\ncontext C\n",
+    )
+    .unwrap();
+
+    let diff = indoc! {"
+        ```diff
+        --- a/test.txt
+        +++ b/test.txt
+        @@ -1,3 +1,3 @@
+         context A
+        -line to change
+        +line was changed
+         context C
+        ```
+    "};
+    let patch = &parse_diffs(diff).unwrap()[0];
+    // The old fixed-window logic would fail this. The new flexible window should find it.
+    // It should match the 4 lines in the file against the 3 lines in the patch context.
+    let result = apply_patch(patch, dir.path(), false, 0.7).unwrap();
+
+    assert!(
+        result,
+        "Patch should apply by matching a slightly larger context block"
+    );
+    let content = fs::read_to_string(file_path).unwrap();
+    assert_eq!(content, "context A\nline was changed\ncontext C\n");
+}
+
+#[test]
 fn test_match_with_different_trailing_whitespace() {
     let _ = env_logger::builder().is_test(true).try_init();
     let dir = tempdir().unwrap();
@@ -494,17 +538,19 @@ fn test_ambiguous_match_fails() {
     let _ = env_logger::builder().is_test(true).try_init();
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("test.txt");
+    // The context appears at line 1 and line 5.
     fs::write(
         &file_path,
-        "header\nchange me\nfooter\nheader\nchange me\nfooter\n",
+        "header\nchange me\nfooter\n\nheader\nchange me\nfooter\n",
     )
     .unwrap();
 
+    // The line number hint is 3, which is equidistant from both matches (1 and 5).
     let diff = indoc! {"
         ```diff
         --- a/test.txt
         +++ b/test.txt
-        @@ -1,3 +1,3 @@
+        @@ -3,3 +3,3 @@
          header
         -change me
         +changed
@@ -512,7 +558,7 @@ fn test_ambiguous_match_fails() {
         ```
     "};
     let patch = &parse_diffs(diff).unwrap()[0];
-    // This should fail because the context appears twice
+    // This should fail because the context appears twice and the hint is ambiguous
     let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
 
     assert!(!result, "Patch should have failed due to ambiguity");
@@ -520,7 +566,7 @@ fn test_ambiguous_match_fails() {
     let content = fs::read_to_string(file_path).unwrap();
     assert_eq!(
         content,
-        "header\nchange me\nfooter\nheader\nchange me\nfooter\n"
+        "header\nchange me\nfooter\n\nheader\nchange me\nfooter\n"
     );
 }
 
@@ -529,16 +575,19 @@ fn test_ambiguous_fuzzy_match_fails() {
     let _ = env_logger::builder().is_test(true).try_init();
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("test.txt");
-    // Two sections that are "equally different" from the patch context
+    // Two sections that are "equally different" from the patch context.
+    // The best fuzzy matches will be at line 1 and line 5.
     let original_content =
         "section one\ncommon line\nDIFFERENT A\n\nsection two\ncommon line\nDIFFERENT B\n";
     fs::write(&file_path, original_content).unwrap();
 
+    // The line number hint is 3, which is equidistant from the two best fuzzy matches
+    // at line 1 (dist 2) and line 5 (dist 2).
     let diff = indoc! {"
         ```diff
         --- a/test.txt
         +++ b/test.txt
-        @@ -1,3 +1,3 @@
+        @@ -3,3 +3,3 @@
          section
         -common line
         +changed line
@@ -546,7 +595,7 @@ fn test_ambiguous_fuzzy_match_fails() {
         ```
     "};
     let patch = &parse_diffs(diff).unwrap()[0];
-    // This should fail because two locations have the same fuzzy score
+    // This should fail because two locations have the same fuzzy score and the hint is ambiguous
     let result = apply_patch(patch, dir.path(), false, 0.5).unwrap();
 
     assert!(!result, "Patch should have failed due to fuzzy ambiguity");
@@ -765,6 +814,22 @@ fn test_parse_diff_block_with_header_only() {
 }
 
 #[test]
+fn test_indented_diff_block_is_ignored() {
+    let diff = indoc! {r#"
+        This should not be parsed.
+          ```diff
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1 +1 @@
+        -a
+        +b
+          ```
+    "#};
+    let patches = parse_diffs(diff).unwrap();
+    assert!(patches.is_empty(), "Indented diff blocks should be ignored");
+}
+
+#[test]
 fn test_fuzzy_match_fails_below_threshold() {
     let _ = env_logger::builder().is_test(true).try_init();
     let dir = tempdir().unwrap();
@@ -889,8 +954,6 @@ fn test_file_creation_with_spaces_in_path() {
     let content = fs::read_to_string(file_path).unwrap();
     assert_eq!(content, "content\n");
 }
-
-// --- NEW EDGE CASE TESTS ---
 
 #[test]
 fn test_apply_hunk_to_file_beginning() {
@@ -1075,4 +1138,242 @@ fn test_path_traversal_with_absolute_path_is_blocked() {
     let result = apply_patch(patch, dir.path(), false, 0.0);
 
     assert!(matches!(result, Err(PatchError::PathTraversal(_))));
+}
+
+#[test]
+fn test_apply_patch_where_file_is_prefix_of_context() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("test.txt");
+    // The file is missing "line 3" which is part of the patch's context.
+    let original_content = "line 1\nline 2\n";
+    fs::write(&file_path, original_content).unwrap();
+
+    let diff = indoc! {r#"
+        ```diff
+        --- a/test.txt
+        +++ b/test.txt
+        @@ -1,3 +1,3 @@
+         line 1
+         line 2
+        -line 3
+        +line three
+        ```
+    "#};
+    let patch = &parse_diffs(diff).unwrap()[0];
+    // Use fuzzy matching to enable the end-of-file logic.
+    let result = apply_patch(patch, dir.path(), false, 0.7).unwrap();
+
+    assert!(result, "Patch should apply via end-of-file fuzzy logic");
+    let content = fs::read_to_string(file_path).unwrap();
+    // The entire file content should be replaced by the patch's `replace_block`.
+    assert_eq!(content, "line 1\nline 2\nline three\n");
+}
+
+#[test]
+fn test_apply_patch_at_end_of_file_with_fuzz_and_missing_context() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("test.rs");
+    // Note: original content is missing the final `}` and a newline from the patch context.
+    fs::write(&file_path, "fn main() {\n    println!(\"Hello\");\n").unwrap();
+
+    let diff = indoc! {r#"
+        ```diff
+        --- a/test.rs
+        +++ b/test.rs
+        @@ -1,4 +1,5 @@
+         fn main() {
+             println!("Hello");
+         }
+        +    println!("World");
+         
+        ```
+    "#};
+    let patch = &parse_diffs(diff).unwrap()[0];
+    let result = apply_patch(patch, dir.path(), false, 0.7).unwrap();
+
+    assert!(result, "Patch should apply via end-of-file fuzzy logic");
+    let content = fs::read_to_string(file_path).unwrap();
+    let expected_content = "fn main() {\n    println!(\"Hello\");\n}\n    println!(\"World\");\n\n";
+    assert_eq!(content, expected_content);
+}
+
+#[test]
+fn test_fuzzy_match_with_missing_line_in_patch_context() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("test.txt");
+    // The file has an extra line ("line B") compared to the patch's context.
+    // This simulates the case where a patch was generated from a slightly older
+    // version of a file, which caused the original character-based diff to fail.
+    fs::write(&file_path, "line A\nline B\nline C\n").unwrap();
+
+    let diff = indoc! {"
+        ```diff
+        --- a/test.txt
+        +++ b/test.txt
+        @@ -1,2 +1,2 @@
+         line A
+        -line C
+        +line changed
+        ```
+    "};
+    let patch = &parse_diffs(diff).unwrap()[0];
+    // With line-based diffing, this should now have a high similarity score
+    // and apply successfully, even though the patch context is missing a line.
+    let result = apply_patch(patch, dir.path(), false, 0.7).unwrap();
+
+    assert!(
+        result,
+        "Patch should apply successfully despite a missing line in its context"
+    );
+    let content = fs::read_to_string(file_path).unwrap();
+    // The fuzzy match should identify the 3-line block in the file and replace it
+    // with the 2-line replacement block from the patch.
+    assert_eq!(content, "line A\nline changed\n");
+}
+
+#[test]
+fn test_fuzzy_match_with_extra_line_in_patch_context() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("test.txt");
+    // The file is missing a line ("line B") that exists in the patch's context.
+    fs::write(&file_path, "line A\nline C\n").unwrap();
+
+    let diff = indoc! {"
+        ```diff
+        --- a/test.txt
+        +++ b/test.txt
+        @@ -1,3 +1,2 @@
+         line A
+         line B
+        -line C
+        +line changed
+        ```
+    "};
+    let patch = &parse_diffs(diff).unwrap()[0];
+    // The fuzzy logic should match the 3-line context against the 2-line file
+    // content and apply the change.
+    let result = apply_patch(patch, dir.path(), false, 0.7).unwrap();
+
+    assert!(
+        result,
+        "Patch should apply successfully despite an extra line in its context"
+    );
+    let content = fs::read_to_string(file_path).unwrap();
+    // The fuzzy match should identify the 2-line block in the file ("line A", "line C")
+    // and replace it with the 3-line replacement block from the patch
+    // ("line A", "line B", "line changed").
+    assert_eq!(content, "line A\nline B\nline changed\n");
+}
+
+#[test]
+fn test_parse_hunk_header_line_number() {
+    let diff = indoc! {r#"
+        ```diff
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1,3 +1,3 @@
+         a
+        -b
+        +c
+         d
+        @@ -10,1 +10,1 @@
+        -x
+        +y
+        ```
+    "#};
+    let patches = parse_diffs(diff).unwrap();
+    assert_eq!(patches.len(), 1);
+    let patch = &patches[0];
+    assert_eq!(patch.hunks.len(), 2);
+    assert_eq!(patch.hunks[0].start_line, Some(1));
+    assert_eq!(patch.hunks[1].start_line, Some(10));
+}
+
+#[test]
+fn test_ambiguous_match_resolved_by_line_number() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("test.txt");
+    let original_content = indoc! {"
+        // Block 1
+        fn duplicate() {
+            println!(\"hello\");
+        }
+
+        // Block 2
+        fn duplicate() {
+            println!(\"hello\");
+        }
+    "};
+    fs::write(&file_path, original_content).unwrap();
+
+    // This patch targets the second block, indicated by the line number `@@ -7,...`
+    let diff = indoc! {r#"
+        ```diff
+        --- a/test.txt
+        +++ b/test.txt
+        @@ -7,3 +7,3 @@
+         fn duplicate() {
+        -    println!("hello");
+        +    println!("world");
+         }
+        ```
+    "#};
+    let patch = &parse_diffs(diff).unwrap()[0];
+    assert_eq!(patch.hunks[0].start_line, Some(7));
+
+    // This should succeed because the line number hint resolves the ambiguity.
+    let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
+
+    assert!(
+        result,
+        "Patch should have applied successfully using line number hint"
+    );
+    let content = fs::read_to_string(file_path).unwrap();
+    let expected_content = indoc! {"
+        // Block 1
+        fn duplicate() {
+            println!(\"hello\");
+        }
+
+        // Block 2
+        fn duplicate() {
+            println!(\"world\");
+        }
+    "};
+    assert_eq!(content, expected_content);
+}
+
+#[test]
+fn test_ambiguous_match_fails_with_equidistant_line_hint() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("test.txt");
+    let original_content = "duplicate\n\nduplicate\n";
+    fs::write(&file_path, original_content).unwrap();
+
+    // This patch has a line number hint of 2, which is equidistant
+    // from line 1 (dist 1) and line 3 (dist 1).
+    let diff = indoc! {r#"
+        ```diff
+        --- a/test.txt
+        +++ b/test.txt
+        @@ -2,1 +2,1 @@
+        -duplicate
+        +changed
+        ```
+    "#};
+    let patch = &parse_diffs(diff).unwrap()[0];
+    assert_eq!(patch.hunks[0].start_line, Some(2));
+
+    // This should fail because the ambiguity cannot be resolved.
+    let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
+
+    assert!(!result, "Patch should fail due to unresolved ambiguity");
+    let content = fs::read_to_string(file_path).unwrap();
+    assert_eq!(content, original_content, "File should be unchanged");
 }
