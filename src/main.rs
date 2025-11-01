@@ -16,7 +16,7 @@ const DEFAULT_FUZZ_THRESHOLD: f32 = 0.7;
 // --- Main Application Entry Point ---
 
 fn main() {
-    // 1. Parse arguments.
+    // 1. Parse command-line arguments using `clap`.
     let args = Args::parse();
 
     // 2. Call the main logic function.
@@ -45,6 +45,7 @@ fn run(args: Args) -> Result<()> {
     }
 
     // --- File Parsing ---
+    // Read the input file and pass its content to the core parsing logic from the library.
     let content = fs::read_to_string(&args.input_file)
         .with_context(|| format!("Failed to read input file '{}'", args.input_file.display()))?;
     let all_patches = parse_diffs(&content)?;
@@ -77,12 +78,14 @@ fn run(args: Args) -> Result<()> {
     let mut success_count = 0;
     let mut fail_count = 0;
 
+    // Iterate through each parsed patch and apply it.
     for (i, patch) in all_patches.iter().enumerate() {
         info!(""); // Vertical spacing
         info!(">>> Operation {}/{}", i + 1, all_patches.len());
         match apply_patch(patch, &args.target_dir, args.dry_run, args.fuzz_factor) {
-            Ok(true) => success_count += 1,
+            Ok(true) => success_count += 1, // All hunks applied cleanly.
             Ok(false) => {
+                // One or more hunks failed to apply (a "soft" error).
                 fail_count += 1;
                 error!(
                     "--- FAILED to apply patch for: {}",
@@ -90,7 +93,8 @@ fn run(args: Args) -> Result<()> {
                 );
             }
             Err(e) => {
-                // A hard error occurred during patching. Convert to anyhow::Error and add context.
+                // A "hard" error occurred (e.g., I/O error, path traversal).
+                // This is fatal, so we stop and return the error.
                 return Err(anyhow::Error::from(e)).with_context(|| {
                     format!(
                         "A fatal error occurred while applying patch for: {}",
@@ -111,6 +115,7 @@ fn run(args: Args) -> Result<()> {
 
     if fail_count > 0 {
         warn!("Review the log for errors. Some files may be in a partially patched state.");
+        // Return an error to set a non-zero exit code.
         return Err(anyhow!(
             "Completed with {} failed patch operations.",
             fail_count
@@ -122,6 +127,7 @@ fn run(args: Args) -> Result<()> {
 
 // --- Helper Structs and Functions ---
 
+/// Defines the command-line arguments for the application.
 #[derive(Parser, Debug)]
 #[command(
     author,
@@ -134,27 +140,36 @@ struct Args {
     input_file: PathBuf,
     /// Path to the target directory to apply patches.
     target_dir: PathBuf,
+    /// If set, show what would be done, but don't modify any files.
     #[arg(
         short = 'n',
         long,
         help = "Show what would be done, but don't modify files."
     )]
     dry_run: bool,
+    /// The similarity threshold for fuzzy matching (0.0 to 1.0).
+    /// Higher is stricter. 0 disables fuzzy matching completely.
     #[arg(short = 'f', long, default_value_t = DEFAULT_FUZZ_THRESHOLD, help = "Similarity threshold for fuzzy matching (0.0 to 1.0). Higher is stricter. 0 disables fuzzy matching.")]
     fuzz_factor: f32,
-    /// Increase logging verbosity. Can be used multiple times (e.g., -v, -vv).
+    /// Increase logging verbosity. Can be used multiple times.
+    /// -v for info, -vv for debug, -vvv for trace.
+    /// -vvvv also generates a comprehensive debug report file.
     #[arg(short, long, action = clap::ArgAction::Count, long_help = "Increase logging verbosity.\n-v for info, -vv for debug, -vvv for trace.\n-vvvv to generate a comprehensive debug report file.")]
     verbose: u8,
 }
 
 /// A "Tee" writer that sends output to both stderr and a shared file.
+/// This is used in debug report mode (`-vvvv`) to show logs on the console
+/// while also writing them to the report file.
 struct TeeWriter {
     file: Arc<Mutex<File>>,
 }
 
 impl Write for TeeWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // Write to standard error first.
         io::stderr().write_all(buf)?;
+        // Then write to the locked file.
         self.file.lock().unwrap().write_all(buf)?;
         Ok(buf.len())
     }
@@ -166,6 +181,9 @@ impl Write for TeeWriter {
 }
 
 /// A "Drop Guard" to ensure the report file is always finalized correctly.
+/// When an instance of this struct goes out of scope, its `drop` method is
+/// called, which writes the closing markdown fence for the log block.
+/// This ensures the report is valid even if the program panics or exits early.
 struct ReportFinalizer {
     file_arc: Option<Arc<Mutex<File>>>,
 }
@@ -197,7 +215,7 @@ fn setup_logging_and_reporting(
         let arc = create_report_file(args, patch_content, patches)?;
         // --- Configure Logger to Tee to the Report File ---
         builder
-            .filter_level(LevelFilter::Trace)
+            .filter_level(LevelFilter::Trace) // Max verbosity for the report
             .target(env_logger::Target::Pipe(Box::new(TeeWriter {
                 file: arc.clone(),
             })));
@@ -208,12 +226,13 @@ fn setup_logging_and_reporting(
             0 => LevelFilter::Warn,
             1 => LevelFilter::Info,
             2 => LevelFilter::Debug,
-            _ => LevelFilter::Trace,
+            _ => LevelFilter::Trace, // -vvv and higher
         };
         builder.filter_level(log_level);
         None
     };
 
+    // Configure the log format with colors.
     builder
         .format(|buf, record| match record.level() {
             Level::Error => writeln!(buf, "{} {}", "error:".red().bold(), record.args()),
@@ -293,28 +312,35 @@ fn create_report_file(
     writeln!(file, "\n## Full Trace Log\n")?;
     writeln!(file, "````log")?;
 
+    // Return a thread-safe, reference-counted pointer to the file.
     Ok(Arc::new(Mutex::new(file)))
 }
 
 /// Replaces sensitive paths in command line arguments with placeholders.
+/// This helps protect user privacy when sharing debug reports.
 fn anonymize_command_args(args: &Args) -> String {
     let mut anonymized_args = Vec::new();
     let mut args_iter = std::env::args();
+    // The first argument is always the program name.
     anonymized_args.push(args_iter.next().unwrap_or_else(|| "mpatch".to_string()));
 
+    // Iterate through the rest of the command-line arguments.
     for arg in args_iter {
         let arg_path = PathBuf::from(&arg);
+        // Canonicalize paths to handle relative vs. absolute paths consistently.
         let canonical_arg = fs::canonicalize(&arg_path).unwrap_or(arg_path);
         let canonical_input =
             fs::canonicalize(&args.input_file).unwrap_or_else(|_| args.input_file.clone());
         let canonical_target =
             fs::canonicalize(&args.target_dir).unwrap_or_else(|_| args.target_dir.clone());
 
+        // Check if the argument matches one of the sensitive paths.
         if canonical_arg == canonical_input {
             anonymized_args.push("<INPUT_FILE>".to_string());
         } else if canonical_arg == canonical_target {
             anonymized_args.push("<TARGET_DIR>".to_string());
         } else {
+            // If it's not a sensitive path (e.g., a flag like `-v`), keep it as is.
             anonymized_args.push(arg);
         }
     }

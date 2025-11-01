@@ -94,6 +94,7 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum PatchError {
     /// An I/O error occurred while reading or writing a file.
+    /// This is a "hard" error that stops the entire process.
     #[error("I/O error while processing {path:?}: {source}")]
     Io {
         path: PathBuf,
@@ -102,11 +103,11 @@ pub enum PatchError {
     },
     /// The patch attempted to access a path outside the target directory.
     /// This is a security measure to prevent malicious patches from modifying
-    /// unintended files.
+    /// unintended files (e.g., `--- a/../../etc/passwd`).
     #[error("Path '{0}' resolves outside the target directory. Aborting for security.")]
     PathTraversal(PathBuf),
     /// The target file for a patch could not be found, and the patch did not
-    /// begin with a file creation hunk (a hunk with an empty match block).
+    /// appear to be for file creation (i.e., its first hunk was not an addition-only hunk).
     #[error("Target file not found for patching: {0}")]
     TargetNotFound(PathBuf),
     /// A ````diff ` block was found, but it was missing the `--- a/path/to/file`
@@ -131,6 +132,7 @@ pub struct Hunk {
     /// The raw lines of the hunk, each prefixed with ' ', '+', or '-'.
     pub lines: Vec<String>,
     /// The original starting line number from the `@@ -l,s ...` header.
+    /// This is used as a hint to resolve ambiguity if multiple exact matches are found.
     pub start_line: Option<usize>,
 }
 
@@ -138,7 +140,8 @@ impl Hunk {
     /// Extracts the lines that need to be matched in the target file.
     ///
     /// This includes context lines (starting with ' ') and deletion lines
-    /// (starting with '-'). The leading character is stripped.
+    /// (starting with '-'). The leading character is stripped. These lines form
+    /// the "search pattern" that `mpatch` looks for in the target file.
     ///
     /// # Example
     ///
@@ -165,7 +168,8 @@ impl Hunk {
     /// Extracts the lines that will replace the matched block in the target file.
     ///
     /// This includes context lines (starting with ' ') and addition lines
-    /// (starting with '+'). The leading character is stripped.
+    /// (starting with '+'). The leading character is stripped. This is the
+    /// content that will be "spliced" into the file.
     ///
     /// # Example
     ///
@@ -191,7 +195,7 @@ impl Hunk {
 
     /// Checks if the hunk contains any effective changes (additions or deletions).
     ///
-    /// A hunk with only context lines has no changes.
+    /// A hunk with only context lines has no changes and can be skipped.
     ///
     /// # Examples
     ///
@@ -285,6 +289,7 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, PatchError> {
         // even if they are for the same file. They will be merged later.
         let mut unmerged_block_patches: Vec<Patch> = Vec::new();
 
+        // State variables for the parser as it moves through the diff block.
         let mut current_file: Option<PathBuf> = None;
         let mut current_hunks: Vec<Hunk> = Vec::new();
         let mut current_hunk_lines: Vec<String> = Vec::new();
@@ -343,21 +348,25 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, PatchError> {
                 }
                 // Otherwise, we already have the path from the `---` line, so we ignore this `+++` line.
             } else if line.starts_with("@@") {
+                // A hunk header line signals the end of the previous hunk.
                 if !current_hunk_lines.is_empty() {
                     current_hunks.push(Hunk {
                         lines: std::mem::take(&mut current_hunk_lines),
                         start_line: current_hunk_start_line,
                     });
                 }
+                // Parse the line number hint for the new hunk.
                 current_hunk_start_line = parse_hunk_header(line);
             } else if line.starts_with(['+', '-', ' ']) {
+                // This is a line belonging to the current hunk.
                 current_hunk_lines.push(line.to_string());
             } else if line.starts_with('\\') {
+                // This special line indicates the file does not end with a newline.
                 ends_with_newline_for_section = false;
             }
         }
 
-        // Finalize the last hunk and patch section for the block
+        // Finalize the last hunk and patch section for the block after the loop ends.
         if !current_hunk_lines.is_empty() {
             current_hunks.push(Hunk {
                 lines: current_hunk_lines,
@@ -374,6 +383,7 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, PatchError> {
                 });
             }
         } else if !current_hunks.is_empty() {
+            // If we have hunks but never determined a file path, it's an error.
             return Err(PatchError::MissingFileHeader {
                 line: diff_block_start_line,
             });
@@ -388,10 +398,12 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, PatchError> {
                 .iter_mut()
                 .find(|p| p.file_path == patch_section.file_path)
             {
+                // If a patch for this file already exists, just add the new hunks to it.
                 existing_patch.hunks.extend(patch_section.hunks);
                 // The 'ends_with_newline' from the *last* section for a file wins.
                 existing_patch.ends_with_newline = patch_section.ends_with_newline;
             } else {
+                // Otherwise, add it as a new patch.
                 merged_block_patches.push(patch_section);
             }
         }
@@ -438,10 +450,13 @@ pub fn apply_patch(
     info!("Applying patch to: {}", patch.file_path.display());
 
     // --- Path Safety Check ---
+    // This is a critical security measure to prevent a malicious patch from
+    // writing files outside of the intended target directory.
     trace!(
         "  Checking path safety for relative path '{}'",
         patch.file_path.display()
     );
+    // Canonicalize paths to resolve `..`, symlinks, etc., into absolute paths.
     let base_path = fs::canonicalize(target_dir).map_err(|e| PatchError::Io {
         path: target_dir.to_path_buf(),
         source: e,
@@ -452,7 +467,8 @@ pub fn apply_patch(
             source: e,
         })?
     } else {
-        // For new files, canonicalize the parent and append the filename
+        // For new files, canonicalize the parent and append the filename.
+        // This requires creating the parent directory first.
         let parent = target_file_path.parent().unwrap_or(Path::new(""));
         fs::create_dir_all(parent).map_err(|e| PatchError::Io {
             path: parent.to_path_buf(),
@@ -466,6 +482,7 @@ pub fn apply_patch(
             .join(target_file_path.file_name().unwrap_or_default())
     };
 
+    // Ensure the final, resolved path is still inside the base directory.
     if !final_path.starts_with(&base_path) {
         return Err(PatchError::PathTraversal(patch.file_path.clone()));
     }
@@ -482,6 +499,7 @@ pub fn apply_patch(
         });
     }
 
+    // Read the file content into a vector of lines for easier manipulation.
     let (original_content, mut current_lines) = if target_file_path.is_file() {
         trace!("  Reading target file '{}'", patch.file_path.display());
         let content = fs::read_to_string(&target_file_path).map_err(|e| PatchError::Io {
@@ -508,8 +526,10 @@ pub fn apply_patch(
     let mut all_hunks_applied_cleanly = true;
 
     // --- Apply Hunks ---
+    // Iterate through each hunk and attempt to apply it to the `current_lines`.
     for (i, hunk) in patch.hunks.iter().enumerate() {
         let hunk_index = i + 1;
+        // Optimization: skip hunks that contain no changes.
         if !hunk.has_changes() {
             debug!(
                 "  Skipping Hunk {}/{} (no changes).",
@@ -534,6 +554,7 @@ pub fn apply_patch(
         }
         trace!("    -----------------------------");
 
+        // This is the core logic: find where the hunk should be applied.
         match find_hunk_location(&match_block, &current_lines, fuzz_factor, hunk.start_line) {
             Some((start_index, match_len)) => {
                 trace!(
@@ -554,6 +575,7 @@ pub fn apply_patch(
                     current_lines.clear();
                     current_lines.extend(replace_block.into_iter().map(String::from));
                 } else {
+                    // The main operation: remove the matched lines and insert the replacement lines.
                     current_lines.splice(
                         start_index..start_index + match_len,
                         replace_block.into_iter().map(String::from),
@@ -562,6 +584,7 @@ pub fn apply_patch(
                 }
             }
             None => {
+                // If `find_hunk_location` returns `None`, the hunk could not be applied.
                 let reason = "Context not found or ambiguous".to_string();
                 warn!("  Failed to apply Hunk {}. {}", hunk_index, reason);
                 trace!("    --- Expected Block (Context/Deletions) ---");
@@ -575,6 +598,7 @@ pub fn apply_patch(
     }
 
     // --- Write Changes ---
+    // Join the modified lines back into a single string.
     let mut new_content = current_lines.join("\n");
     if patch.ends_with_newline && !new_content.is_empty() {
         new_content.push('\n');
@@ -582,6 +606,7 @@ pub fn apply_patch(
     trace!("  Final content has {} characters.", new_content.len());
 
     if dry_run {
+        // In dry-run mode, generate and print a diff instead of writing to the file.
         info!(
             "  DRY RUN: Would write changes to '{}'",
             patch.file_path.display()
@@ -600,6 +625,7 @@ pub fn apply_patch(
         print!("{}", diff);
         println!("------------------------------------");
     } else {
+        // Write the modified content to the file system.
         if let Some(parent) = target_file_path.parent() {
             fs::create_dir_all(parent).map_err(|e| PatchError::Io {
                 path: parent.to_path_buf(),
@@ -645,6 +671,7 @@ fn find_search_ranges(
     }
 
     // Iterate from the middle of the hunk outwards to find a good anchor line.
+    // The middle is often more stable than the edges.
     let mid = hunk_size / 2;
     for i in 0..=mid {
         let indices_to_check = [Some(mid + i), if i > 0 { Some(mid - i) } else { None }];
@@ -678,23 +705,24 @@ fn find_search_ranges(
                         anchor_line.trim()
                     );
                     let mut ranges = Vec::new();
-                    let search_radius =
-                        (hunk_size * SEARCH_RADIUS_FACTOR).max(MIN_SEARCH_RADIUS);
+                    let search_radius = (hunk_size * SEARCH_RADIUS_FACTOR).max(MIN_SEARCH_RADIUS);
 
                     for &occurrence_idx in &occurrences {
                         // Estimate where the hunk would start based on the anchor's position.
                         let estimated_start = occurrence_idx.saturating_sub(line_idx);
                         let start = estimated_start.saturating_sub(search_radius);
-                        let end = (estimated_start + hunk_size + search_radius)
-                            .min(target_lines.len());
+                        let end =
+                            (estimated_start + hunk_size + search_radius).min(target_lines.len());
                         ranges.push((start, end));
                     }
+                    // Merge any overlapping ranges created by nearby occurrences.
                     return merge_ranges(ranges);
                 }
             }
         }
     }
 
+    // If no good anchor was found, we must search the entire file.
     trace!("      No suitable anchor line found. Falling back to full file scan.");
     vec![(0, target_lines.len())]
 }
@@ -723,6 +751,7 @@ fn merge_ranges(mut ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
 }
 
 /// Finds the starting index of the hunk's match block in the target lines.
+/// This function implements the core hierarchical search strategy.
 fn find_hunk_location(
     match_block: &[&str],
     target_lines: &[String],
@@ -747,7 +776,8 @@ fn find_hunk_location(
         };
     }
 
-    // 1. Exact Match
+    // --- STRATEGY 1: Exact Match ---
+    // The fastest and most reliable method.
     trace!("    Attempting exact match for hunk...");
     let exact_matches: Vec<_> = if match_block.len() <= target_lines.len() {
         target_lines
@@ -770,11 +800,14 @@ fn find_hunk_location(
         trace!("      No exact matches found.");
     }
 
+    // If we have one or more matches, try to resolve ambiguity.
     if let Some(index) = tie_break_with_line_number(&exact_matches, start_line, "exact") {
         debug!("    Found unique exact match at index {}.", index);
         return Some((index, match_block.len()));
     }
-    // 2. Exact Match (Ignoring Trailing Whitespace)
+
+    // --- STRATEGY 2: Exact Match (Ignoring Trailing Whitespace) ---
+    // Handles minor formatting differences.
     trace!("    Attempting exact match (ignoring trailing whitespace)...");
     let match_stripped: Vec<_> = match_block.iter().map(|s| s.trim_end()).collect();
     let stripped_matches: Vec<_> = if match_block.len() <= target_lines.len() {
@@ -813,7 +846,7 @@ fn find_hunk_location(
         return Some((index, match_block.len()));
     }
 
-    // 3. Fuzzy Match (with flexible window)
+    // --- STRATEGY 3: Fuzzy Match (with flexible window) ---
     // This is the core "smart" logic. If an exact match fails, we search for
     // the best-fitting slice in the target file, allowing the slice to be
     // slightly larger or smaller than the patch's context. This handles cases
@@ -853,11 +886,13 @@ fn find_hunk_location(
         for (range_start, range_end) in search_ranges {
             let target_slice = &target_lines[range_start..range_end];
 
+            // Iterate through all possible window sizes.
             for window_len in min_len..=max_len {
                 if window_len > target_slice.len() {
                     continue;
                 }
 
+                // Iterate through all windows of the current size.
                 for (i, window) in target_slice.windows(window_len).enumerate() {
                     let absolute_index = range_start + i;
                     // HYBRID SCORING: Combine line-based and word-based similarity.
@@ -875,8 +910,7 @@ fn find_hunk_location(
 
                     // 2. Word-based score for content similarity
                     let window_content = window_stripped_lines.join("\n");
-                    let diff_words =
-                        similar::TextDiff::from_words(&window_content, &match_content);
+                    let diff_words = similar::TextDiff::from_words(&window_content, &match_content);
                     let ratio_words = diff_words.ratio() as f64;
 
                     // 3. Combine them (weighting structure more heavily)
@@ -889,6 +923,7 @@ fn find_hunk_location(
                     let penalty = (size_diff / len.max(window_len) as f64) * 0.2;
                     let score = ratio - penalty;
 
+                    // Check if this is the new best score.
                     if score > best_score {
                         trace!(
                         "        New best score: {:.3} (ratio {:.3} [l:{:.3},w:{:.3}], penalty {:.3}) at index {} (window len {})",
@@ -948,6 +983,7 @@ fn find_hunk_location(
             potential_matches
         );
 
+        // Check if the best match found meets the user-defined threshold.
         if best_ratio_at_best_score >= f64::from(fuzz_threshold) {
             if potential_matches.len() == 1 {
                 let (start, len) = potential_matches[0];
@@ -1015,7 +1051,7 @@ fn find_hunk_location(
         trace!("    Failed exact matches. Fuzzy matching disabled.");
     }
 
-    // 4. End-of-file fuzzy match for short files
+    // --- STRATEGY 4: End-of-file fuzzy match for short files ---
     // This handles cases where the entire file is a good fuzzy match for the
     // start of the hunk context, which can happen if the file is missing
     // context lines that the patch expects to be there at the end.
@@ -1069,6 +1105,7 @@ fn tie_break_with_line_number(
         return None;
     }
     if matches.len() == 1 {
+        // If there's only one match, there's no ambiguity to resolve.
         trace!(
             "    tie_break: Only one match found for '{}' match at index {}. No tie-break needed.",
             match_type,
@@ -1077,7 +1114,7 @@ fn tie_break_with_line_number(
         return Some(matches[0]);
     }
 
-    // More than 1 match, try to tie-break
+    // More than 1 match, try to tie-break using the line number hint.
     if let Some(line) = start_line {
         trace!(
             "    Ambiguous {} match found at {:?}. Attempting to tie-break using line number hint: {}",
@@ -1089,6 +1126,7 @@ fn tie_break_with_line_number(
         let mut min_distance = usize::MAX;
         let mut is_tie = false;
 
+        // Find the match that is numerically closest to the hint.
         for &match_index in matches {
             // Hunk line numbers are 1-based, indices are 0-based.
             trace!(
@@ -1103,6 +1141,7 @@ fn tie_break_with_line_number(
                 closest_index = match_index;
                 is_tie = false;
             } else if distance == min_distance {
+                // If another match has the same minimum distance, it's a tie.
                 is_tie = true;
             }
         }
@@ -1124,6 +1163,7 @@ fn tie_break_with_line_number(
         );
     }
 
+    // If we reach here, the ambiguity could not be resolved.
     warn!(
         "    Ambiguous {} match: Hunk context found at multiple locations: {:?}. Skipping.",
         match_type, matches
