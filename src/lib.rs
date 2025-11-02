@@ -91,6 +91,7 @@
 //! # }
 //! ````
 use log::{debug, info, trace, warn};
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use similar::udiff::unified_diff;
 use similar::TextDiff;
@@ -1356,8 +1357,9 @@ fn find_hunk_location(
         let search_ranges = find_search_ranges(match_block, target_lines, len);
         trace!("    Using search ranges: {:?}", search_ranges);
 
-        // When the anchor heuristic fails, the search can be slow. We parallelize
-        // the scoring of all possible windows using Rayon.
+        // When the anchor heuristic fails, the search can be slow. We parallelize the
+        // scoring of all possible windows using Rayon if the `parallel` feature is enabled.
+        #[cfg(feature = "parallel")]
         let all_scored_windows: Vec<(f64, f64, f64, f64, f64, usize, usize)> = search_ranges
             .par_iter()
             .flat_map(|&(range_start, range_end)| {
@@ -1374,6 +1376,58 @@ fn find_hunk_location(
                     .flat_map(move |window_len| {
                         (0..=target_slice.len() - window_len)
                             .into_par_iter()
+                            .map(move |i| {
+                                let window = &target_slice[i..i + window_len];
+                                let absolute_index = range_start + i;
+
+                                // HYBRID SCORING: (Copied from original sequential loop)
+                                let window_stripped_lines: Vec<_> =
+                                    window.iter().map(|s| s.trim_end()).collect();
+                                let diff_lines = similar::TextDiff::from_slices(
+                                    &window_stripped_lines,
+                                    match_stripped_lines,
+                                );
+                                let ratio_lines = diff_lines.ratio() as f64;
+                                let window_content = window_stripped_lines.join("\n");
+                                let diff_words =
+                                    similar::TextDiff::from_words(&window_content, match_content);
+                                let ratio_words = diff_words.ratio() as f64;
+                                let ratio = 0.6 * ratio_lines + 0.4 * ratio_words;
+                                let size_diff = window_len.abs_diff(len) as f64;
+                                let penalty = (size_diff / len.max(window_len) as f64) * 0.2;
+                                let score = ratio - penalty;
+
+                                (
+                                    score,
+                                    ratio,
+                                    ratio_lines,
+                                    ratio_words,
+                                    penalty,
+                                    absolute_index,
+                                    window_len,
+                                )
+                            })
+                    })
+            })
+            .collect();
+
+        #[cfg(not(feature = "parallel"))]
+        let all_scored_windows: Vec<(f64, f64, f64, f64, f64, usize, usize)> = search_ranges
+            .iter()
+            .flat_map(|&(range_start, range_end)| {
+                // By creating local references, we ensure that the inner `move` closures
+                // capture these references (which are `Copy`) instead of attempting to move
+                // the original non-`Copy` `Vec` and `String` from the outer scope.
+                let match_stripped_lines = &match_stripped_lines;
+                let match_content = &match_content;
+                let target_slice = &target_lines[range_start..range_end];
+
+                (min_len..=max_len)
+                    .into_iter()
+                    .filter(move |&window_len| window_len <= target_slice.len())
+                    .flat_map(move |window_len| {
+                        (0..=target_slice.len() - window_len)
+                            .into_iter()
                             .map(move |i| {
                                 let window = &target_slice[i..i + window_len];
                                 let absolute_index = range_start + i;
