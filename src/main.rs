@@ -3,7 +3,7 @@ use clap::Parser;
 use colored::Colorize;
 use env_logger::Builder;
 use log::{error, info, warn, Level, LevelFilter};
-use mpatch::apply_patch;
+use mpatch::apply_patch_to_file;
 use mpatch::{parse_diffs, Patch};
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -87,7 +87,7 @@ fn run(args: Args) -> Result<()> {
     for (i, patch) in all_patches.iter().enumerate() {
         info!(""); // Vertical spacing
         info!(">>> Operation {}/{}", i + 1, all_patches.len());
-        match apply_patch(patch, &args.target_dir, options) {
+        match apply_patch_to_file(patch, &args.target_dir, options) {
             Ok(patch_result) => {
                 if let Some(diff) = patch_result.diff {
                     println!(

@@ -26,13 +26,13 @@
 //! 1.  **Parsing:** Use [`parse_diffs`] to read a string (e.g., the content of a
 //!     markdown file) and extract a `Vec<Patch>`. Each [`Patch`] represents the
 //!     changes for a single file. This step is purely in-memory.
-//! 2.  **Analyzing (Read-Only):** Use [`find_best_hunk_location`] to determine
+//! 2.  **Analyzing (Read-Only):** Use [`find_hunk_location`] to determine
 //!     where a single [`Hunk`] would be applied within a string of content. This
 //!     is a read-only operation that returns the location without making changes.
 //! 3.  **Applying (In-Memory):** Use [`apply_patch_to_content`] to apply a `Patch`
 //!     to a string of the original file's content. This function is pure and
 //!     doesn't touch the filesystem, returning the new content as a string.
-//! 4.  **Applying (to Filesystem):** For convenience, the [`apply_patch`] function
+//! 4.  **Applying (to Filesystem):** For convenience, the [`apply_patch_to_file`] function
 //!     wraps the entire process of reading a file, calling `apply_patch_to_content`,
 //!     and writing the result back to disk.
 //!
@@ -42,7 +42,7 @@
 //! temporary directory.
 //!
 //! ````rust
-//! use mpatch::{parse_diffs, apply_patch, ApplyOptions};
+//! use mpatch::{parse_diffs, apply_patch_to_file, ApplyOptions};
 //! use std::fs;
 //! use tempfile::{tempdir, TempDir};
 //!
@@ -76,8 +76,8 @@
 //! let patch = &patches[0];
 //!
 //! // 4. Apply the patch.
-//! let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
-//! let result = apply_patch(patch, dir.path(), options)?;
+//! let options = ApplyOptions::default();
+//! let result = apply_patch_to_file(patch, dir.path(), options)?;
 //!
 //! // The patch should apply cleanly.
 //! assert!(result.report.all_applied_cleanly());
@@ -509,7 +509,7 @@ impl Hunk {
 
 /// Represents the location where a hunk should be applied.
 ///
-/// This is returned by [`find_best_hunk_location`] and provides the necessary
+/// This is returned by [`find_hunk_location`] and provides the necessary
 /// information to manually apply a patch to a slice of lines.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HunkLocation {
@@ -772,7 +772,7 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
     Ok(all_patches)
 }
 
-/// Applies a single [`Patch`] to the specified target directory.
+/// A convenience function that applies a single [`Patch`] to the filesystem.
 ///
 /// This function orchestrates the patching process for a single file. It handles
 /// filesystem interactions like reading the original file and writing the new
@@ -798,7 +798,7 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
 /// # Example
 ///
 /// ````
-/// # use mpatch::{parse_diffs, apply_patch, ApplyOptions};
+/// # use mpatch::{parse_diffs, apply_patch_to_file, ApplyOptions};
 /// # use std::fs;
 /// # use tempfile::tempdir;
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -822,7 +822,7 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
 ///
 /// // 3. Apply the patch to the directory.
 /// let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
-/// let result = apply_patch(patch, dir.path(), options)?;
+/// let result = apply_patch_to_file(patch, dir.path(), options)?;
 ///
 /// // 4. Verify the results.
 /// assert!(result.report.all_applied_cleanly());
@@ -831,7 +831,7 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
 /// # Ok(())
 /// # }
 /// ````
-pub fn apply_patch(
+pub fn apply_patch_to_file(
     patch: &Patch,
     target_dir: &Path,
     options: ApplyOptions,
@@ -1060,7 +1060,12 @@ pub fn apply_patch_to_content(
         trace!("    -----------------------------");
 
         // This is the core logic: find where the hunk should be applied.
-        match find_hunk_location(&match_block, &current_lines, fuzz_factor, hunk.start_line) {
+        match find_hunk_location_internal(
+            &match_block,
+            &current_lines,
+            fuzz_factor,
+            hunk.start_line,
+        ) {
             Ok((start_index, match_len)) => {
                 trace!(
                     "    Found location: start_index={}, match_len={}",
@@ -1112,7 +1117,7 @@ pub fn apply_patch_to_content(
     (new_content, ApplyResult { hunk_results })
 }
 
-/// Finds the best location to apply a hunk to a given text content without modifying it.
+/// Finds the location to apply a hunk to a given text content without modifying it.
 ///
 /// This function encapsulates the core context-aware search logic of `mpatch`. It
 /// performs a series of checks, from exact matching to fuzzy matching, to determine
@@ -1138,7 +1143,7 @@ pub fn apply_patch_to_content(
 /// # Example
 ///
 /// ````rust
-/// # use mpatch::{parse_diffs, find_best_hunk_location, HunkLocation};
+/// # use mpatch::{parse_diffs, find_hunk_location, HunkLocation};
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let original_content = "line 1\nline two\nline 3\n";
 /// let diff_content = r#"
@@ -1156,21 +1161,20 @@ pub fn apply_patch_to_content(
 /// let patches = parse_diffs(diff_content)?;
 /// let hunk = &patches[0].hunks[0];
 ///
-/// let location = find_best_hunk_location(hunk, original_content, 0.0)?;
+/// let location = find_hunk_location(hunk, original_content, 0.0)?;
 ///
 /// assert_eq!(location, HunkLocation { start_index: 0, length: 3 });
 /// # Ok(())
 /// # }
 /// ````
-pub fn find_best_hunk_location(
+pub fn find_hunk_location(
     hunk: &Hunk,
     target_content: &str,
     fuzz_factor: f32,
 ) -> Result<HunkLocation, HunkApplyError> {
     let target_lines: Vec<String> = target_content.lines().map(String::from).collect();
     let match_block = hunk.get_match_block();
-
-    find_hunk_location(&match_block, &target_lines, fuzz_factor, hunk.start_line).map(
+    find_hunk_location_internal(&match_block, &target_lines, fuzz_factor, hunk.start_line).map(
         |(start_index, length)| HunkLocation {
             start_index,
             length,
@@ -1281,14 +1285,14 @@ fn merge_ranges(mut ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
 
 /// Finds the starting index of the hunk's match block in the target lines.
 /// This function implements the core hierarchical search strategy.
-fn find_hunk_location(
+fn find_hunk_location_internal(
     match_block: &[&str],
     target_lines: &[String],
     fuzz_threshold: f32,
     start_line: Option<usize>,
 ) -> Result<(usize, usize), HunkApplyError> {
     trace!(
-        "  find_hunk_location called for a hunk with {} lines to match against {} target lines.",
+        "  find_hunk_location_internal called for a hunk with {} lines to match against {} target lines.",
         match_block.len(),
         target_lines.len()
     );

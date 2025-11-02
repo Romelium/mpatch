@@ -1,6 +1,6 @@
 use indoc::indoc;
 use mpatch::{
-    apply_patch, find_best_hunk_location, parse_diffs, ApplyOptions, HunkApplyError,
+    apply_patch_to_file, find_hunk_location, parse_diffs, ApplyOptions, HunkApplyError,
     HunkApplyStatus, HunkLocation, ParseError, PatchError,
 };
 use std::fs;
@@ -286,7 +286,7 @@ fn test_apply_simple_patch() {
         dry_run: false,
         fuzz_factor: 0.0,
     };
-    let result = apply_patch(patch, dir.path(), options).unwrap();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
 
     assert!(result.report.all_applied_cleanly());
     assert!(result.diff.is_none());
@@ -323,7 +323,7 @@ fn test_apply_multiple_hunks_in_one_file() {
         dry_run: false,
         fuzz_factor: 0.0,
     };
-    let result = apply_patch(patch, dir.path(), options).unwrap();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
 
     assert!(result.report.all_applied_cleanly());
     assert!(result.diff.is_none());
@@ -353,7 +353,7 @@ fn test_file_creation() {
         dry_run: false,
         fuzz_factor: 0.0,
     };
-    let result = apply_patch(patch, dir.path(), options).unwrap();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
 
     assert!(result.report.all_applied_cleanly());
     assert!(result.diff.is_none());
@@ -382,7 +382,7 @@ fn test_patch_to_empty_file() {
         dry_run: false,
         fuzz_factor: 0.0,
     };
-    let result = apply_patch(patch, dir.path(), options).unwrap();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
 
     assert!(result.report.all_applied_cleanly());
     assert!(result.diff.is_none());
@@ -409,7 +409,7 @@ fn test_file_creation_in_subdirectory() {
         dry_run: false,
         fuzz_factor: 0.0,
     };
-    let result = apply_patch(patch, dir.path(), options).unwrap();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
 
     assert!(result.report.all_applied_cleanly());
     assert!(result.diff.is_none());
@@ -439,7 +439,7 @@ fn test_file_deletion_by_removing_all_content() {
         dry_run: false,
         fuzz_factor: 0.0,
     };
-    let result = apply_patch(patch, dir.path(), options).unwrap();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
 
     assert!(result.report.all_applied_cleanly());
     assert!(result.diff.is_none());
@@ -469,7 +469,7 @@ fn test_no_newline_at_end_of_file() {
         dry_run: false,
         fuzz_factor: 0.0,
     };
-    let result = apply_patch(patch, dir.path(), options).unwrap();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
 
     assert!(result.report.all_applied_cleanly());
     assert!(result.diff.is_none());
@@ -502,7 +502,7 @@ fn test_fuzzy_match_succeeds() {
         dry_run: false,
         fuzz_factor: 0.5,
     };
-    let result = apply_patch(patch, dir.path(), options).unwrap();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
 
     assert!(result.report.all_applied_cleanly());
     assert!(result.diff.is_none());
@@ -542,7 +542,7 @@ fn test_fuzzy_match_with_internal_insertion() {
         dry_run: false,
         fuzz_factor: 0.7,
     };
-    let result = apply_patch(patch, dir.path(), options).unwrap();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
 
     assert!(
         result.report.all_applied_cleanly(),
@@ -577,7 +577,7 @@ fn test_match_with_different_trailing_whitespace() {
         dry_run: false,
         fuzz_factor: 0.0,
     };
-    let result = apply_patch(patch, dir.path(), options).unwrap();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
 
     assert!(
         result.report.all_applied_cleanly(),
@@ -617,7 +617,7 @@ fn test_ambiguous_match_fails() {
         dry_run: false,
         fuzz_factor: 0.0,
     };
-    let result = apply_patch(patch, dir.path(), options).unwrap();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
 
     assert!(
         !result.report.all_applied_cleanly(),
@@ -665,7 +665,7 @@ fn test_ambiguous_fuzzy_match_fails() {
         dry_run: false,
         fuzz_factor: 0.5,
     };
-    let result = apply_patch(patch, dir.path(), options).unwrap();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
 
     assert!(
         !result.report.all_applied_cleanly(),
@@ -703,7 +703,7 @@ fn test_dry_run() {
         dry_run: true,
         fuzz_factor: 0.0,
     };
-    let result = apply_patch(patch, dir.path(), options).unwrap(); // dry_run = true
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap(); // dry_run = true
 
     assert!(result.report.all_applied_cleanly());
     assert!(result.diff.is_some());
@@ -730,7 +730,7 @@ fn test_path_traversal_is_blocked() {
         dry_run: false,
         fuzz_factor: 0.0,
     };
-    let result = apply_patch(patch, dir.path(), options);
+    let result = apply_patch_to_file(patch, dir.path(), options);
 
     assert!(matches!(result, Err(PatchError::PathTraversal(_))));
     // Ensure no file was created outside the temp dir
@@ -756,7 +756,7 @@ fn test_path_traversal_with_dot_is_blocked() {
         dry_run: false,
         fuzz_factor: 0.0,
     };
-    let result = apply_patch(patch, dir.path(), options);
+    let result = apply_patch_to_file(patch, dir.path(), options);
 
     assert!(matches!(result, Err(PatchError::PathTraversal(_))));
     let evil_path = dir.path().parent().unwrap().join("evil.txt");
@@ -783,7 +783,7 @@ fn test_apply_to_nonexistent_file_fails_if_not_creation() {
         dry_run: false,
         fuzz_factor: 0.0,
     };
-    let result = apply_patch(patch, dir.path(), options);
+    let result = apply_patch_to_file(patch, dir.path(), options);
 
     assert!(matches!(result, Err(PatchError::TargetNotFound(_))));
 }
@@ -818,7 +818,7 @@ fn test_partial_apply_fails_on_second_hunk() {
         dry_run: false,
         fuzz_factor: 0.0,
     };
-    let result = apply_patch(patch, dir.path(), options).unwrap();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
 
     // The operation should be reported as a soft failure.
     assert!(!result.report.all_applied_cleanly());
@@ -867,7 +867,7 @@ fn test_creation_patch_fails_on_non_empty_file() {
         dry_run: false,
         fuzz_factor: 0.0,
     };
-    let result = apply_patch(patch, dir.path(), options).unwrap();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
 
     assert!(
         !result.report.all_applied_cleanly(),
@@ -901,7 +901,7 @@ fn test_hunk_with_no_changes_is_skipped() {
         dry_run: false,
         fuzz_factor: 0.0,
     };
-    let result = apply_patch(patch, dir.path(), options).unwrap();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
 
     assert!(
         result.report.all_applied_cleanly(),
@@ -982,7 +982,7 @@ fn test_fuzzy_match_fails_below_threshold() {
         dry_run: false,
         fuzz_factor: 0.9,
     };
-    let result = apply_patch(patch, dir.path(), options).unwrap();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
 
     assert!(
         !result.report.all_applied_cleanly(),
@@ -997,7 +997,7 @@ fn test_fuzzy_match_fails_below_threshold() {
 }
 
 #[test]
-fn test_find_best_hunk_location_exact_match() {
+fn test_find_hunk_location_exact_match() {
     let original_content = "line 1\nline two\nline 3\n";
     let diff = indoc! {r#"
         ```diff
@@ -1013,7 +1013,7 @@ fn test_find_best_hunk_location_exact_match() {
     let patches = parse_diffs(diff).unwrap();
     let hunk = &patches[0].hunks[0];
 
-    let location = find_best_hunk_location(hunk, original_content, 0.0).unwrap();
+    let location = find_hunk_location(hunk, original_content, 0.0).unwrap();
     assert_eq!(
         location,
         HunkLocation {
@@ -1024,7 +1024,7 @@ fn test_find_best_hunk_location_exact_match() {
 }
 
 #[test]
-fn test_find_best_hunk_location_fuzzy_match() {
+fn test_find_hunk_location_fuzzy_match() {
     // The file has an extra line compared to the patch's context.
     let original_content = "context A\ninserted line\nline to change\ncontext C\n";
     let diff = indoc! {r#"
@@ -1042,7 +1042,7 @@ fn test_find_best_hunk_location_fuzzy_match() {
     let hunk = &patches[0].hunks[0];
 
     // The flexible window should find a match of length 4.
-    let location = find_best_hunk_location(hunk, original_content, 0.7).unwrap();
+    let location = find_hunk_location(hunk, original_content, 0.7).unwrap();
     assert_eq!(
         location,
         HunkLocation {
@@ -1053,7 +1053,7 @@ fn test_find_best_hunk_location_fuzzy_match() {
 }
 
 #[test]
-fn test_find_best_hunk_location_not_found() {
+fn test_find_hunk_location_not_found() {
     let original_content = "completely different content\n";
     let diff = indoc! {r#"
         ```diff
@@ -1067,7 +1067,7 @@ fn test_find_best_hunk_location_not_found() {
     let patches = parse_diffs(diff).unwrap();
     let hunk = &patches[0].hunks[0];
 
-    let result = find_best_hunk_location(hunk, original_content, 0.9);
+    let result = find_hunk_location(hunk, original_content, 0.9);
     assert!(matches!(
         result,
         Err(HunkApplyError::FuzzyMatchBelowThreshold { .. })
@@ -1075,7 +1075,7 @@ fn test_find_best_hunk_location_not_found() {
 }
 
 #[test]
-fn test_find_best_hunk_location_ambiguous() {
+fn test_find_hunk_location_ambiguous() {
     let original_content = "duplicate\n\nduplicate\n";
     let diff = indoc! {r#"
         ```diff
@@ -1089,7 +1089,7 @@ fn test_find_best_hunk_location_ambiguous() {
     let patches = parse_diffs(diff).unwrap();
     let hunk = &patches[0].hunks[0];
 
-    let result = find_best_hunk_location(hunk, original_content, 0.0);
+    let result = find_hunk_location(hunk, original_content, 0.0);
     assert!(matches!(
         result,
         Err(HunkApplyError::AmbiguousExactMatch(_))
@@ -1127,7 +1127,7 @@ fn test_apply_to_readonly_file_fails() {
         dry_run: false,
         fuzz_factor: 0.0,
     };
-    let result = apply_patch(patch, dir.path(), options);
+    let result = apply_patch_to_file(patch, dir.path(), options);
 
     assert!(
         matches!(result, Err(PatchError::Io { .. })),
@@ -1165,7 +1165,7 @@ fn test_apply_to_path_that_is_a_directory() {
         dry_run: false,
         fuzz_factor: 0.0,
     };
-    let result = apply_patch(patch, dir.path(), options);
+    let result = apply_patch_to_file(patch, dir.path(), options);
 
     // Reading the original file content will fail because it's a directory.
     assert!(
@@ -1193,7 +1193,7 @@ fn test_file_creation_with_spaces_in_path() {
         dry_run: false,
         fuzz_factor: 0.0,
     };
-    let result = apply_patch(patch, dir.path(), options).unwrap();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
 
     assert!(
         result.report.all_applied_cleanly(),
@@ -1230,7 +1230,7 @@ fn test_apply_hunk_to_file_beginning() {
         dry_run: false,
         fuzz_factor: 0.0,
     };
-    let result = apply_patch(patch, dir.path(), options).unwrap();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
 
     assert!(result.report.all_applied_cleanly());
     assert!(result.diff.is_none());
@@ -1260,7 +1260,7 @@ fn test_apply_hunk_to_file_end() {
         dry_run: false,
         fuzz_factor: 0.0,
     };
-    let result = apply_patch(patch, dir.path(), options).unwrap();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
 
     assert!(result.report.all_applied_cleanly());
     assert!(result.diff.is_none());
@@ -1320,7 +1320,7 @@ fn test_path_normalization_within_project() {
         dry_run: false,
         fuzz_factor: 0.0,
     };
-    let result = apply_patch(patch, dir.path(), options).unwrap();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
 
     assert!(
         result.report.all_applied_cleanly(),
@@ -1352,7 +1352,7 @@ fn test_apply_hunk_with_single_line_match_block() {
         dry_run: false,
         fuzz_factor: 0.0,
     };
-    let result = apply_patch(patch, dir.path(), options).unwrap();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
 
     assert!(result.report.all_applied_cleanly());
     assert!(result.diff.is_none());
@@ -1385,7 +1385,7 @@ fn test_file_creation_with_unicode_path() {
         dry_run: false,
         fuzz_factor: 0.0,
     };
-    let result = apply_patch(patch, dir.path(), options).unwrap();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
 
     assert!(
         result.report.all_applied_cleanly(),
@@ -1419,7 +1419,7 @@ fn test_path_traversal_with_absolute_path_is_blocked() {
         dry_run: false,
         fuzz_factor: 0.0,
     };
-    let result = apply_patch(patch, dir.path(), options);
+    let result = apply_patch_to_file(patch, dir.path(), options);
 
     assert!(matches!(result, Err(PatchError::PathTraversal(_))));
 }
@@ -1450,7 +1450,7 @@ fn test_apply_patch_where_file_is_prefix_of_context() {
         dry_run: false,
         fuzz_factor: 0.7,
     };
-    let result = apply_patch(patch, dir.path(), options).unwrap();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
 
     assert!(
         result.report.all_applied_cleanly(),
@@ -1486,7 +1486,7 @@ fn test_apply_patch_at_end_of_file_with_fuzz_and_missing_context() {
         dry_run: false,
         fuzz_factor: 0.7,
     };
-    let result = apply_patch(patch, dir.path(), options).unwrap();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
 
     assert!(
         result.report.all_applied_cleanly(),
@@ -1524,7 +1524,7 @@ fn test_fuzzy_match_with_missing_line_in_patch_context() {
         dry_run: false,
         fuzz_factor: 0.7,
     };
-    let result = apply_patch(patch, dir.path(), options).unwrap();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
 
     assert!(
         result.report.all_applied_cleanly(),
@@ -1562,7 +1562,7 @@ fn test_fuzzy_match_with_extra_line_in_patch_context() {
         dry_run: false,
         fuzz_factor: 0.7,
     };
-    let result = apply_patch(patch, dir.path(), options).unwrap();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
 
     assert!(
         result.report.all_applied_cleanly(),
@@ -1637,7 +1637,7 @@ fn test_ambiguous_match_resolved_by_line_number() {
         dry_run: false,
         fuzz_factor: 0.0,
     };
-    let result = apply_patch(patch, dir.path(), options).unwrap();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
 
     assert!(
         result.report.all_applied_cleanly(),
@@ -1685,7 +1685,7 @@ fn test_ambiguous_match_fails_with_equidistant_line_hint() {
         dry_run: false,
         fuzz_factor: 0.0,
     };
-    let result = apply_patch(patch, dir.path(), options).unwrap();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
 
     assert!(
         !result.report.all_applied_cleanly(),
