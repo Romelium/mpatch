@@ -209,11 +209,30 @@ pub enum HunkApplyError {
     FuzzyMatchBelowThreshold { best_score: f64, threshold: f32 },
 }
 
+/// Describes the method used to successfully locate and apply a hunk.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MatchType {
+    /// An exact, character-for-character match of the context/deletion lines.
+    Exact,
+    /// An exact match after ignoring trailing whitespace on each line.
+    ExactIgnoringWhitespace,
+    /// A fuzzy match found using a similarity algorithm.
+    Fuzzy {
+        /// The similarity score of the match (0.0 to 1.0).
+        score: f64,
+    },
+}
+
 /// The result of applying a single hunk.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HunkApplyStatus {
     /// The hunk was applied successfully.
-    Applied,
+    Applied {
+        /// The location where the hunk was applied.
+        location: HunkLocation,
+        /// The type of match that was used to find the location.
+        match_type: MatchType,
+    },
     /// The hunk was skipped because it contained no effective changes.
     SkippedNoChanges,
     /// The hunk failed to apply for the specified reason.
@@ -335,15 +354,18 @@ impl ApplyResult {
     /// # Example
     ///
     /// ```
-    /// # use mpatch::{ApplyResult, HunkApplyStatus, HunkApplyError, HunkFailure};
+    /// # use mpatch::{ApplyResult, HunkApplyStatus, HunkApplyError, HunkFailure, HunkLocation, MatchType};
     /// let successful_result = ApplyResult {
-    ///     hunk_results: vec![HunkApplyStatus::Applied, HunkApplyStatus::SkippedNoChanges],
+    ///     hunk_results: vec![
+    ///         HunkApplyStatus::Applied { location: HunkLocation { start_index: 0, length: 1 }, match_type: MatchType::Exact },
+    ///         HunkApplyStatus::SkippedNoChanges
+    ///     ],
     /// };
     /// assert!(successful_result.all_applied_cleanly());
     ///
     /// let failed_result = ApplyResult {
     ///     hunk_results: vec![
-    ///         HunkApplyStatus::Applied,
+    ///         HunkApplyStatus::Applied { location: HunkLocation { start_index: 0, length: 1 }, match_type: MatchType::Exact },
     ///         HunkApplyStatus::Failed(HunkApplyError::ContextNotFound),
     ///     ],
     /// };
@@ -363,10 +385,11 @@ impl ApplyResult {
     /// # Example
     ///
     /// ```
-    /// # use mpatch::{ApplyResult, HunkApplyStatus, HunkApplyError, HunkFailure};
+    /// # use mpatch::{ApplyResult, HunkApplyStatus, HunkApplyError, HunkFailure, HunkLocation, MatchType};
     /// let failed_result = ApplyResult {
     ///     hunk_results: vec![
-    ///         HunkApplyStatus::Applied,
+    ///         // The first hunk applied successfully.
+    ///         HunkApplyStatus::Applied { location: HunkLocation { start_index: 0, length: 1 }, match_type: MatchType::Exact },
     ///         HunkApplyStatus::Failed(HunkApplyError::ContextNotFound),
     ///     ],
     /// };
@@ -1376,17 +1399,17 @@ pub fn apply_patch_to_content(
             options,
             hunk.old_start_line,
         ) {
-            Ok((start_index, match_len)) => {
+            Ok((location, match_type)) => {
                 trace!(
                     "    Found location: start_index={}, match_len={}",
-                    start_index,
-                    match_len
+                    location.start_index,
+                    location.length
                 );
                 // Special case: end-of-file fuzzy match where the file is shorter than the context.
                 // In this scenario, we treat it as a command to replace the entire file's content
                 // with the hunk's replacement block.
-                let is_short_file_eof_match = start_index == 0
-                    && match_len == current_lines.len()
+                let is_short_file_eof_match = location.start_index == 0
+                    && location.length == current_lines.len()
                     && !current_lines.is_empty() // Avoid for empty file creation
                     && current_lines.len() < match_block.len();
 
@@ -1397,12 +1420,18 @@ pub fn apply_patch_to_content(
                 } else {
                     // The main operation: remove the matched lines and insert the replacement lines.
                     current_lines.splice(
-                        start_index..start_index + match_len,
+                        location.start_index..location.start_index + location.length,
                         replace_block.into_iter().map(String::from),
                     );
                 }
-                debug!("    Hunk applied successfully at index {}.", start_index);
-                hunk_results.push(HunkApplyStatus::Applied);
+                debug!(
+                    "    Hunk applied successfully at index {}.",
+                    location.start_index
+                );
+                hunk_results.push(HunkApplyStatus::Applied {
+                    location,
+                    match_type,
+                });
             }
             Err(error) => {
                 // If `find_hunk_location` returns `Err`, the hunk could not be applied.
@@ -1448,15 +1477,15 @@ pub fn apply_patch_to_content(
 ///
 /// # Returns
 ///
-/// - `Ok(HunkLocation)` on success, containing the start index and length of the
-///   match in the target content.
+/// - `Ok((HunkLocation, MatchType))` on success, containing the location and the
+///   type of match that was found.
 /// - `Err(HunkApplyError)` if no suitable location could be found, with a reason
 ///   for the failure (e.g., context not found, ambiguous match).
 ///
 /// # Example
 ///
 /// ````rust
-/// # use mpatch::{parse_diffs, find_hunk_location, HunkLocation, ApplyOptions};
+/// # use mpatch::{parse_diffs, find_hunk_location, HunkLocation, ApplyOptions, MatchType};
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let original_content = "line 1\nline two\nline 3\n";
 /// let diff_content = r#"
@@ -1475,9 +1504,10 @@ pub fn apply_patch_to_content(
 /// let hunk = &patches[0].hunks[0];
 ///
 /// let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
-/// let location = find_hunk_location(hunk, original_content, &options)?;
+/// let (location, match_type) = find_hunk_location(hunk, original_content, &options)?;
 ///
 /// assert_eq!(location, HunkLocation { start_index: 0, length: 3 });
+/// assert!(matches!(match_type, MatchType::Exact));
 /// # Ok(())
 /// # }
 /// ````
@@ -1485,15 +1515,10 @@ pub fn find_hunk_location(
     hunk: &Hunk,
     target_content: &str,
     options: &ApplyOptions,
-) -> Result<HunkLocation, HunkApplyError> {
+) -> Result<(HunkLocation, MatchType), HunkApplyError> {
     let target_lines: Vec<String> = target_content.lines().map(String::from).collect();
     let match_block = hunk.get_match_block();
-    find_hunk_location_internal(&match_block, &target_lines, options, hunk.old_start_line).map(
-        |(start_index, length)| HunkLocation {
-            start_index,
-            length,
-        },
-    )
+    find_hunk_location_internal(&match_block, &target_lines, options, hunk.old_start_line)
 }
 
 /// Finds optimized search ranges within the target file to perform the fuzzy search.
@@ -1604,7 +1629,7 @@ fn find_hunk_location_internal(
     target_lines: &[String],
     options: &ApplyOptions,
     old_start_line: Option<usize>,
-) -> Result<(usize, usize), HunkApplyError> {
+) -> Result<(HunkLocation, MatchType), HunkApplyError> {
     trace!(
         "  find_hunk_location_internal called for a hunk with {} lines to match against {} target lines.",
         match_block.len(),
@@ -1616,7 +1641,13 @@ fn find_hunk_location_internal(
         trace!("    Match block is empty (file creation).");
         return if target_lines.is_empty() {
             trace!("    Target is empty, match successful at (0, 0).");
-            Ok((0, 0))
+            Ok((
+                HunkLocation {
+                    start_index: 0,
+                    length: 0,
+                },
+                MatchType::Exact,
+            ))
         } else {
             trace!("    Target is not empty, match failed.");
             Err(HunkApplyError::ContextNotFound)
@@ -1643,7 +1674,13 @@ fn find_hunk_location_internal(
         match tie_break_with_line_number(exact_matches, old_start_line, "exact") {
             Ok(Some(index)) => {
                 debug!("    Found unique exact match at index {}.", index);
-                return Ok((index, match_block.len()));
+                return Ok((
+                    HunkLocation {
+                        start_index: index,
+                        length: match_block.len(),
+                    },
+                    MatchType::Exact,
+                ));
             }
             Ok(None) => {} // No exact matches, continue to next strategy.
             Err(matches) => return Err(HunkApplyError::AmbiguousExactMatch(matches)),
@@ -1683,7 +1720,13 @@ fn find_hunk_location_internal(
                     "    Found unique whitespace-insensitive match at index {}.",
                     index
                 );
-                return Ok((index, match_block.len()));
+                return Ok((
+                    HunkLocation {
+                        start_index: index,
+                        length: match_block.len(),
+                    },
+                    MatchType::ExactIgnoringWhitespace,
+                ));
             }
             Ok(None) => {} // No matches, continue.
             Err(matches) => return Err(HunkApplyError::AmbiguousExactMatch(matches)),
@@ -1903,7 +1946,15 @@ fn find_hunk_location_internal(
                     "    Found best fuzzy match at index {} (length {}, similarity: {:.3}).",
                     start, len, best_ratio_at_best_score
                 );
-                return Ok((start, len));
+                return Ok((
+                    HunkLocation {
+                        start_index: start,
+                        length: len,
+                    },
+                    MatchType::Fuzzy {
+                        score: best_ratio_at_best_score,
+                    },
+                ));
             }
             // AMBIGUOUS FUZZY MATCH - TRY TO TIE-BREAK
             if let Some(line) = old_start_line {
@@ -1939,7 +1990,15 @@ fn find_hunk_location_internal(
                                     "    Tie-broke ambiguous fuzzy match using line number. Best match is at index {} (length {}, similarity: {:.3}).",
                                     start, len, best_ratio_at_best_score
                                 );
-                        return Ok((start, len));
+                        return Ok((
+                            HunkLocation {
+                                start_index: start,
+                                length: len,
+                            },
+                            MatchType::Fuzzy {
+                                score: best_ratio_at_best_score,
+                            },
+                        ));
                     }
                 } else {
                     trace!("    Tie-breaking failed: multiple fuzzy matches are equidistant from the line number hint.");
@@ -1994,7 +2053,15 @@ fn find_hunk_location_internal(
                 ratio, effective_threshold
             );
             // We are matching the entire file from the beginning.
-            return Ok((0, target_lines.len()));
+            return Ok((
+                HunkLocation {
+                    start_index: 0,
+                    length: target_lines.len(),
+                },
+                MatchType::Fuzzy {
+                    score: ratio as f64,
+                },
+            ));
         } else {
             trace!(
                 "    End-of-file fuzzy match ratio {:.3} did not meet effective threshold {:.3}.",

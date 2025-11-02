@@ -1,7 +1,7 @@
 use indoc::indoc;
 use mpatch::{
     apply_patch_to_file, apply_patches_to_dir, find_hunk_location, parse_diffs, ApplyOptions,
-    HunkApplyError, HunkApplyStatus, HunkLocation, ParseError, Patch, PatchError,
+    HunkApplyError, HunkApplyStatus, HunkLocation, MatchType, ParseError, Patch, PatchError,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -836,7 +836,7 @@ fn test_partial_apply_fails_on_second_hunk() {
     assert_eq!(result.report.hunk_results.len(), 2);
     assert!(matches!(
         result.report.hunk_results[0],
-        HunkApplyStatus::Applied
+        HunkApplyStatus::Applied { .. }
     ));
     assert!(matches!(
         result.report.hunk_results[1],
@@ -1017,7 +1017,7 @@ fn test_find_hunk_location_exact_match() {
         fuzz_factor: 0.0,
         ..Default::default()
     };
-    let location = find_hunk_location(hunk, original_content, &options).unwrap();
+    let (location, match_type) = find_hunk_location(hunk, original_content, &options).unwrap();
     assert_eq!(
         location,
         HunkLocation {
@@ -1025,6 +1025,7 @@ fn test_find_hunk_location_exact_match() {
             length: 3
         }
     );
+    assert!(matches!(match_type, MatchType::Exact));
 }
 
 #[test]
@@ -1050,7 +1051,7 @@ fn test_find_hunk_location_fuzzy_match() {
         fuzz_factor: 0.7,
         ..Default::default()
     };
-    let location = find_hunk_location(hunk, original_content, &options).unwrap();
+    let (location, match_type) = find_hunk_location(hunk, original_content, &options).unwrap();
     assert_eq!(
         location,
         HunkLocation {
@@ -1058,6 +1059,7 @@ fn test_find_hunk_location_fuzzy_match() {
             length: 4
         }
     );
+    assert!(matches!(match_type, MatchType::Fuzzy { .. }));
 }
 
 #[test]
