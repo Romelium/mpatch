@@ -25,11 +25,15 @@
 //!
 //! 1.  **Parsing:** Use [`parse_diffs`] to read a string (e.g., the content of a
 //!     markdown file) and extract a `Vec<Patch>`. Each [`Patch`] represents the
-//!     changes for a single file.
-//! 2.  **Applying:** Iterate through the `Patch` objects and use [`apply_patch`]
-//!     to apply each one to a target directory on the filesystem.
+//!     changes for a single file. This step is purely in-memory.
+//! 2.  **Applying (In-Memory):** Use [`apply_patch_to_content`] to apply a `Patch`
+//!     to a string of the original file's content. This function is pure and
+//!     doesn't touch the filesystem, returning the new content as a string.
+//! 3.  **Applying (to Filesystem):** For convenience, the [`apply_patch`] function
+//!     wraps the entire process of reading a file, calling `apply_patch_to_content`,
+//!     and writing the result back to disk.
 //!
-//! ## Example
+//! ## Library Usage Example
 //!
 //! Here's a complete example of how to use the library to patch a file in a
 //! temporary directory.
@@ -37,7 +41,7 @@
 //! ````rust
 //! use mpatch::{parse_diffs, apply_patch};
 //! use std::fs;
-//! use tempfile::tempdir;
+//! use tempfile::{tempdir, TempDir};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // 1. Set up a temporary directory and a file to be patched.
@@ -71,14 +75,15 @@
 //! // 4. Apply the patch.
 //! // For this example, we disable fuzzy matching (fuzz_factor = 0.0)
 //! // and are not doing a dry run.
-//! let success = apply_patch(patch, dir.path(), false, 0.0)?;
+//! let success = apply_patch(patch, dir.path(), false, 0.0)?; // This handles file I/O.
 //!
 //! // The patch should apply cleanly.
 //! assert!(success);
 //!
 //! // 5. Verify the file was changed correctly.
 //! let new_content = fs::read_to_string(&file_path)?;
-//! assert_eq!(new_content, "fn main() {\n    println!(\"Hello, mpatch!\");\n}\n");
+//! let expected_content = "fn main() {\n    println!(\"Hello, mpatch!\");\n}\n";
+//! assert_eq!(new_content, expected_content);
 //! # Ok(())
 //! # }
 //! ````
@@ -417,9 +422,9 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, PatchError> {
 
 /// Applies a single [`Patch`] to the specified target directory.
 ///
-/// This function attempts to apply all hunks from the `patch` to the corresponding
-/// file inside `target_dir`. It handles file creation, modification, and deletion
-/// (by emptying the file).
+/// This function orchestrates the patching process for a single file. It handles
+/// filesystem interactions like reading the original file and writing the new
+/// content, while delegating the core patching logic to [`apply_patch_to_content`].
 ///
 /// # Arguments
 ///
@@ -501,18 +506,15 @@ pub fn apply_patch(
         });
     }
 
-    // Read the file content into a vector of lines for easier manipulation.
-    let (original_content, mut current_lines) = if target_file_path.is_file() {
+    let (original_content, is_new_file) = if target_file_path.is_file() {
         trace!("  Reading target file '{}'", patch.file_path.display());
         let content = fs::read_to_string(&target_file_path).map_err(|e| PatchError::Io {
             path: target_file_path.clone(),
-            source: e,
+             source: e,
         })?;
-        let lines = content.lines().map(String::from).collect();
-        (content, lines)
+        (content, false)
     } else {
         // File doesn't exist. This is only okay if it's a file creation patch.
-        // A creation patch has a first hunk with an empty match block.
         if patch
             .hunks
             .first()
@@ -521,9 +523,131 @@ pub fn apply_patch(
             return Err(PatchError::TargetNotFound(target_file_path));
         }
         info!("  Target file does not exist. Assuming file creation.");
-        (String::new(), Vec::new())
+        (String::new(), true)
     };
-    trace!("  Read {} lines from target file.", current_lines.len());
+    trace!(
+        "  Read {} lines from target file.",
+        original_content.lines().count()
+    );
+
+    // --- Apply Patch to Content ---
+    let (new_content, all_hunks_applied_cleanly) = apply_patch_to_content(
+        patch,
+        if is_new_file {
+            None
+        } else {
+            Some(&original_content)
+        },
+        fuzz_factor,
+    );
+
+    if dry_run {
+        // In dry-run mode, generate and print a diff instead of writing to the file.
+        info!(
+            "  DRY RUN: Would write changes to '{}'",
+            patch.file_path.display()
+        );
+        let diff = unified_diff(
+            similar::Algorithm::default(),
+            &original_content,
+            &new_content,
+            3,
+            Some(("a", "b")),
+        );
+        println!(
+            "----- Proposed Changes for {} -----",
+            patch.file_path.display()
+        );
+        print!("{}", diff);
+        println!("------------------------------------");
+    } else {
+        // Write the modified content to the file system.
+        if let Some(parent) = target_file_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| PatchError::Io {
+                path: parent.to_path_buf(),
+                source: e,
+            })?;
+        }
+        fs::write(&target_file_path, new_content).map_err(|e| PatchError::Io {
+            path: target_file_path.clone(),
+            source: e,
+        })?;
+        if all_hunks_applied_cleanly {
+            info!(
+                "  Successfully wrote changes to '{}'",
+                patch.file_path.display()
+            );
+        } else {
+            warn!("  Wrote partial changes to '{}'", patch.file_path.display());
+        }
+    }
+
+    Ok(all_hunks_applied_cleanly)
+}
+
+/// Applies the logic of a patch to a string content.
+///
+/// This is a pure function that takes the patch definition and the original content
+/// of a file as a string, and returns the transformed content. It does not
+/// interact with the filesystem. This is useful for testing, in-memory operations,
+/// or integrating `mpatch`'s logic into other tools.
+///
+/// # Example
+///
+/// ```rust
+/// # use mpatch::{parse_diffs, apply_patch_to_content};
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // 1. Define original content and the patch.
+/// let original_content = "Hello, world!\n";
+/// // Construct the diff string programmatically to avoid rustdoc parsing issues with ```.
+/// let diff_str = [
+///     "```diff",
+///     "--- a/hello.txt",
+///     "+++ b/hello.txt",
+///     "@@ -1 +1 @@",
+///     "-Hello, world!",
+///     "+Hello, mpatch!",
+///     "```",
+/// ].join("\n");
+///
+/// // 2. Parse the diff to get a Patch object.
+/// let patches = parse_diffs(&diff_str)?;
+/// let patch = &patches[0];
+///
+/// // 3. Apply the patch to the content in memory.
+/// let (new_content, success) = apply_patch_to_content(patch, Some(original_content), 0.0);
+///
+/// // 4. Check the results.
+/// assert!(success);
+/// assert_eq!(new_content, "Hello, mpatch!\n");
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Arguments
+///
+/// * `patch` - The [`Patch`] object to apply.
+/// * `original_content` - An `Option<&str>` representing the file's content.
+///   `Some(content)` for an existing file, `None` for a new file (creation).
+/// * `fuzz_factor` - The similarity threshold for fuzzy matching.
+///
+/// # Returns
+///
+/// A tuple `(String, bool)` where:
+/// - The `String` is the new content after applying the patch.
+/// - The `bool` is `true` if all hunks were applied successfully, `false` otherwise.
+pub fn apply_patch_to_content(
+    patch: &Patch,
+    original_content: Option<&str>,
+    fuzz_factor: f32,
+) -> (String, bool) {
+    let mut current_lines: Vec<String> = original_content
+        .map(|c| c.lines().map(String::from).collect())
+        .unwrap_or_default();
+    trace!(
+        "  apply_patch_to_content called with {} lines of original content.",
+        current_lines.len()
+    );
 
     let mut all_hunks_applied_cleanly = true;
 
@@ -599,56 +723,14 @@ pub fn apply_patch(
         }
     }
 
-    // --- Write Changes ---
-    // Join the modified lines back into a single string.
+    // --- Format final content ---
     let mut new_content = current_lines.join("\n");
     if patch.ends_with_newline && !new_content.is_empty() {
         new_content.push('\n');
     }
     trace!("  Final content has {} characters.", new_content.len());
 
-    if dry_run {
-        // In dry-run mode, generate and print a diff instead of writing to the file.
-        info!(
-            "  DRY RUN: Would write changes to '{}'",
-            patch.file_path.display()
-        );
-        let diff = unified_diff(
-            similar::Algorithm::default(),
-            &original_content,
-            &new_content,
-            3,
-            Some(("a", "b")),
-        );
-        println!(
-            "----- Proposed Changes for {} -----",
-            patch.file_path.display()
-        );
-        print!("{}", diff);
-        println!("------------------------------------");
-    } else {
-        // Write the modified content to the file system.
-        if let Some(parent) = target_file_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| PatchError::Io {
-                path: parent.to_path_buf(),
-                source: e,
-            })?;
-        }
-        fs::write(&target_file_path, new_content).map_err(|e| PatchError::Io {
-            path: target_file_path.clone(),
-            source: e,
-        })?;
-        if all_hunks_applied_cleanly {
-            info!(
-                "  Successfully wrote changes to '{}'",
-                patch.file_path.display()
-            );
-        } else {
-            warn!("  Wrote partial changes to '{}'", patch.file_path.display());
-        }
-    }
-
-    Ok(all_hunks_applied_cleanly)
+    (new_content, all_hunks_applied_cleanly)
 }
 
 /// Finds optimized search ranges within the target file to perform the fuzzy search.
