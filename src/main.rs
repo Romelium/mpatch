@@ -3,7 +3,7 @@ use clap::Parser;
 use colored::Colorize;
 use env_logger::Builder;
 use log::{error, info, warn, Level, LevelFilter};
-use mpatch::apply_patch;
+use mpatch::{apply_patch, HunkApplyStatus};
 use mpatch::{parse_diffs, Patch};
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -82,15 +82,23 @@ fn run(args: Args) -> Result<()> {
     for (i, patch) in all_patches.iter().enumerate() {
         info!(""); // Vertical spacing
         info!(">>> Operation {}/{}", i + 1, all_patches.len());
-        match apply_patch(patch, &args.target_dir, args.dry_run, args.fuzz_factor) {
-            Ok(true) => success_count += 1, // All hunks applied cleanly.
-            Ok(false) => {
-                // One or more hunks failed to apply (a "soft" error).
-                fail_count += 1;
-                error!(
-                    "--- FAILED to apply patch for: {}",
-                    patch.file_path.display()
-                );
+        match apply_patch(
+            patch,
+            &args.target_dir,
+            args.dry_run,
+            args.fuzz_factor,
+        ) {
+            Ok(apply_result) => {
+                if apply_result.all_applied_cleanly() {
+                    success_count += 1;
+                } else {
+                    fail_count += 1;
+                    error!(
+                        "--- FAILED to apply patch for: {}",
+                        patch.file_path.display()
+                    );
+                    log_failed_hunks(&apply_result);
+                }
             }
             Err(e) => {
                 // A "hard" error occurred (e.g., I/O error, path traversal).
@@ -126,6 +134,15 @@ fn run(args: Args) -> Result<()> {
 }
 
 // --- Helper Structs and Functions ---
+
+/// Logs the reasons why hunks failed to apply.
+fn log_failed_hunks(apply_result: &mpatch::ApplyResult) {
+    for (i, status) in apply_result.hunk_results.iter().enumerate() {
+        if let HunkApplyStatus::Failed(reason) = status {
+            warn!("  - Hunk {} failed: {}", i + 1, reason);
+        }
+    }
+}
 
 /// Defines the command-line arguments for the application.
 #[derive(Parser, Debug)]
