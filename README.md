@@ -32,9 +32,9 @@ This same logic makes it perfect for other common developer scenarios where patc
 ## Core Features
 
 *   **Markdown-Aware:** Directly parses unified diffs from within ` ```diff` or ` ```patch` code blocks in any text or markdown file.
-*   **Context-Driven:** Ignores `@@ ... @@` line numbers, finding patch locations by matching context lines. This makes it resilient to minor preceding changes in a file.
-*   **Fuzzy Matching:** If an exact context match isn't found, `mpatch` uses a sophisticated similarity algorithm to find the *best* fuzzy match. This logic can handle cases where lines have been added or removed near the patch location, allowing patches to apply even when the surrounding context has moderately diverged.
 *   **Context-Driven:** Primarily finds patch locations by matching context lines, making it resilient to preceding file changes. It intelligently uses the `@@ ... @@` line numbers as a hint to resolve ambiguity when the same context appears in multiple places.
+*   **Fuzzy Matching:** If an exact context match isn't found, `mpatch` uses a sophisticated similarity algorithm to find the *best* fuzzy match. This logic can handle cases where lines have been added or removed near the patch location, allowing patches to apply even when the surrounding context has moderately diverged.
+*   **Highly Performant:** The most computationally intensive task—fuzzy searching—is parallelized to take full advantage of multi-core processors, ensuring fast performance even on large files.
 *   **Safe & Secure:** Includes a `--dry-run` mode to preview changes and built-in protection against path traversal attacks.
 *   **Flexible:** Handles multiple files and multiple hunks in a single pass. It correctly processes file creations, modifications, and deletions (by removing all content from a file).
 *   **Informative Logging:** Adjustable verbosity levels (`-v`, `-vv`) to see exactly what `mpatch` is doing.
