@@ -126,20 +126,20 @@
 //!
 //! // 3. Apply the patch to the content in memory.
 //! let options = mpatch::ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
-//! let (new_content, result) = apply_patch_to_content(patch, Some(original_content), &options);
+//! let result = apply_patch_to_content(patch, Some(original_content), &options);
 //!
 //! // 4. Verify that the patch did not apply cleanly.
-//! assert!(!result.all_applied_cleanly());
+//! assert!(!result.report.all_applied_cleanly());
 //!
 //! // 5. Inspect the specific failures.
-//! let failures = result.failures();
+//! let failures = result.report.failures();
 //! assert_eq!(failures.len(), 1);
 //! assert_eq!(failures[0].hunk_index, 2); // Hunk indices are 1-based.
 //! assert!(matches!(failures[0].reason, HunkApplyError::ContextNotFound));
 //!
 //! // 6. Verify that the content was still partially modified by the successful first hunk.
 //! let expected_content = "line 1\nline two\nline 3\n\nline 5\nline 6\nline 7\n";
-//! assert_eq!(new_content, expected_content);
+//! assert_eq!(result.new_content, expected_content);
 //! # Ok(())
 //! # }
 //! ````
@@ -240,6 +240,58 @@ impl Default for ApplyOptions {
     }
 }
 
+impl ApplyOptions {
+    /// Creates a new builder for `ApplyOptions`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use mpatch::ApplyOptions;
+    /// let options = ApplyOptions::builder()
+    ///     .dry_run(true)
+    ///     .fuzz_factor(0.8)
+    ///     .build();
+    ///
+    /// assert_eq!(options.dry_run, true);
+    /// assert_eq!(options.fuzz_factor, 0.8);
+    /// ```
+    pub fn builder() -> ApplyOptionsBuilder {
+        ApplyOptionsBuilder::default()
+    }
+}
+
+/// A builder for creating `ApplyOptions`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ApplyOptionsBuilder {
+    dry_run: Option<bool>,
+    fuzz_factor: Option<f32>,
+}
+
+impl ApplyOptionsBuilder {
+    /// If `true`, no files will be modified. Instead, a diff of the proposed
+    /// changes will be generated and returned in [`PatchResult`].
+    pub fn dry_run(mut self, dry_run: bool) -> Self {
+        self.dry_run = Some(dry_run);
+        self
+    }
+
+    /// Sets the similarity threshold for fuzzy matching (0.0 to 1.0).
+    /// Higher is stricter. `0.0` disables fuzzy matching.
+    pub fn fuzz_factor(mut self, fuzz_factor: f32) -> Self {
+        self.fuzz_factor = Some(fuzz_factor);
+        self
+    }
+
+    /// Builds the `ApplyOptions`.
+    pub fn build(self) -> ApplyOptions {
+        let default = ApplyOptions::default();
+        ApplyOptions {
+            dry_run: self.dry_run.unwrap_or(default.dry_run),
+            fuzz_factor: self.fuzz_factor.unwrap_or(default.fuzz_factor),
+        }
+    }
+}
+
 /// The result of an `apply_patch` operation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PatchResult {
@@ -248,6 +300,15 @@ pub struct PatchResult {
     /// The unified diff of the proposed changes. This is only populated
     /// when `dry_run` was set to `true` in [`ApplyOptions`].
     pub diff: Option<String>,
+}
+
+/// The result of an in-memory patch operation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InMemoryResult {
+    /// The new content after applying the patch.
+    pub new_content: String,
+    /// Detailed results for each hunk within the patch operation.
+    pub report: ApplyResult,
 }
 
 /// Contains detailed results for each hunk within a patch operation.
@@ -333,6 +394,31 @@ impl ApplyResult {
             .collect()
     }
 }
+
+/// The result of applying a batch of patches to a directory.
+#[derive(Debug)]
+pub struct BatchResult {
+    /// A list of results for each patch operation attempted.
+    /// Each entry is a tuple of the target file path and the result of the operation.
+    pub results: Vec<(PathBuf, Result<PatchResult, PatchError>)>,
+}
+
+impl BatchResult {
+    /// Checks if all patches in the batch were applied without "hard" errors (like I/O errors).
+    /// This does *not* check if all hunks were applied cleanly. For that, you must
+    /// inspect the individual `PatchResult` objects.
+    pub fn all_succeeded(&self) -> bool {
+        self.results.iter().all(|(_, res)| res.is_ok())
+    }
+
+    /// Returns a list of all operations that resulted in a "hard" error (e.g., I/O).
+    pub fn hard_failures(&self) -> Vec<(&PathBuf, &PatchError)> {
+        self.results
+            .iter()
+            .filter_map(|(path, res)| res.as_ref().err().map(|e| (path, e)))
+            .collect()
+    }
+}
 // --- Data Structures ---
 
 /// Represents a single hunk of changes within a patch.
@@ -345,10 +431,61 @@ pub struct Hunk {
     pub lines: Vec<String>,
     /// The original starting line number from the `@@ -l,s ...` header.
     /// This is used as a hint to resolve ambiguity if multiple exact matches are found.
-    pub start_line: Option<usize>,
+    pub old_start_line: Option<usize>,
+    /// The new starting line number from the `@@ ..., +l,s @@` header.
+    pub new_start_line: Option<usize>,
 }
 
 impl Hunk {
+    /// Creates a new `Hunk` that reverses the changes in this one.
+    ///
+    /// Additions become deletions, and deletions become additions. Context lines
+    /// remain unchanged. The old and new line number hints are swapped.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use mpatch::Hunk;
+    /// let hunk = Hunk {
+    ///     lines: vec![
+    ///         " context".to_string(),
+    ///         "-deleted".to_string(),
+    ///         "+added".to_string(),
+    ///     ],
+    ///     old_start_line: Some(10),
+    ///     new_start_line: Some(12),
+    /// };
+    /// let inverted_hunk = hunk.invert();
+    /// assert_eq!(inverted_hunk.lines, vec![
+    ///     " context".to_string(),
+    ///     "+deleted".to_string(),
+    ///     "-added".to_string(),
+    /// ]);
+    /// assert_eq!(inverted_hunk.old_start_line, Some(12));
+    /// assert_eq!(inverted_hunk.new_start_line, Some(10));
+    /// ```
+    pub fn invert(&self) -> Hunk {
+        let inverted_lines = self
+            .lines
+            .iter()
+            .map(|line| {
+                if let Some(stripped) = line.strip_prefix('+') {
+                    format!("-{}", stripped)
+                } else if let Some(stripped) = line.strip_prefix('-') {
+                    format!("+{}", stripped)
+                } else {
+                    line.clone()
+                }
+            })
+            .collect();
+
+        Hunk {
+            lines: inverted_lines,
+            old_start_line: self.new_start_line,
+            new_start_line: self.old_start_line,
+        }
+    }
+
     /// Extracts the lines that need to be matched in the target file.
     ///
     /// This includes context lines (starting with ' ') and deletion lines
@@ -365,7 +502,8 @@ impl Hunk {
     ///         "-deleted".to_string(),
     ///         "+added".to_string(),
     ///     ],
-    ///     start_line: None,
+    ///     old_start_line: None,
+    ///     new_start_line: None,
     /// };
     /// assert_eq!(hunk.get_match_block(), vec!["context", "deleted"]);
     /// ```
@@ -393,7 +531,8 @@ impl Hunk {
     ///         "-deleted".to_string(),
     ///         "+added".to_string(),
     ///     ],
-    ///     start_line: None,
+    ///     old_start_line: None,
+    ///     new_start_line: None,
     /// };
     /// assert_eq!(hunk.get_replace_block(), vec!["context", "added"]);
     /// ```
@@ -419,7 +558,8 @@ impl Hunk {
     ///         "-deleted".to_string(),
     ///         "+added".to_string(),
     ///     ],
-    ///     start_line: None,
+    ///     old_start_line: None,
+    ///     new_start_line: None,
     /// };
     /// assert_eq!(hunk.context_lines(), vec!["context"]);
     /// ```
@@ -445,7 +585,8 @@ impl Hunk {
     ///         "-deleted".to_string(),
     ///         "+added".to_string(),
     ///     ],
-    ///     start_line: None,
+    ///     old_start_line: None,
+    ///     new_start_line: None,
     /// };
     /// assert_eq!(hunk.added_lines(), vec!["added"]);
     /// ```
@@ -471,7 +612,8 @@ impl Hunk {
     ///         "-deleted".to_string(),
     ///         "+added".to_string(),
     ///     ],
-    ///     start_line: None,
+    ///     old_start_line: None,
+    ///     new_start_line: None,
     /// };
     /// assert_eq!(hunk.removed_lines(), vec!["deleted"]);
     /// ```
@@ -493,13 +635,15 @@ impl Hunk {
     /// # use mpatch::Hunk;
     /// let hunk_with_changes = Hunk {
     ///     lines: vec![ "+ a".to_string() ],
-    ///     start_line: None,
+    ///     old_start_line: None,
+    ///     new_start_line: None,
     /// };
     /// assert!(hunk_with_changes.has_changes());
     ///
     /// let hunk_without_changes = Hunk {
     ///     lines: vec![ " a".to_string() ],
-    ///     start_line: None,
+    ///     old_start_line: None,
+    ///     new_start_line: None,
     /// };
     /// assert!(!hunk_without_changes.has_changes());
     /// ```
@@ -539,6 +683,96 @@ pub struct Patch {
 }
 
 impl Patch {
+    /// Creates a new `Patch` by comparing two texts.
+    ///
+    /// This function generates a unified diff between the `old_text` and `new_text`
+    /// and then parses it into a `Patch` object. This allows `mpatch` to be used
+    /// not just for applying patches, but also for creating them.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_path` - The path to associate with the patch (e.g., `src/main.rs`).
+    /// * `old_text` - The original text content.
+    /// * `new_text` - The new, modified text content.
+    /// * `context_len` - The number of context lines to include around changes.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use mpatch::Patch;
+    /// let old_code = "fn main() {\n    println!(\"old\");\n}\n";
+    /// let new_code = "fn main() {\n    println!(\"new\");\n}\n";
+    ///
+    /// let patch = Patch::from_texts("src/main.rs", old_code, new_code, 3).unwrap();
+    ///
+    /// assert_eq!(patch.file_path.to_str(), Some("src/main.rs"));
+    /// assert_eq!(patch.hunks.len(), 1);
+    /// assert_eq!(patch.hunks[0].removed_lines(), vec!["    println!(\"old\");"]);
+    /// assert_eq!(patch.hunks[0].added_lines(), vec!["    println!(\"new\");"]);
+    /// ```
+    pub fn from_texts(
+        file_path: impl Into<PathBuf>,
+        old_text: &str,
+        new_text: &str,
+        context_len: usize,
+    ) -> Result<Self, ParseError> {
+        let path = file_path.into();
+        let path_str = path.to_string_lossy();
+
+        let old_header = format!("a/{}", path_str);
+        let new_header = format!("b/{}", path_str);
+        let diff = TextDiff::from_lines(old_text, new_text);
+        let diff_text = format!(
+            "{}",
+            diff.unified_diff()
+                .context_radius(context_len)
+                .header(&old_header, &new_header)
+        );
+
+        // If there's no difference, the text will be empty.
+        if diff_text.trim().is_empty() {
+            return Ok(Patch {
+                file_path: path,
+                hunks: vec![],
+                ends_with_newline: new_text.ends_with('\n') || new_text.is_empty(),
+            });
+        }
+
+        // Wrap in markdown block for our parser
+        let full_diff = format!("```diff\n{}\n```", diff_text);
+
+        let mut patches = parse_diffs(&full_diff)?;
+
+        if patches.is_empty() {
+            // This should not happen if diff_text was not empty, but as a safeguard:
+            Ok(Patch {
+                file_path: path,
+                hunks: vec![],
+                ends_with_newline: new_text.ends_with('\n') || new_text.is_empty(),
+            })
+        } else {
+            Ok(patches.remove(0))
+        }
+    }
+
+    /// Creates a new `Patch` that reverses the changes in this one.
+    ///
+    /// Each hunk in the patch is inverted, swapping additions and deletions.
+    /// This is useful for "un-applying" a patch.
+    ///
+    /// **Note:** The `ends_with_newline` status of the reversed patch is ambiguous
+    /// in the unified diff format, so it defaults to `true`.
+    pub fn invert(&self) -> Patch {
+        Patch {
+            file_path: self.file_path.clone(),
+            hunks: self.hunks.iter().map(|h| h.invert()).collect(),
+            // Inverting this is non-trivial. A standard diff doesn't record
+            // the newline status of the original file if the new file has one.
+            // We'll assume the inverted patch will result in a file with a newline.
+            ends_with_newline: true,
+        }
+    }
+
     /// Checks if the patch represents a file creation.
     ///
     /// A patch is considered a creation if its first hunk is an addition-only
@@ -653,7 +887,8 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
         let mut current_file: Option<PathBuf> = None;
         let mut current_hunks: Vec<Hunk> = Vec::new();
         let mut current_hunk_lines: Vec<String> = Vec::new();
-        let mut current_hunk_start_line: Option<usize> = None;
+        let mut current_hunk_old_start_line: Option<usize> = None;
+        let mut current_hunk_new_start_line: Option<usize> = None;
         let mut ends_with_newline_for_section = true;
 
         // Consume lines within the ```diff block
@@ -669,7 +904,8 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
                     if !current_hunk_lines.is_empty() {
                         current_hunks.push(Hunk {
                             lines: std::mem::take(&mut current_hunk_lines),
-                            start_line: current_hunk_start_line,
+                            old_start_line: current_hunk_old_start_line,
+                            new_start_line: current_hunk_new_start_line,
                         });
                     }
                     if !current_hunks.is_empty() {
@@ -685,7 +921,8 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
                 // `current_file` is cleared and will be set by this `---` line or a subsequent `+++` line.
                 current_file = None;
                 current_hunk_lines.clear();
-                current_hunk_start_line = None;
+                current_hunk_old_start_line = None;
+                current_hunk_new_start_line = None;
                 ends_with_newline_for_section = true;
 
                 let path_part = stripped_line.trim();
@@ -712,11 +949,14 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
                 if !current_hunk_lines.is_empty() {
                     current_hunks.push(Hunk {
                         lines: std::mem::take(&mut current_hunk_lines),
-                        start_line: current_hunk_start_line,
+                        old_start_line: current_hunk_old_start_line,
+                        new_start_line: current_hunk_new_start_line,
                     });
                 }
                 // Parse the line number hint for the new hunk.
-                current_hunk_start_line = parse_hunk_header(line);
+                let (old, new) = parse_hunk_header(line);
+                current_hunk_old_start_line = old;
+                current_hunk_new_start_line = new;
             } else if line.starts_with(['+', '-', ' ']) {
                 // This is a line belonging to the current hunk.
                 current_hunk_lines.push(line.to_string());
@@ -730,7 +970,8 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
         if !current_hunk_lines.is_empty() {
             current_hunks.push(Hunk {
                 lines: current_hunk_lines,
-                start_line: current_hunk_start_line,
+                old_start_line: current_hunk_old_start_line,
+                new_start_line: current_hunk_new_start_line,
             });
         }
 
@@ -771,6 +1012,30 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
     }
 
     Ok(all_patches)
+}
+
+/// Applies a slice of `Patch` objects to a target directory.
+///
+/// This is a high-level convenience function that iterates through a list of
+/// patches and applies each one to the filesystem using `apply_patch_to_file`.
+/// It aggregates the results, including both successful applications and any
+/// "hard" errors encountered (like I/O errors).
+///
+/// This function will continue applying patches even if some fail.
+pub fn apply_patches_to_dir(
+    patches: &[Patch],
+    target_dir: &Path,
+    options: ApplyOptions,
+) -> BatchResult {
+    let results = patches
+        .iter()
+        .map(|patch| {
+            let result = apply_patch_to_file(patch, target_dir, options);
+            (patch.file_path.clone(), result)
+        })
+        .collect();
+
+    BatchResult { results }
 }
 
 /// A convenience function that applies a single [`Patch`] to the filesystem.
@@ -911,7 +1176,7 @@ pub fn apply_patch_to_file(
     );
 
     // --- Apply Patch to Content ---
-    let (new_content, apply_result) = apply_patch_to_content(
+    let result = apply_patch_to_content(
         patch,
         if is_new_file {
             None
@@ -920,6 +1185,8 @@ pub fn apply_patch_to_file(
         },
         &options,
     );
+    let new_content = result.new_content;
+    let apply_result = result.report;
 
     let mut diff = None;
     if options.dry_run {
@@ -980,9 +1247,7 @@ pub fn apply_patch_to_file(
 ///
 /// # Returns
 ///
-/// A tuple `(String, ApplyResult)` where:
-/// - The `String` is the new content after applying the patch.
-/// - The `ApplyResult` contains detailed status for each hunk.
+/// An [`InMemoryResult`] containing the new content and a detailed report.
 ///
 /// # Example
 ///
@@ -1008,11 +1273,11 @@ pub fn apply_patch_to_file(
 ///
 /// // 3. Apply the patch to the content in memory.
 /// let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
-/// let (new_content, result) = apply_patch_to_content(patch, Some(original_content), &options);
+/// let result = apply_patch_to_content(patch, Some(original_content), &options);
 ///
 /// // 4. Check the results.
-/// assert_eq!(new_content, "Hello, mpatch!\n");
-/// assert!(result.all_applied_cleanly());
+/// assert_eq!(result.new_content, "Hello, mpatch!\n");
+/// assert!(result.report.all_applied_cleanly());
 /// # Ok(())
 /// # }
 /// ```
@@ -1020,7 +1285,7 @@ pub fn apply_patch_to_content(
     patch: &Patch,
     original_content: Option<&str>,
     options: &ApplyOptions,
-) -> (String, ApplyResult) {
+) -> InMemoryResult {
     let mut current_lines: Vec<String> = original_content
         .map(|c| c.lines().map(String::from).collect())
         .unwrap_or_default();
@@ -1046,7 +1311,7 @@ pub fn apply_patch_to_content(
             continue;
         }
         info!("  Applying Hunk {}/{}...", hunk_index, patch.hunks.len());
-        trace!("    Hunk start line hint: {:?}", hunk.start_line);
+        trace!("    Hunk start line hint: {:?}", hunk.old_start_line);
 
         let match_block = hunk.get_match_block();
         let replace_block = hunk.get_replace_block();
@@ -1062,7 +1327,12 @@ pub fn apply_patch_to_content(
         trace!("    -----------------------------");
 
         // This is the core logic: find where the hunk should be applied.
-        match find_hunk_location_internal(&match_block, &current_lines, options, hunk.start_line) {
+        match find_hunk_location_internal(
+            &match_block,
+            &current_lines,
+            options,
+            hunk.old_start_line,
+        ) {
             Ok((start_index, match_len)) => {
                 trace!(
                     "    Found location: start_index={}, match_len={}",
@@ -1087,9 +1357,9 @@ pub fn apply_patch_to_content(
                         start_index..start_index + match_len,
                         replace_block.into_iter().map(String::from),
                     );
-                    debug!("    Hunk applied successfully at index {}.", start_index);
-                    hunk_results.push(HunkApplyStatus::Applied);
                 }
+                debug!("    Hunk applied successfully at index {}.", start_index);
+                hunk_results.push(HunkApplyStatus::Applied);
             }
             Err(error) => {
                 // If `find_hunk_location` returns `Err`, the hunk could not be applied.
@@ -1111,7 +1381,11 @@ pub fn apply_patch_to_content(
     }
     trace!("  Final content has {} characters.", new_content.len());
 
-    (new_content, ApplyResult { hunk_results })
+    let report = ApplyResult { hunk_results };
+    InMemoryResult {
+        new_content,
+        report,
+    }
 }
 
 /// Finds the location to apply a hunk to a given text content without modifying it.
@@ -1171,7 +1445,7 @@ pub fn find_hunk_location(
 ) -> Result<HunkLocation, HunkApplyError> {
     let target_lines: Vec<String> = target_content.lines().map(String::from).collect();
     let match_block = hunk.get_match_block();
-    find_hunk_location_internal(&match_block, &target_lines, options, hunk.start_line).map(
+    find_hunk_location_internal(&match_block, &target_lines, options, hunk.old_start_line).map(
         |(start_index, length)| HunkLocation {
             start_index,
             length,
@@ -1286,7 +1560,7 @@ fn find_hunk_location_internal(
     match_block: &[&str],
     target_lines: &[String],
     options: &ApplyOptions,
-    start_line: Option<usize>,
+    old_start_line: Option<usize>,
 ) -> Result<(usize, usize), HunkApplyError> {
     trace!(
         "  find_hunk_location_internal called for a hunk with {} lines to match against {} target lines.",
@@ -1323,7 +1597,7 @@ fn find_hunk_location_internal(
                 Box::new(std::iter::empty())
             };
 
-        match tie_break_with_line_number(exact_matches, start_line, "exact") {
+        match tie_break_with_line_number(exact_matches, old_start_line, "exact") {
             Ok(Some(index)) => {
                 debug!("    Found unique exact match at index {}.", index);
                 return Ok((index, match_block.len()));
@@ -1358,7 +1632,7 @@ fn find_hunk_location_internal(
 
         match tie_break_with_line_number(
             stripped_matches,
-            start_line,
+            old_start_line,
             "exact (ignoring whitespace)",
         ) {
             Ok(Some(index)) => {
@@ -1589,7 +1863,7 @@ fn find_hunk_location_internal(
                 return Ok((start, len));
             }
             // AMBIGUOUS FUZZY MATCH - TRY TO TIE-BREAK
-            if let Some(line) = start_line {
+            if let Some(line) = old_start_line {
                 trace!(
                             "    Ambiguous fuzzy match found at {:?}. Attempting to tie-break using line number hint: {}",
                             potential_matches,
@@ -1792,12 +2066,20 @@ fn tie_break_with_line_number(
 }
 
 /// Parses a hunk header line (e.g., "@@ -1,3 +1,3 @@") to extract the starting line number.
-fn parse_hunk_header(line: &str) -> Option<usize> {
+fn parse_hunk_header(line: &str) -> (Option<usize>, Option<usize>) {
     // We are interested in the original file's line number, which is the first number after '-'.
     // Example: @@ -21,8 +21,8 @@
-    line.split(' ')
-        .nth(1) // Get "-21,8"
-        .and_then(|s| s.strip_prefix('-')) // Get "21,8"
-        .and_then(|s| s.split(',').next()) // Get "21"
-        .and_then(|s| s.parse::<usize>().ok()) // Get 21
+    let parts: Vec<_> = line.split_whitespace().collect();
+    if parts.len() < 3 {
+        return (None, None);
+    }
+    let old_line = parts[1]
+        .strip_prefix('-')
+        .and_then(|s| s.split(',').next())
+        .and_then(|s| s.parse::<usize>().ok());
+    let new_line = parts[2]
+        .strip_prefix('+')
+        .and_then(|s| s.split(',').next())
+        .and_then(|s| s.parse::<usize>().ok());
+    (old_line, new_line)
 }

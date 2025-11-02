@@ -1,7 +1,7 @@
 use indoc::indoc;
 use mpatch::{
-    apply_patch_to_file, find_hunk_location, parse_diffs, ApplyOptions, HunkApplyError,
-    HunkApplyStatus, HunkLocation, ParseError, PatchError,
+    apply_patch_to_file, apply_patches_to_dir, find_hunk_location, parse_diffs, ApplyOptions,
+    HunkApplyError, HunkApplyStatus, HunkLocation, ParseError, Patch, PatchError,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -183,7 +183,7 @@ fn test_parse_file_creation_with_dev_null() {
     let patch = &patches[0];
     assert_eq!(patch.file_path.to_str().unwrap(), "new_from_null.txt");
     assert_eq!(patch.hunks.len(), 1);
-    assert_eq!(patch.hunks[0].start_line, Some(0));
+    assert_eq!(patch.hunks[0].old_start_line, Some(0));
     assert_eq!(patch.hunks[0].get_replace_block(), vec!["hello", "world"]);
     assert!(patch.ends_with_newline);
 }
@@ -203,7 +203,7 @@ fn test_parse_file_creation_with_a_dev_null() {
     let patch = &patches[0];
     assert_eq!(patch.file_path.to_str().unwrap(), "another_new.txt");
     assert_eq!(patch.hunks.len(), 1);
-    assert_eq!(patch.hunks[0].start_line, Some(0));
+    assert_eq!(patch.hunks[0].old_start_line, Some(0));
     assert_eq!(patch.hunks[0].get_replace_block(), vec!["content"]);
 }
 
@@ -223,7 +223,7 @@ fn test_parse_diff_without_ab_prefix() {
     let patch = &patches[0];
     assert_eq!(patch.file_path.to_str().unwrap(), "path/to/file.txt");
     assert_eq!(patch.hunks.len(), 1);
-    assert_eq!(patch.hunks[0].start_line, Some(1));
+    assert_eq!(patch.hunks[0].old_start_line, Some(1));
     assert_eq!(patch.hunks[0].get_replace_block(), vec!["new"]);
 }
 
@@ -242,7 +242,7 @@ fn test_parse_file_creation_without_b_prefix() {
     let patch = &patches[0];
     assert_eq!(patch.file_path.to_str().unwrap(), "new_file.txt");
     assert_eq!(patch.hunks.len(), 1);
-    assert_eq!(patch.hunks[0].start_line, Some(0));
+    assert_eq!(patch.hunks[0].old_start_line, Some(0));
     assert_eq!(patch.hunks[0].get_replace_block(), vec!["content"]);
 }
 
@@ -1597,12 +1597,12 @@ fn test_parse_hunk_header_line_number() {
         ```diff
         --- a/file.txt
         +++ b/file.txt
-        @@ -1,3 +1,3 @@
+        @@ -1,3 +2,3 @@
          a
         -b
         +c
          d
-        @@ -10,1 +10,1 @@
+        @@ -10,1 +12,1 @@
         -x
         +y
         ```
@@ -1611,8 +1611,10 @@ fn test_parse_hunk_header_line_number() {
     assert_eq!(patches.len(), 1);
     let patch = &patches[0];
     assert_eq!(patch.hunks.len(), 2);
-    assert_eq!(patch.hunks[0].start_line, Some(1));
-    assert_eq!(patch.hunks[1].start_line, Some(10));
+    assert_eq!(patch.hunks[0].old_start_line, Some(1));
+    assert_eq!(patch.hunks[0].new_start_line, Some(2));
+    assert_eq!(patch.hunks[1].old_start_line, Some(10));
+    assert_eq!(patch.hunks[1].new_start_line, Some(12));
 }
 
 #[test]
@@ -1646,7 +1648,7 @@ fn test_ambiguous_match_resolved_by_line_number() {
         ```
     "#};
     let patch = &parse_diffs(diff).unwrap()[0];
-    assert_eq!(patch.hunks[0].start_line, Some(7));
+    assert_eq!(patch.hunks[0].old_start_line, Some(7));
 
     // This should succeed because the line number hint resolves the ambiguity.
     let options = ApplyOptions {
@@ -1694,7 +1696,7 @@ fn test_ambiguous_match_fails_with_equidistant_line_hint() {
         ```
     "#};
     let patch = &parse_diffs(diff).unwrap()[0];
-    assert_eq!(patch.hunks[0].start_line, Some(2));
+    assert_eq!(patch.hunks[0].old_start_line, Some(2));
 
     // This should fail because the ambiguity cannot be resolved.
     let options = ApplyOptions {
@@ -1721,7 +1723,8 @@ fn test_hunk_semantic_helpers() {
             "+added 1".to_string(),
             " context 2".to_string(),
         ],
-        start_line: Some(1),
+        old_start_line: Some(1),
+        new_start_line: Some(1),
     };
 
     assert_eq!(hunk.context_lines(), vec!["context 1", "context 2"]);
@@ -1795,4 +1798,102 @@ fn test_patch_is_deletion() {
     let patches = parse_diffs(partial_removal_diff).unwrap();
     // This is not a full deletion because the replace block contains "baz".
     assert!(!patches[0].is_deletion());
+}
+
+#[test]
+fn test_apply_options_builder() {
+    let options = ApplyOptions::builder()
+        .dry_run(true)
+        .fuzz_factor(0.99)
+        .build();
+    assert!(options.dry_run);
+    assert_eq!(options.fuzz_factor, 0.99);
+
+    let default_options = ApplyOptions::builder().build();
+    assert!(!default_options.dry_run);
+    assert_eq!(default_options.fuzz_factor, 0.7);
+}
+
+#[test]
+fn test_patch_from_texts() {
+    let old_text = "hello\nworld\n";
+    let new_text = "hello\nrust\n";
+    let patch = Patch::from_texts("file.txt", old_text, new_text, 3).unwrap();
+
+    assert_eq!(patch.file_path.to_str(), Some("file.txt"));
+    assert_eq!(patch.hunks.len(), 1);
+    let hunk = &patch.hunks[0];
+    assert_eq!(hunk.context_lines(), vec!["hello"]);
+    assert_eq!(hunk.removed_lines(), vec!["world"]);
+    assert_eq!(hunk.added_lines(), vec!["rust"]);
+}
+
+#[test]
+fn test_patch_from_texts_no_change() {
+    let old_text = "hello\nworld\n";
+    let patch = Patch::from_texts("file.txt", old_text, old_text, 3).unwrap();
+    assert!(patch.hunks.is_empty());
+}
+
+#[test]
+fn test_patch_inversion() {
+    let old_text = "line 1\nline 2\n";
+    let new_text = "line 1\nline two\n";
+    let patch = Patch::from_texts("file.txt", old_text, new_text, 3).unwrap();
+    let inverted_patch = patch.invert();
+
+    assert_eq!(inverted_patch.hunks.len(), 1);
+    let inverted_hunk = &inverted_patch.hunks[0];
+    assert_eq!(inverted_hunk.removed_lines(), vec!["line two"]);
+    assert_eq!(inverted_hunk.added_lines(), vec!["line 2"]);
+
+    // Apply the original patch
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("file.txt");
+    fs::write(&file_path, old_text).unwrap();
+    apply_patch_to_file(&patch, dir.path(), ApplyOptions::default()).unwrap();
+    let content_after_patch = fs::read_to_string(&file_path).unwrap();
+    assert_eq!(content_after_patch, new_text);
+
+    // Apply the inverted patch
+    apply_patch_to_file(&inverted_patch, dir.path(), ApplyOptions::default()).unwrap();
+    let content_after_inversion = fs::read_to_string(&file_path).unwrap();
+    assert_eq!(content_after_inversion, old_text);
+}
+
+#[test]
+fn test_apply_patches_to_dir() {
+    let dir = tempdir().unwrap();
+    let file1_path = dir.path().join("file1.txt");
+    let file2_path = dir.path().join("file2.txt");
+    fs::write(&file1_path, "foo\n").unwrap();
+    fs::write(&file2_path, "baz\n").unwrap();
+
+    let diff = indoc! {r#"
+        ```diff
+        --- a/file1.txt
+        +++ b/file1.txt
+        @@ -1 +1 @@
+        -foo
+        +bar
+        --- a/file2.txt
+        +++ b/file2.txt
+        @@ -1 +1 @@
+        -baz
+        +qux
+        ```
+    "#};
+    let patches = parse_diffs(diff).unwrap();
+    assert_eq!(patches.len(), 2);
+
+    let batch_result = apply_patches_to_dir(&patches, dir.path(), ApplyOptions::default());
+
+    assert!(batch_result.all_succeeded());
+    assert!(batch_result.hard_failures().is_empty());
+    assert_eq!(batch_result.results.len(), 2);
+
+    let content1 = fs::read_to_string(file1_path).unwrap();
+    let content2 = fs::read_to_string(file2_path).unwrap();
+    assert_eq!(content1, "bar\n");
+    assert_eq!(content2, "qux\n");
 }

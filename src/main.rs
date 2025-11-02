@@ -3,8 +3,7 @@ use clap::Parser;
 use colored::Colorize;
 use env_logger::Builder;
 use log::{error, info, warn, Level, LevelFilter};
-use mpatch::apply_patch_to_file;
-use mpatch::{parse_diffs, Patch};
+use mpatch::{apply_patches_to_dir, parse_diffs, Patch};
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -83,17 +82,18 @@ fn run(args: Args) -> Result<()> {
     let mut success_count = 0;
     let mut fail_count = 0;
 
-    // Iterate through each parsed patch and apply it.
-    for (i, patch) in all_patches.iter().enumerate() {
+    // Use the new high-level batch application function.
+    let batch_result = apply_patches_to_dir(&all_patches, &args.target_dir, options);
+    let num_ops = batch_result.results.len();
+
+    // Iterate through the results to provide detailed CLI feedback.
+    for (i, (path, result)) in batch_result.results.into_iter().enumerate() {
         info!(""); // Vertical spacing
-        info!(">>> Operation {}/{}", i + 1, all_patches.len());
-        match apply_patch_to_file(patch, &args.target_dir, options) {
+        info!(">>> Operation {}/{}", i + 1, num_ops);
+        match result {
             Ok(patch_result) => {
-                if let Some(diff) = patch_result.diff {
-                    println!(
-                        "----- Proposed Changes for {} -----",
-                        patch.file_path.display()
-                    );
+                if let Some(diff) = &patch_result.diff {
+                    println!("----- Proposed Changes for {} -----", path.display());
                     print!("{}", diff);
                     println!("------------------------------------");
                 }
@@ -101,10 +101,7 @@ fn run(args: Args) -> Result<()> {
                     success_count += 1;
                 } else {
                     fail_count += 1;
-                    error!(
-                        "--- FAILED to apply patch for: {}",
-                        patch.file_path.display()
-                    );
+                    error!("--- FAILED to apply patch for: {}", path.display());
                     log_failed_hunks(&patch_result.report);
                 }
             }
@@ -114,7 +111,7 @@ fn run(args: Args) -> Result<()> {
                 return Err(anyhow::Error::from(e)).with_context(|| {
                     format!(
                         "A fatal error occurred while applying patch for: {}",
-                        patch.file_path.display()
+                        path.display()
                     )
                 });
             }
