@@ -90,6 +90,58 @@
 //! # Ok(())
 //! # }
 //! ````
+//!
+//! ### Advanced In-Memory Usage with Error Handling
+//!
+//! This example demonstrates how to use `apply_patch_to_content` for in-memory
+//! operations and how to programmatically handle cases where a patch only
+//! partially applies.
+//!
+//! ````rust
+//! use mpatch::{parse_diffs, apply_patch_to_content, HunkApplyError};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! // 1. Define original content and a patch where the second hunk will fail.
+//! let original_content = "line 1\nline 2\nline 3\n\nline 5\nline 6\nline 7\n";
+//! let diff_content = r#"
+//! ```diff
+//! --- a/partial.txt
+//! +++ b/partial.txt
+//! @@ -1,3 +1,3 @@
+//!  line 1
+//! -line 2
+//! +line two
+//!  line 3
+//! @@ -5,3 +5,3 @@
+//!  line 5
+//! -line WRONG CONTEXT
+//! +line six
+//!  line 7
+//! ```
+//! "#;
+//!
+//! // 2. Parse the diff.
+//! let patches = parse_diffs(diff_content)?;
+//! let patch = &patches[0];
+//!
+//! // 3. Apply the patch to the content in memory.
+//! let (new_content, result) = apply_patch_to_content(patch, Some(original_content), 0.0);
+//!
+//! // 4. Verify that the patch did not apply cleanly.
+//! assert!(!result.all_applied_cleanly());
+//!
+//! // 5. Inspect the specific failures.
+//! let failures = result.failures();
+//! assert_eq!(failures.len(), 1);
+//! assert_eq!(failures[0].hunk_index, 2); // Hunk indices are 1-based.
+//! assert!(matches!(failures[0].reason, HunkApplyError::ContextNotFound));
+//!
+//! // 6. Verify that the content was still partially modified by the successful first hunk.
+//! let expected_content = "line 1\nline two\nline 3\n\nline 5\nline 6\nline 7\n";
+//! assert_eq!(new_content, expected_content);
+//! # Ok(())
+//! # }
+//! ````
 use log::{debug, info, trace, warn};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
