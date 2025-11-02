@@ -39,7 +39,7 @@
 //! temporary directory.
 //!
 //! ````rust
-//! use mpatch::{parse_diffs, apply_patch};
+//! use mpatch::{parse_diffs, apply_patch, ApplyOptions};
 //! use std::fs;
 //! use tempfile::{tempdir, TempDir};
 //!
@@ -73,11 +73,12 @@
 //! let patch = &patches[0];
 //!
 //! // 4. Apply the patch.
-//! // The result contains details about each hunk. We can check if all applied cleanly.
-//! let apply_result = apply_patch(patch, dir.path(), false, 0.0)?;
+//! let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+//! let result = apply_patch(patch, dir.path(), options)?;
 //!
 //! // The patch should apply cleanly.
-//! assert!(apply_result.all_applied_cleanly());
+//! assert!(result.report.all_applied_cleanly());
+//! assert!(result.diff.is_none());
 //!
 //! // 5. Verify the file was changed correctly.
 //! let new_content = fs::read_to_string(&file_path)?;
@@ -155,6 +156,36 @@ pub enum HunkApplyStatus {
     SkippedNoChanges,
     /// The hunk failed to apply for the specified reason.
     Failed(HunkApplyError),
+}
+
+/// Options for configuring how a patch is applied.
+#[derive(Debug, Clone, Copy)]
+pub struct ApplyOptions {
+    /// If `true`, no files will be modified. Instead, a diff of the proposed
+    /// changes will be generated and returned in [`PatchResult`].
+    pub dry_run: bool,
+    /// The similarity threshold for fuzzy matching (0.0 to 1.0).
+    /// Higher is stricter. `0.0` disables fuzzy matching.
+    pub fuzz_factor: f32,
+}
+
+impl Default for ApplyOptions {
+    fn default() -> Self {
+        Self {
+            dry_run: false,
+            fuzz_factor: 0.7,
+        }
+    }
+}
+
+/// The result of an `apply_patch` operation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PatchResult {
+    /// Detailed results for each hunk within the patch operation.
+    pub report: ApplyResult,
+    /// The unified diff of the proposed changes. This is only populated
+    /// when `dry_run` was set to `true` in [`ApplyOptions`].
+    pub diff: Option<String>,
 }
 
 /// Contains detailed results for each hunk within a patch operation.
@@ -475,29 +506,24 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, PatchError> {
 /// # Arguments
 ///
 /// * `patch` - The [`Patch`] object to apply.
-/// * `target_dir` - The base directory where the patch should be applied.
-///   The `patch.file_path` will be joined to this directory.
-/// * `dry_run` - If `true`, the function will not modify any files. Instead, it
-///   will print a diff of the proposed changes to standard output.
-/// * `fuzz_factor` - A float between `0.0` and `1.0` that sets the similarity
-///   threshold for fuzzy matching.
-///   - `1.0` requires a perfect match.
-///   - `0.7` (the default for the CLI) allows for some differences.
-///   - `0.0` disables fuzzy matching, only allowing exact matches (after
-///     trimming trailing whitespace).
+/// * `target_dir` - The base directory where the patch should be applied. The
+///   `patch.file_path` will be joined to this directory.
+/// * `options` - Configuration for the patch operation, such as `dry_run` and
+///   `fuzz_factor`.
 ///
 /// # Returns
 ///
-/// - `Ok(ApplyResult)` on success, which contains detailed status for each hunk.
-///   The file may be in a partially patched state if some hunks failed.
-/// - `Err(PatchError)` for "hard" errors like I/O problems, path traversal
-///   violations, or a missing target file.
+/// - `Ok(PatchResult)` on success. The `PatchResult` contains a detailed report
+///   for each hunk and, if `dry_run` was enabled, a diff of the proposed changes.
+///   If some hunks failed, the file may be in a partially patched state (unless
+///   in dry-run mode).
+/// - `Err(PatchError)` for "hard" errors like I/O problems, path traversal violations,
+///   or a missing target file.
 pub fn apply_patch(
     patch: &Patch,
     target_dir: &Path,
-    dry_run: bool,
-    fuzz_factor: f32,
-) -> Result<ApplyResult, PatchError> {
+    options: ApplyOptions,
+) -> Result<PatchResult, PatchError> {
     let target_file_path = target_dir.join(&patch.file_path);
     info!("Applying patch to: {}", patch.file_path.display());
 
@@ -583,28 +609,24 @@ pub fn apply_patch(
         } else {
             Some(&original_content)
         },
-        fuzz_factor,
+        options.fuzz_factor,
     );
 
-    if dry_run {
-        // In dry-run mode, generate and print a diff instead of writing to the file.
+    let mut diff = None;
+    if options.dry_run {
+        // In dry-run mode, generate a diff instead of writing to the file.
         info!(
             "  DRY RUN: Would write changes to '{}'",
             patch.file_path.display()
         );
-        let diff = unified_diff(
+        let diff_text = unified_diff(
             similar::Algorithm::default(),
             &original_content,
             &new_content,
             3,
             Some(("a", "b")),
         );
-        println!(
-            "----- Proposed Changes for {} -----",
-            patch.file_path.display()
-        );
-        print!("{}", diff);
-        println!("------------------------------------");
+        diff = Some(diff_text.to_string());
     } else {
         // Write the modified content to the file system.
         if let Some(parent) = target_file_path.parent() {
@@ -627,7 +649,10 @@ pub fn apply_patch(
         }
     }
 
-    Ok(apply_result)
+    Ok(PatchResult {
+        report: apply_result,
+        diff,
+    })
 }
 
 /// Applies the logic of a patch to a string content.

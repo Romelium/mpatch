@@ -1,5 +1,7 @@
 use indoc::indoc;
-use mpatch::{apply_patch, parse_diffs, HunkApplyError, HunkApplyStatus, PatchError};
+use mpatch::{
+    apply_patch, parse_diffs, ApplyOptions, HunkApplyError, HunkApplyStatus, PatchError,
+};
 use std::fs;
 use tempfile::tempdir;
 
@@ -279,9 +281,11 @@ fn test_apply_simple_patch() {
         ```
     "};
     let patch = &parse_diffs(diff).unwrap()[0];
-    let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+    let result = apply_patch(patch, dir.path(), options).unwrap();
 
-    assert!(result.all_applied_cleanly());
+    assert!(result.report.all_applied_cleanly());
+    assert!(result.diff.is_none());
     let content = fs::read_to_string(file_path).unwrap();
     assert_eq!(content, "line one\nline 2\nline three\n");
 }
@@ -311,9 +315,11 @@ fn test_apply_multiple_hunks_in_one_file() {
         ```
     "#};
     let patch = &parse_diffs(diff).unwrap()[0];
-    let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+    let result = apply_patch(patch, dir.path(), options).unwrap();
 
-    assert!(result.all_applied_cleanly());
+    assert!(result.report.all_applied_cleanly());
+    assert!(result.diff.is_none());
     let content = fs::read_to_string(file_path).unwrap();
     let expected_content =
         "New Header\n\nunchanged line 1\n\nMiddle\n\nunchanged line 2\n\nNew Footer\n";
@@ -336,9 +342,11 @@ fn test_file_creation() {
         ```
     "};
     let patch = &parse_diffs(diff).unwrap()[0];
-    let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+    let result = apply_patch(patch, dir.path(), options).unwrap();
 
-    assert!(result.all_applied_cleanly());
+    assert!(result.report.all_applied_cleanly());
+    assert!(result.diff.is_none());
     let content = fs::read_to_string(file_path).unwrap();
     assert_eq!(content, "Hello\nNew World\n");
 }
@@ -360,9 +368,11 @@ fn test_patch_to_empty_file() {
         ```
     "};
     let patch = &parse_diffs(diff).unwrap()[0];
-    let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+    let result = apply_patch(patch, dir.path(), options).unwrap();
 
-    assert!(result.all_applied_cleanly());
+    assert!(result.report.all_applied_cleanly());
+    assert!(result.diff.is_none());
     let content = fs::read_to_string(file_path).unwrap();
     assert_eq!(content, "line 1\nline 2\n");
 }
@@ -382,9 +392,11 @@ fn test_file_creation_in_subdirectory() {
         ```
     "};
     let patch = &parse_diffs(diff).unwrap()[0];
-    let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+    let result = apply_patch(patch, dir.path(), options).unwrap();
 
-    assert!(result.all_applied_cleanly());
+    assert!(result.report.all_applied_cleanly());
+    assert!(result.diff.is_none());
     assert!(file_path.exists());
     let content = fs::read_to_string(file_path).unwrap();
     assert_eq!(content, "hello from subdir\n");
@@ -407,9 +419,11 @@ fn test_file_deletion_by_removing_all_content() {
         ```
     "};
     let patch = &parse_diffs(diff).unwrap()[0];
-    let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+    let result = apply_patch(patch, dir.path(), options).unwrap();
 
-    assert!(result.all_applied_cleanly());
+    assert!(result.report.all_applied_cleanly());
+    assert!(result.diff.is_none());
     let content = fs::read_to_string(file_path).unwrap();
     assert_eq!(content, ""); // The file is now empty
 }
@@ -432,9 +446,11 @@ fn test_no_newline_at_end_of_file() {
         ```
     "#};
     let patch = &parse_diffs(diff).unwrap()[0];
-    let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+    let result = apply_patch(patch, dir.path(), options).unwrap();
 
-    assert!(result.all_applied_cleanly());
+    assert!(result.report.all_applied_cleanly());
+    assert!(result.diff.is_none());
     let content = fs::read_to_string(file_path).unwrap();
     assert_eq!(content, "line one no newline");
 }
@@ -460,9 +476,11 @@ fn test_fuzzy_match_succeeds() {
     "};
     let patch = &parse_diffs(diff).unwrap()[0];
     // Use a fuzz factor that allows the match
-    let result = apply_patch(patch, dir.path(), false, 0.5).unwrap();
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.5 };
+    let result = apply_patch(patch, dir.path(), options).unwrap();
 
-    assert!(result.all_applied_cleanly());
+    assert!(result.report.all_applied_cleanly());
+    assert!(result.diff.is_none());
     let content = fs::read_to_string(file_path).unwrap();
     // The expected behavior of patch is to replace the matched block
     // with the content from the patch, including the context lines.
@@ -495,10 +513,11 @@ fn test_fuzzy_match_with_internal_insertion() {
     let patch = &parse_diffs(diff).unwrap()[0];
     // The old fixed-window logic would fail this. The new flexible window should find it.
     // It should match the 4 lines in the file against the 3 lines in the patch context.
-    let result = apply_patch(patch, dir.path(), false, 0.7).unwrap();
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.7 };
+    let result = apply_patch(patch, dir.path(), options).unwrap();
 
     assert!(
-        result.all_applied_cleanly(),
+        result.report.all_applied_cleanly(),
         "Patch should apply by matching a slightly larger context block"
     );
     let content = fs::read_to_string(file_path).unwrap();
@@ -526,10 +545,11 @@ fn test_match_with_different_trailing_whitespace() {
     "};
     let patch = &parse_diffs(diff).unwrap()[0];
     // This should succeed with exact matching because of the trailing whitespace logic
-    let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+    let result = apply_patch(patch, dir.path(), options).unwrap();
 
     assert!(
-        result.all_applied_cleanly(),
+        result.report.all_applied_cleanly(),
         "Patch should apply by ignoring trailing whitespace"
     );
     let content = fs::read_to_string(file_path).unwrap();
@@ -562,14 +582,15 @@ fn test_ambiguous_match_fails() {
     "};
     let patch = &parse_diffs(diff).unwrap()[0];
     // This should fail because the context appears twice and the hint is ambiguous
-    let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+    let result = apply_patch(patch, dir.path(), options).unwrap();
 
     assert!(
-        !result.all_applied_cleanly(),
+        !result.report.all_applied_cleanly(),
         "Patch should have failed due to ambiguity"
     );
     assert!(matches!(
-        result.hunk_results[0],
+        result.report.hunk_results[0],
         HunkApplyStatus::Failed(HunkApplyError::AmbiguousExactMatch(_))
     ));
     // Ensure file is unchanged
@@ -606,14 +627,15 @@ fn test_ambiguous_fuzzy_match_fails() {
     "};
     let patch = &parse_diffs(diff).unwrap()[0];
     // This should fail because two locations have the same fuzzy score and the hint is ambiguous
-    let result = apply_patch(patch, dir.path(), false, 0.5).unwrap();
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.5 };
+    let result = apply_patch(patch, dir.path(), options).unwrap();
 
     assert!(
-        !result.all_applied_cleanly(),
+        !result.report.all_applied_cleanly(),
         "Patch should have failed due to fuzzy ambiguity"
     );
     assert!(matches!(
-        result.hunk_results[0],
+        result.report.hunk_results[0],
         HunkApplyStatus::Failed(HunkApplyError::AmbiguousFuzzyMatch(_))
     ));
     // Ensure file is unchanged
@@ -640,9 +662,11 @@ fn test_dry_run() {
         ```
     "};
     let patch = &parse_diffs(diff).unwrap()[0];
-    let result = apply_patch(patch, dir.path(), true, 0.0).unwrap(); // dry_run = true
+    let options = ApplyOptions { dry_run: true, fuzz_factor: 0.0 };
+    let result = apply_patch(patch, dir.path(), options).unwrap(); // dry_run = true
 
-    assert!(result.all_applied_cleanly());
+    assert!(result.report.all_applied_cleanly());
+    assert!(result.diff.is_some());
     // File should not have been modified
     let content = fs::read_to_string(file_path).unwrap();
     assert_eq!(content, original_content);
@@ -662,7 +686,8 @@ fn test_path_traversal_is_blocked() {
         ```
     "};
     let patch = &parse_diffs(diff).unwrap()[0];
-    let result = apply_patch(patch, dir.path(), false, 0.0);
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+    let result = apply_patch(patch, dir.path(), options);
 
     assert!(matches!(result, Err(PatchError::PathTraversal(_))));
     // Ensure no file was created outside the temp dir
@@ -684,7 +709,8 @@ fn test_path_traversal_with_dot_is_blocked() {
         ```
     "};
     let patch = &parse_diffs(diff).unwrap()[0];
-    let result = apply_patch(patch, dir.path(), false, 0.0);
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+    let result = apply_patch(patch, dir.path(), options);
 
     assert!(matches!(result, Err(PatchError::PathTraversal(_))));
     let evil_path = dir.path().parent().unwrap().join("evil.txt");
@@ -707,7 +733,8 @@ fn test_apply_to_nonexistent_file_fails_if_not_creation() {
         ```
     "};
     let patch = &parse_diffs(diff).unwrap()[0];
-    let result = apply_patch(patch, dir.path(), false, 0.0);
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+    let result = apply_patch(patch, dir.path(), options);
 
     assert!(matches!(result, Err(PatchError::TargetNotFound(_))));
 }
@@ -738,17 +765,18 @@ fn test_partial_apply_fails_on_second_hunk() {
     "#};
     let patch = &parse_diffs(diff).unwrap()[0];
     // The second hunk has wrong context ("line WRONG") and will fail to apply.
-    let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+    let result = apply_patch(patch, dir.path(), options).unwrap();
 
     // The operation should be reported as a soft failure.
-    assert!(!result.all_applied_cleanly());
+    assert!(!result.report.all_applied_cleanly());
 
     // The file should be in a partially-patched state (first hunk applied).
     let content = fs::read_to_string(file_path).unwrap();
-    assert_eq!(result.hunk_results.len(), 2);
-    assert!(matches!(result.hunk_results[0], HunkApplyStatus::Applied));
+    assert_eq!(result.report.hunk_results.len(), 2);
+    assert!(matches!(result.report.hunk_results[0], HunkApplyStatus::Applied));
     assert!(matches!(
-        result.hunk_results[1],
+        result.report.hunk_results[1],
         HunkApplyStatus::Failed(HunkApplyError::ContextNotFound)
     ));
     let expected_content_after_first_hunk = "line 1\nline two\nline 3\n\nline 5\nline 6\nline 7\n";
@@ -772,10 +800,11 @@ fn test_creation_patch_fails_on_non_empty_file() {
     "};
     let patch = &parse_diffs(diff).unwrap()[0];
     // This should fail because a creation patch (empty match block) cannot apply to a non-empty file.
-    let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+    let result = apply_patch(patch, dir.path(), options).unwrap();
 
     assert!(
-        !result.all_applied_cleanly(),
+        !result.report.all_applied_cleanly(),
         "Creation patch should fail on a non-empty file"
     );
     let content = fs::read_to_string(file_path).unwrap();
@@ -802,10 +831,11 @@ fn test_hunk_with_no_changes_is_skipped() {
     "};
     let patch = &parse_diffs(diff).unwrap()[0];
     assert!(!patch.hunks[0].has_changes());
-    let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+    let result = apply_patch(patch, dir.path(), options).unwrap();
 
     assert!(
-        result.all_applied_cleanly(),
+        result.report.all_applied_cleanly(),
         "Patch with no changes should apply successfully"
     );
     let content = fs::read_to_string(file_path).unwrap();
@@ -879,14 +909,15 @@ fn test_fuzzy_match_fails_below_threshold() {
     "};
     let patch = &parse_diffs(diff).unwrap()[0];
     // Use a high fuzz factor that will not be met
-    let result = apply_patch(patch, dir.path(), false, 0.9).unwrap();
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.9 };
+    let result = apply_patch(patch, dir.path(), options).unwrap();
 
     assert!(
-        !result.all_applied_cleanly(),
+        !result.report.all_applied_cleanly(),
         "Patch should fail to apply as no hunk meets the fuzzy threshold"
     );
     assert!(matches!(
-        result.hunk_results[0],
+        result.report.hunk_results[0],
         HunkApplyStatus::Failed(HunkApplyError::FuzzyMatchBelowThreshold { .. })
     ));
     let content = fs::read_to_string(file_path).unwrap();
@@ -920,7 +951,8 @@ fn test_apply_to_readonly_file_fails() {
         ```
     "};
     let patch = &parse_diffs(diff).unwrap()[0];
-    let result = apply_patch(patch, dir.path(), false, 0.0);
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+    let result = apply_patch(patch, dir.path(), options);
 
     assert!(
         matches!(result, Err(PatchError::Io { .. })),
@@ -954,7 +986,8 @@ fn test_apply_to_path_that_is_a_directory() {
         ```
     "};
     let patch = &parse_diffs(diff).unwrap()[0];
-    let result = apply_patch(patch, dir.path(), false, 0.0);
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+    let result = apply_patch(patch, dir.path(), options);
 
     // Reading the original file content will fail because it's a directory.
     assert!(
@@ -978,9 +1011,11 @@ fn test_file_creation_with_spaces_in_path() {
         ```
     "};
     let patch = &parse_diffs(diff).unwrap()[0];
-    let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+    let result = apply_patch(patch, dir.path(), options).unwrap();
 
-    assert!(result.all_applied_cleanly(), "Patch should be applied successfully");
+    assert!(result.report.all_applied_cleanly(), "Patch should be applied successfully");
+    assert!(result.diff.is_none());
     assert!(
         file_path.exists(),
         "File with spaces in name should be created"
@@ -1007,9 +1042,11 @@ fn test_apply_hunk_to_file_beginning() {
         ```
     "};
     let patch = &parse_diffs(diff).unwrap()[0];
-    let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+    let result = apply_patch(patch, dir.path(), options).unwrap();
 
-    assert!(result.all_applied_cleanly());
+    assert!(result.report.all_applied_cleanly());
+    assert!(result.diff.is_none());
     let content = fs::read_to_string(file_path).unwrap();
     assert_eq!(content, "new first line\nline 1\nline 2\n");
 }
@@ -1032,9 +1069,11 @@ fn test_apply_hunk_to_file_end() {
         ```
     "};
     let patch = &parse_diffs(diff).unwrap()[0];
-    let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+    let result = apply_patch(patch, dir.path(), options).unwrap();
 
-    assert!(result.all_applied_cleanly());
+    assert!(result.report.all_applied_cleanly());
+    assert!(result.diff.is_none());
     let content = fs::read_to_string(file_path).unwrap();
     assert_eq!(content, "line 1\nline 2\nnew last line\n");
 }
@@ -1087,10 +1126,11 @@ fn test_path_normalization_within_project() {
     "};
     let patch = &parse_diffs(diff).unwrap()[0];
     // The patch is applied from the project root (`dir`).
-    let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+    let result = apply_patch(patch, dir.path(), options).unwrap();
 
     assert!(
-        result.all_applied_cleanly(),
+        result.report.all_applied_cleanly(),
         "Patch with '..' that resolves inside the project should apply"
     );
     let content = fs::read_to_string(file_path).unwrap();
@@ -1115,9 +1155,11 @@ fn test_apply_hunk_with_single_line_match_block() {
     "};
     let patch = &parse_diffs(diff).unwrap()[0];
     assert_eq!(patch.hunks[0].get_match_block(), vec!["unique_line"]);
-    let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+    let result = apply_patch(patch, dir.path(), options).unwrap();
 
-    assert!(result.all_applied_cleanly());
+    assert!(result.report.all_applied_cleanly());
+    assert!(result.diff.is_none());
     let content = fs::read_to_string(file_path).unwrap();
     assert_eq!(content, "changed_line\n");
 }
@@ -1143,9 +1185,11 @@ fn test_file_creation_with_unicode_path() {
 
     let patch = &parse_diffs(&diff).unwrap()[0];
     assert_eq!(patch.file_path.to_str().unwrap(), file_name);
-    let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+    let result = apply_patch(patch, dir.path(), options).unwrap();
 
-    assert!(result.all_applied_cleanly(), "Patch should be applied successfully");
+    assert!(result.report.all_applied_cleanly(), "Patch should be applied successfully");
+    assert!(result.diff.is_none());
     assert!(
         file_path.exists(),
         "File with unicode name should be created"
@@ -1169,7 +1213,8 @@ fn test_path_traversal_with_absolute_path_is_blocked() {
         ```
     "};
     let patch = &parse_diffs(diff).unwrap()[0];
-    let result = apply_patch(patch, dir.path(), false, 0.0);
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+    let result = apply_patch(patch, dir.path(), options);
 
     assert!(matches!(result, Err(PatchError::PathTraversal(_))));
 }
@@ -1196,10 +1241,11 @@ fn test_apply_patch_where_file_is_prefix_of_context() {
     "#};
     let patch = &parse_diffs(diff).unwrap()[0];
     // Use fuzzy matching to enable the end-of-file logic.
-    let result = apply_patch(patch, dir.path(), false, 0.7).unwrap();
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.7 };
+    let result = apply_patch(patch, dir.path(), options).unwrap();
 
     assert!(
-        result.all_applied_cleanly(),
+        result.report.all_applied_cleanly(),
         "Patch should apply via end-of-file fuzzy logic"
     );
     let content = fs::read_to_string(file_path).unwrap();
@@ -1228,10 +1274,11 @@ fn test_apply_patch_at_end_of_file_with_fuzz_and_missing_context() {
         ```
     "#};
     let patch = &parse_diffs(diff).unwrap()[0];
-    let result = apply_patch(patch, dir.path(), false, 0.7).unwrap();
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.7 };
+    let result = apply_patch(patch, dir.path(), options).unwrap();
 
     assert!(
-        result.all_applied_cleanly(),
+        result.report.all_applied_cleanly(),
         "Patch should apply via end-of-file fuzzy logic"
     );
     let content = fs::read_to_string(file_path).unwrap();
@@ -1262,10 +1309,11 @@ fn test_fuzzy_match_with_missing_line_in_patch_context() {
     let patch = &parse_diffs(diff).unwrap()[0];
     // With line-based diffing, this should now have a high similarity score
     // and apply successfully, even though the patch context is missing a line.
-    let result = apply_patch(patch, dir.path(), false, 0.7).unwrap();
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.7 };
+    let result = apply_patch(patch, dir.path(), options).unwrap();
 
     assert!(
-        result.all_applied_cleanly(),
+        result.report.all_applied_cleanly(),
         "Patch should apply successfully despite a missing line in its context"
     );
     let content = fs::read_to_string(file_path).unwrap();
@@ -1296,10 +1344,11 @@ fn test_fuzzy_match_with_extra_line_in_patch_context() {
     let patch = &parse_diffs(diff).unwrap()[0];
     // The fuzzy logic should match the 3-line context against the 2-line file
     // content and apply the change.
-    let result = apply_patch(patch, dir.path(), false, 0.7).unwrap();
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.7 };
+    let result = apply_patch(patch, dir.path(), options).unwrap();
 
     assert!(
-        result.all_applied_cleanly(),
+        result.report.all_applied_cleanly(),
         "Patch should apply successfully despite an extra line in its context"
     );
     let content = fs::read_to_string(file_path).unwrap();
@@ -1367,10 +1416,11 @@ fn test_ambiguous_match_resolved_by_line_number() {
     assert_eq!(patch.hunks[0].start_line, Some(7));
 
     // This should succeed because the line number hint resolves the ambiguity.
-    let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+    let result = apply_patch(patch, dir.path(), options).unwrap();
 
     assert!(
-        result.all_applied_cleanly(),
+        result.report.all_applied_cleanly(),
         "Patch should have applied successfully using line number hint"
     );
     let content = fs::read_to_string(file_path).unwrap();
@@ -1411,10 +1461,11 @@ fn test_ambiguous_match_fails_with_equidistant_line_hint() {
     assert_eq!(patch.hunks[0].start_line, Some(2));
 
     // This should fail because the ambiguity cannot be resolved.
-    let result = apply_patch(patch, dir.path(), false, 0.0).unwrap();
+    let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+    let result = apply_patch(patch, dir.path(), options).unwrap();
 
     assert!(
-        !result.all_applied_cleanly(),
+        !result.report.all_applied_cleanly(),
         "Patch should fail due to unresolved ambiguity"
     );
     let content = fs::read_to_string(file_path).unwrap();

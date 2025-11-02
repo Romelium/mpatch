@@ -64,12 +64,17 @@ fn run(args: Args) -> Result<()> {
         return Ok(());
     }
 
+    let options = mpatch::ApplyOptions {
+        dry_run: args.dry_run,
+        fuzz_factor: args.fuzz_factor,
+    };
+
     info!(""); // Vertical spacing for readability
     info!("Found {} patch operation(s) to perform.", all_patches.len());
-    if args.fuzz_factor > 0.0 {
+    if options.fuzz_factor > 0.0 {
         info!(
             "Fuzzy matching enabled with threshold: {:.2}",
-            args.fuzz_factor
+            options.fuzz_factor
         );
     } else {
         info!("Fuzzy matching disabled.");
@@ -82,14 +87,17 @@ fn run(args: Args) -> Result<()> {
     for (i, patch) in all_patches.iter().enumerate() {
         info!(""); // Vertical spacing
         info!(">>> Operation {}/{}", i + 1, all_patches.len());
-        match apply_patch(
-            patch,
-            &args.target_dir,
-            args.dry_run,
-            args.fuzz_factor,
-        ) {
-            Ok(apply_result) => {
-                if apply_result.all_applied_cleanly() {
+        match apply_patch(patch, &args.target_dir, options) {
+            Ok(patch_result) => {
+                if let Some(diff) = patch_result.diff {
+                    println!(
+                        "----- Proposed Changes for {} -----",
+                        patch.file_path.display()
+                    );
+                    print!("{}", diff);
+                    println!("------------------------------------");
+                }
+                if patch_result.report.all_applied_cleanly() {
                     success_count += 1;
                 } else {
                     fail_count += 1;
@@ -97,7 +105,7 @@ fn run(args: Args) -> Result<()> {
                         "--- FAILED to apply patch for: {}",
                         patch.file_path.display()
                     );
-                    log_failed_hunks(&apply_result);
+                    log_failed_hunks(&patch_result.report);
                 }
             }
             Err(e) => {
