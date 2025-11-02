@@ -780,71 +780,58 @@ fn find_hunk_location(
     // --- STRATEGY 1: Exact Match ---
     // The fastest and most reliable method.
     trace!("    Attempting exact match for hunk...");
-    let exact_matches: Vec<_> = if match_block.len() <= target_lines.len() {
-        target_lines
-            .windows(match_block.len())
-            .enumerate()
-            .filter(|(_, window)| *window == match_block)
-            .map(|(i, _)| i)
-            .collect()
-    } else {
-        Vec::new()
-    };
+    {
+        let exact_matches: Box<dyn Iterator<Item = usize>> =
+            if match_block.len() <= target_lines.len() {
+                Box::new(
+                    target_lines
+                        .windows(match_block.len())
+                        .enumerate()
+                        .filter(|(_, window)| *window == match_block)
+                        .map(|(i, _)| i),
+                )
+            } else {
+                Box::new(std::iter::empty())
+            };
 
-    if !exact_matches.is_empty() {
-        trace!(
-            "      Found {} exact match candidate(s) at indices: {:?}",
-            exact_matches.len(),
-            exact_matches
-        );
-    } else {
-        trace!("      No exact matches found.");
-    }
-
-    // If we have one or more matches, try to resolve ambiguity.
-    if let Some(index) = tie_break_with_line_number(&exact_matches, start_line, "exact") {
-        debug!("    Found unique exact match at index {}.", index);
-        return Some((index, match_block.len()));
+        if let Some(index) = tie_break_with_line_number(exact_matches, start_line, "exact") {
+            debug!("    Found unique exact match at index {}.", index);
+            return Some((index, match_block.len()));
+        }
     }
 
     // --- STRATEGY 2: Exact Match (Ignoring Trailing Whitespace) ---
     // Handles minor formatting differences.
     trace!("    Attempting exact match (ignoring trailing whitespace)...");
-    let match_stripped: Vec<_> = match_block.iter().map(|s| s.trim_end()).collect();
-    let stripped_matches: Vec<_> = if match_block.len() <= target_lines.len() {
-        target_lines
-            .windows(match_block.len())
-            .enumerate()
-            .filter(|(_, window)| {
-                window
-                    .iter()
-                    .map(|s| s.trim_end())
-                    .eq(match_stripped.iter().copied())
-            })
-            .map(|(i, _)| i)
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    if !stripped_matches.is_empty() {
-        trace!(
-            "      Found {} whitespace-insensitive match candidate(s) at indices: {:?}",
-            stripped_matches.len(),
-            stripped_matches
-        );
-    } else {
-        trace!("      No whitespace-insensitive matches found.");
-    }
-
-    if let Some(index) =
-        tie_break_with_line_number(&stripped_matches, start_line, "exact (ignoring whitespace)")
     {
-        debug!(
-            "    Found unique whitespace-insensitive match at index {}.",
-            index
-        );
-        return Some((index, match_block.len()));
+        let match_stripped: Vec<_> = match_block.iter().map(|s| s.trim_end()).collect();
+        let stripped_matches: Box<dyn Iterator<Item = usize>> =
+            if match_block.len() <= target_lines.len() {
+                Box::new(
+                    target_lines
+                        .windows(match_block.len())
+                        .enumerate()
+                        .filter(move |(_, window)| {
+                            window
+                                .iter()
+                                .map(|s| s.trim_end())
+                                .eq(match_stripped.iter().copied())
+                        })
+                        .map(|(i, _)| i),
+                )
+            } else {
+                Box::new(std::iter::empty())
+            };
+
+        if let Some(index) =
+            tie_break_with_line_number(stripped_matches, start_line, "exact (ignoring whitespace)")
+        {
+            debug!(
+                "    Found unique whitespace-insensitive match at index {}.",
+                index
+            );
+            return Some((index, match_block.len()));
+        }
     }
 
     // --- STRATEGY 3: Fuzzy Match (with flexible window) ---
@@ -1090,37 +1077,59 @@ fn find_hunk_location(
     None
 }
 
-/// Given a list of match indices, attempts to find the best one using the
+/// Given an iterator of match indices, attempts to find the best one using the
 /// hunk's original line number as a hint. Returns the index of the best match,
 /// or `None` if the ambiguity cannot be resolved.
+/// This function avoids collecting matches into a vector if there are 0 or 1 matches.
 fn tie_break_with_line_number(
-    matches: &[usize],
+    mut matches: impl Iterator<Item = usize>,
     start_line: Option<usize>,
     match_type: &str,
 ) -> Option<usize> {
-    if matches.is_empty() {
+    // --- Step 1: Check for 0 or 1 matches without allocation ---
+    let first_match = match matches.next() {
+        Some(m) => m,
+        None => {
+            trace!("      No {} matches found.", match_type);
+            return None;
+        }
+    };
+
+    let second_match = matches.next();
+    if second_match.is_none() {
+        // Exactly one match was found.
         trace!(
-            "    tie_break: No matches to evaluate for '{}' match.",
-            match_type
+            "      Found 1 {} match candidate at index: {}",
+            match_type,
+            first_match
         );
-        return None;
-    }
-    if matches.len() == 1 {
-        // If there's only one match, there's no ambiguity to resolve.
         trace!(
             "    tie_break: Only one match found for '{}' match at index {}. No tie-break needed.",
             match_type,
-            matches[0]
+            first_match
         );
-        return Some(matches[0]);
+        return Some(first_match);
     }
+
+    // --- Step 2: Multiple matches found, collect and tie-break ---
+    // At least two matches exist. Collect them all for analysis.
+    let mut all_matches = vec![first_match];
+    all_matches.push(second_match.unwrap());
+    all_matches.extend(matches);
+
+    trace!(
+        "      Found {} {} match candidate(s) at indices: {:?}",
+        all_matches.len(),
+        match_type,
+        all_matches
+    );
 
     // More than 1 match, try to tie-break using the line number hint.
     if let Some(line) = start_line {
         trace!(
             "    Ambiguous {} match found at {:?}. Attempting to tie-break using line number hint: {}",
             match_type,
-            matches,
+            all_matches,
             line
         );
         let mut closest_index = 0;
@@ -1128,7 +1137,7 @@ fn tie_break_with_line_number(
         let mut is_tie = false;
 
         // Find the match that is numerically closest to the hint.
-        for &match_index in matches {
+        for &match_index in &all_matches {
             // Hunk line numbers are 1-based, indices are 0-based.
             trace!(
                 "      Candidate index {}: distance from line hint {} is {}",
@@ -1167,7 +1176,7 @@ fn tie_break_with_line_number(
     // If we reach here, the ambiguity could not be resolved.
     warn!(
         "    Ambiguous {} match: Hunk context found at multiple locations: {:?}. Skipping.",
-        match_type, matches
+        match_type, all_matches
     );
     None
 }
