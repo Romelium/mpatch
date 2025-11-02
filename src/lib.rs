@@ -112,7 +112,7 @@ pub enum PatchError {
     /// appear to be for file creation (i.e., its first hunk was not an addition-only hunk).
     #[error("Target file not found for patching: {0}")]
     TargetNotFound(PathBuf),
-    /// A ````diff ` block was found, but it was missing the `--- a/path/to/file`
+    /// A ` ```diff` block was found, but it was missing the `--- a/path/to/file`
     /// header required to identify the target file.
     #[error(
         "Diff block starting on line {line} was found without a file path header (e.g., '--- a/path/to/file')"
@@ -222,7 +222,7 @@ impl Hunk {
 
 /// Represents all the changes to be applied to a single file.
 ///
-/// A `Patch` is derived from a `--- a/path/to/file` section within a ````diff `
+/// A `Patch` is derived from a `--- a/path/to/file` section within a ` ```diff`
 /// block and contains one or more [`Hunk`]s.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Patch {
@@ -238,11 +238,11 @@ pub struct Patch {
 
 // --- Core Logic ---
 
-/// Parses a string containing one or more ````diff ` blocks into a vector of [`Patch`] objects.
+/// Parses a string containing one or more ` ```diff` or ` ```patch` blocks into a vector of [`Patch`] objects.
 ///
 /// This function scans the input `content` for markdown-style diff blocks
-/// (i.e., ```diff ... ```). It can handle multiple blocks in one string, and
-/// multiple file patches within a single block.
+/// (i.e., ` ````diff ... ``` ` or ` ```patch ... ``` `).. It can handle multiple blocks in one string,
+/// and multiple file patches within a single block.
 ///
 /// # Arguments
 ///
