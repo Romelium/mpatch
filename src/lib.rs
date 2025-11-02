@@ -26,10 +26,13 @@
 //! 1.  **Parsing:** Use [`parse_diffs`] to read a string (e.g., the content of a
 //!     markdown file) and extract a `Vec<Patch>`. Each [`Patch`] represents the
 //!     changes for a single file. This step is purely in-memory.
-//! 2.  **Applying (In-Memory):** Use [`apply_patch_to_content`] to apply a `Patch`
+//! 2.  **Analyzing (Read-Only):** Use [`find_best_hunk_location`] to determine
+//!     where a single [`Hunk`] would be applied within a string of content. This
+//!     is a read-only operation that returns the location without making changes.
+//! 3.  **Applying (In-Memory):** Use [`apply_patch_to_content`] to apply a `Patch`
 //!     to a string of the original file's content. This function is pure and
 //!     doesn't touch the filesystem, returning the new content as a string.
-//! 3.  **Applying (to Filesystem):** For convenience, the [`apply_patch`] function
+//! 4.  **Applying (to Filesystem):** For convenience, the [`apply_patch`] function
 //!     wraps the entire process of reading a file, calling `apply_patch_to_content`,
 //!     and writing the result back to disk.
 //!
@@ -318,6 +321,20 @@ impl Hunk {
     pub fn has_changes(&self) -> bool {
         self.lines.iter().any(|l| l.starts_with(['+', '-']))
     }
+}
+
+/// Represents the location where a hunk should be applied.
+///
+/// This is returned by [`find_best_hunk_location`] and provides the necessary
+/// information to manually apply a patch to a slice of lines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HunkLocation {
+    /// The 0-based starting line index in the target content where the hunk should be applied.
+    pub start_index: usize,
+    /// The number of lines in the target content that will be replaced. This may
+    /// differ from the number of lines in the hunk's "match block" when a fuzzy
+    /// match is found.
+    pub length: usize,
 }
 
 /// Represents all the changes to be applied to a single file.
@@ -717,6 +734,19 @@ pub fn apply_patch(
 /// interact with the filesystem. This is useful for testing, in-memory operations,
 /// or integrating `mpatch`'s logic into other tools.
 ///
+/// # Arguments
+///
+/// * `patch` - The [`Patch`] object to apply.
+/// * `original_content` - An `Option<&str>` representing the file's content.
+///   `Some(content)` for an existing file, `None` for a new file (creation).
+/// * `fuzz_factor` - The similarity threshold for fuzzy matching.
+///
+/// # Returns
+///
+/// A tuple `(String, ApplyResult)` where:
+/// - The `String` is the new content after applying the patch.
+/// - The `ApplyResult` contains detailed status for each hunk.
+///
 /// # Example
 ///
 /// ```rust
@@ -748,19 +778,6 @@ pub fn apply_patch(
 /// # Ok(())
 /// # }
 /// ```
-///
-/// # Arguments
-///
-/// * `patch` - The [`Patch`] object to apply.
-/// * `original_content` - An `Option<&str>` representing the file's content.
-///   `Some(content)` for an existing file, `None` for a new file (creation).
-/// * `fuzz_factor` - The similarity threshold for fuzzy matching.
-///
-/// # Returns
-///
-/// A tuple `(String, ApplyResult)` where:
-/// - The `String` is the new content after applying the patch.
-/// - The `ApplyResult` contains detailed status for each hunk.
 pub fn apply_patch_to_content(
     patch: &Patch,
     original_content: Option<&str>,
@@ -862,6 +879,68 @@ pub fn apply_patch_to_content(
     trace!("  Final content has {} characters.", new_content.len());
 
     (new_content, ApplyResult { hunk_results })
+}
+
+/// Finds the best location to apply a hunk to a given text content without modifying it.
+///
+/// This function encapsulates the core context-aware search logic of `mpatch`. It
+/// performs a series of checks, from exact matching to fuzzy matching, to determine
+/// the optimal position to apply the hunk. It is a read-only operation.
+///
+/// This is useful for tools that want to analyze where a patch would apply without
+/// actually performing the patch, or for building custom patch application logic.
+///
+/// # Arguments
+///
+/// * `hunk` - A reference to the [`Hunk`] to be located.
+/// * `target_content` - A string slice of the content to search within.
+/// * `fuzz_factor` - The similarity threshold for fuzzy matching (0.0 to 1.0).
+///   Higher is stricter. `0.0` disables fuzzy matching.
+///
+/// # Returns
+///
+/// - `Ok(HunkLocation)` on success, containing the start index and length of the
+///   match in the target content.
+/// - `Err(HunkApplyError)` if no suitable location could be found, with a reason
+///   for the failure (e.g., context not found, ambiguous match).
+///
+/// # Example
+///
+/// ````rust
+/// # use mpatch::{parse_diffs, find_best_hunk_location, HunkLocation};
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let original_content = "line 1\nline two\nline 3\n";
+/// let diff_content = r#"
+/// ```diff
+/// --- a/file.txt
+/// +++ b/file.txt
+/// @@ -1,3 +1,3 @@
+///  line 1
+/// -line two
+/// +line 2
+///  line 3
+/// ```
+/// "#;
+///
+/// let patches = parse_diffs(diff_content)?;
+/// let hunk = &patches[0].hunks[0];
+///
+/// let location = find_best_hunk_location(hunk, original_content, 0.0)?;
+///
+/// assert_eq!(location, HunkLocation { start_index: 0, length: 3 });
+/// # Ok(())
+/// # }
+/// ````
+pub fn find_best_hunk_location(
+    hunk: &Hunk,
+    target_content: &str,
+    fuzz_factor: f32,
+) -> Result<HunkLocation, HunkApplyError> {
+    let target_lines: Vec<String> = target_content.lines().map(String::from).collect();
+    let match_block = hunk.get_match_block();
+
+    find_hunk_location(&match_block, &target_lines, fuzz_factor, hunk.start_line)
+        .map(|(start_index, length)| HunkLocation { start_index, length })
 }
 
 /// Finds optimized search ranges within the target file to perform the fuzzy search.

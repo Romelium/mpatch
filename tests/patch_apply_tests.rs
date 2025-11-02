@@ -1,6 +1,7 @@
 use indoc::indoc;
 use mpatch::{
-    apply_patch, parse_diffs, ApplyOptions, HunkApplyError, HunkApplyStatus, PatchError,
+    apply_patch, find_best_hunk_location, parse_diffs, ApplyOptions, HunkApplyError, HunkLocation,
+    HunkApplyStatus, PatchError,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -922,6 +923,94 @@ fn test_fuzzy_match_fails_below_threshold() {
     ));
     let content = fs::read_to_string(file_path).unwrap();
     assert_eq!(content, original_content, "File should be unchanged");
+}
+
+#[test]
+fn test_find_best_hunk_location_exact_match() {
+    let original_content = "line 1\nline two\nline 3\n";
+    let diff = indoc! {r#"
+        ```diff
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1,3 +1,3 @@
+         line 1
+        -line two
+        +line 2
+         line 3
+        ```
+    "#};
+    let patches = parse_diffs(diff).unwrap();
+    let hunk = &patches[0].hunks[0];
+
+    let location = find_best_hunk_location(hunk, original_content, 0.0).unwrap();
+    assert_eq!(location, HunkLocation { start_index: 0, length: 3 });
+}
+
+#[test]
+fn test_find_best_hunk_location_fuzzy_match() {
+    // The file has an extra line compared to the patch's context.
+    let original_content = "context A\ninserted line\nline to change\ncontext C\n";
+    let diff = indoc! {r#"
+        ```diff
+        --- a/test.txt
+        +++ b/test.txt
+        @@ -1,3 +1,3 @@
+         context A
+        -line to change
+        +line was changed
+         context C
+        ```
+    "#};
+    let patches = parse_diffs(diff).unwrap();
+    let hunk = &patches[0].hunks[0];
+
+    // The flexible window should find a match of length 4.
+    let location = find_best_hunk_location(hunk, original_content, 0.7).unwrap();
+    assert_eq!(location, HunkLocation { start_index: 0, length: 4 });
+}
+
+#[test]
+fn test_find_best_hunk_location_not_found() {
+    let original_content = "completely different content\n";
+    let diff = indoc! {r#"
+        ```diff
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1,1 +1,1 @@
+        -foo
+        +bar
+        ```
+    "#};
+    let patches = parse_diffs(diff).unwrap();
+    let hunk = &patches[0].hunks[0];
+
+    let result = find_best_hunk_location(hunk, original_content, 0.9);
+    assert!(matches!(
+        result,
+        Err(HunkApplyError::FuzzyMatchBelowThreshold { .. })
+    ));
+}
+
+#[test]
+fn test_find_best_hunk_location_ambiguous() {
+    let original_content = "duplicate\n\nduplicate\n";
+    let diff = indoc! {r#"
+        ```diff
+        --- a/test.txt
+        +++ b/test.txt
+        @@ -2,1 +2,1 @@
+        -duplicate
+        +changed
+        ```
+    "#};
+    let patches = parse_diffs(diff).unwrap();
+    let hunk = &patches[0].hunks[0];
+
+    let result = find_best_hunk_location(hunk, original_content, 0.0);
+    assert!(matches!(
+        result,
+        Err(HunkApplyError::AmbiguousExactMatch(_))
+    ));
 }
 
 #[test]
