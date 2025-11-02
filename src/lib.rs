@@ -724,7 +724,7 @@ fn find_search_ranges(
     }
 
     // If no good anchor was found, we must search the entire file.
-    trace!("      No suitable anchor line found. Falling back to full file scan.");
+    debug!("      No suitable anchor line found. Falling back to full file scan.");
     vec![(0, target_lines.len())]
 }
 
