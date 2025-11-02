@@ -706,7 +706,7 @@ pub fn apply_patch(
         trace!("  Reading target file '{}'", patch.file_path.display());
         let content = fs::read_to_string(&target_file_path).map_err(|e| PatchError::Io {
             path: target_file_path.clone(),
-             source: e,
+            source: e,
         })?;
         (content, false)
     } else {
@@ -877,12 +877,7 @@ pub fn apply_patch_to_content(
         trace!("    -----------------------------");
 
         // This is the core logic: find where the hunk should be applied.
-        match find_hunk_location(
-            &match_block,
-            &current_lines,
-            fuzz_factor,
-            hunk.start_line,
-        ) {
+        match find_hunk_location(&match_block, &current_lines, fuzz_factor, hunk.start_line) {
             Ok((start_index, match_len)) => {
                 trace!(
                     "    Found location: start_index={}, match_len={}",
@@ -992,8 +987,12 @@ pub fn find_best_hunk_location(
     let target_lines: Vec<String> = target_content.lines().map(String::from).collect();
     let match_block = hunk.get_match_block();
 
-    find_hunk_location(&match_block, &target_lines, fuzz_factor, hunk.start_line)
-        .map(|(start_index, length)| HunkLocation { start_index, length })
+    find_hunk_location(&match_block, &target_lines, fuzz_factor, hunk.start_line).map(
+        |(start_index, length)| HunkLocation {
+            start_index,
+            length,
+        },
+    )
 }
 
 /// Finds optimized search ranges within the target file to perform the fuzzy search.
@@ -1173,8 +1172,11 @@ fn find_hunk_location(
                 Box::new(std::iter::empty())
             };
 
-        match tie_break_with_line_number(stripped_matches, start_line, "exact (ignoring whitespace)")
-        {
+        match tie_break_with_line_number(
+            stripped_matches,
+            start_line,
+            "exact (ignoring whitespace)",
+        ) {
             Ok(Some(index)) => {
                 debug!(
                     "    Found unique whitespace-insensitive match at index {}.",

@@ -3,7 +3,7 @@ use clap::Parser;
 use colored::Colorize;
 use env_logger::Builder;
 use log::{error, info, warn, Level, LevelFilter};
-use mpatch::{apply_patch};
+use mpatch::apply_patch;
 use mpatch::{parse_diffs, Patch};
 use std::fs::{self, File};
 use std::io::{self, Write};
