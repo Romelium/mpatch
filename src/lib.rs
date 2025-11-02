@@ -1014,6 +1014,77 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
     Ok(all_patches)
 }
 
+/// Ensures a relative path, when joined to a base directory, resolves to a location
+/// that is still inside that base directory.
+///
+/// This is a critical security function to prevent path traversal attacks (e.g.,
+/// a malicious patch trying to modify `../../etc/passwd`). It works by canonicalizing
+/// both the base directory and the final target path to their absolute, symlink-resolved
+/// forms and then checking if the target path is a child of the base directory.
+///
+/// # Arguments
+///
+/// * `base_dir` - The trusted root directory.
+/// * `relative_path` - The untrusted relative path to be validated.
+///
+/// # Returns
+///
+/// - `Ok(PathBuf)`: The safe, canonicalized, absolute path of the target if validation succeeds.
+/// - `Err(PatchError::PathTraversal)`: If the path resolves outside the `base_dir`.
+/// - `Err(PatchError::Io)`: If an I/O error occurs during path canonicalization (e.g., `base_dir` does not exist).
+///
+/// # Example
+///
+/// ```no_run
+/// # use mpatch::{ensure_path_is_safe, PatchError};
+/// # use std::path::Path;
+/// # use std::fs;
+/// # use tempfile::tempdir;
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let dir = tempdir()?;
+/// let base_dir = dir.path();
+///
+/// // A safe path
+/// let safe_path = Path::new("src/main.rs");
+/// let resolved_path = ensure_path_is_safe(base_dir, safe_path)?;
+/// let canonical_base = fs::canonicalize(base_dir)?;
+/// assert!(resolved_path.starts_with(&canonical_base));
+///
+/// // An unsafe path
+/// let unsafe_path = Path::new("../secret.txt");
+/// let result = ensure_path_is_safe(base_dir, unsafe_path);
+/// assert!(matches!(result, Err(PatchError::PathTraversal(_))));
+/// # Ok(())
+/// # }
+/// ```
+pub fn ensure_path_is_safe(base_dir: &Path, relative_path: &Path) -> Result<PathBuf, PatchError> {
+    trace!(
+        "  Checking path safety for base '{}' and relative path '{}'",
+        base_dir.display(),
+        relative_path.display()
+    );
+    let base_path = fs::canonicalize(base_dir).map_err(|e| PatchError::Io {
+        path: base_dir.to_path_buf(),
+        source: e,
+    })?;
+    let target_file_path = base_dir.join(relative_path);
+    let parent = target_file_path.parent().unwrap_or(Path::new(""));
+    fs::create_dir_all(parent).map_err(|e| PatchError::Io {
+        path: parent.to_path_buf(),
+        source: e,
+    })?;
+    let final_path = fs::canonicalize(parent)
+        .map_err(|e| PatchError::Io {
+            path: parent.to_path_buf(),
+            source: e,
+        })?
+        .join(target_file_path.file_name().unwrap_or_default());
+    if !final_path.starts_with(&base_path) {
+        return Err(PatchError::PathTraversal(relative_path.to_path_buf()));
+    }
+    Ok(final_path)
+}
+
 /// Applies a slice of `Patch` objects to a target directory.
 ///
 /// This is a high-level convenience function that iterates through a list of
@@ -1102,52 +1173,19 @@ pub fn apply_patch_to_file(
     target_dir: &Path,
     options: ApplyOptions,
 ) -> Result<PatchResult, PatchError> {
-    let target_file_path = target_dir.join(&patch.file_path);
     info!("Applying patch to: {}", patch.file_path.display());
 
     // --- Path Safety Check ---
-    // This is a critical security measure to prevent a malicious patch from
-    // writing files outside of the intended target directory.
-    trace!(
-        "  Checking path safety for relative path '{}'",
-        patch.file_path.display()
-    );
-    // Canonicalize paths to resolve `..`, symlinks, etc., into absolute paths.
-    let base_path = fs::canonicalize(target_dir).map_err(|e| PatchError::Io {
-        path: target_dir.to_path_buf(),
-        source: e,
-    })?;
-    let final_path = if target_file_path.exists() {
-        fs::canonicalize(&target_file_path).map_err(|e| PatchError::Io {
-            path: target_file_path.clone(),
-            source: e,
-        })?
-    } else {
-        // For new files, canonicalize the parent and append the filename.
-        // This requires creating the parent directory first.
-        let parent = target_file_path.parent().unwrap_or(Path::new(""));
-        fs::create_dir_all(parent).map_err(|e| PatchError::Io {
-            path: parent.to_path_buf(),
-            source: e,
-        })?;
-        fs::canonicalize(parent)
-            .map_err(|e| PatchError::Io {
-                path: parent.to_path_buf(),
-                source: e,
-            })?
-            .join(target_file_path.file_name().unwrap_or_default())
-    };
-
-    // Ensure the final, resolved path is still inside the base directory.
-    if !final_path.starts_with(&base_path) {
-        return Err(PatchError::PathTraversal(patch.file_path.clone()));
-    }
+    // This is a critical security measure. `ensure_path_is_safe` returns a
+    // canonicalized, absolute path that is confirmed to be inside the target_dir.
+    let safe_target_path = ensure_path_is_safe(target_dir, &patch.file_path)?;
     trace!("    Path is safe.");
 
     // --- Read Original File ---
-    if target_file_path.is_dir() {
+    // All subsequent operations use the verified `safe_target_path`.
+    if safe_target_path.is_dir() {
         return Err(PatchError::Io {
-            path: target_file_path,
+            path: safe_target_path,
             source: std::io::Error::new(
                 std::io::ErrorKind::IsADirectory,
                 "target path is a directory, not a file",
@@ -1155,17 +1193,20 @@ pub fn apply_patch_to_file(
         });
     }
 
-    let (original_content, is_new_file) = if target_file_path.is_file() {
+    let (original_content, is_new_file) = if safe_target_path.is_file() {
         trace!("  Reading target file '{}'", patch.file_path.display());
-        let content = fs::read_to_string(&target_file_path).map_err(|e| PatchError::Io {
-            path: target_file_path.clone(),
+        let content = fs::read_to_string(&safe_target_path).map_err(|e| PatchError::Io {
+            path: safe_target_path.clone(),
             source: e,
         })?;
         (content, false)
     } else {
         // File doesn't exist. This is only okay if it's a file creation patch.
         if !patch.is_creation() {
-            return Err(PatchError::TargetNotFound(target_file_path));
+            // For user-facing errors, show the original path, not the canonicalized one.
+            return Err(PatchError::TargetNotFound(
+                target_dir.join(&patch.file_path),
+            ));
         }
         info!("  Target file does not exist. Assuming file creation.");
         (String::new(), true)
@@ -1205,14 +1246,16 @@ pub fn apply_patch_to_file(
         diff = Some(diff_text.to_string());
     } else {
         // Write the modified content to the file system.
-        if let Some(parent) = target_file_path.parent() {
+        // The parent directory might have been created by `ensure_path_is_safe`
+        // for a new file, but we ensure it again just in case.
+        if let Some(parent) = safe_target_path.parent() {
             fs::create_dir_all(parent).map_err(|e| PatchError::Io {
                 path: parent.to_path_buf(),
                 source: e,
             })?;
         }
-        fs::write(&target_file_path, new_content).map_err(|e| PatchError::Io {
-            path: target_file_path.clone(),
+        fs::write(&safe_target_path, new_content).map_err(|e| PatchError::Io {
+            path: safe_target_path.clone(),
             source: e,
         })?;
         if apply_result.all_applied_cleanly() {

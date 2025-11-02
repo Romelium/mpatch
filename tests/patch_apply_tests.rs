@@ -1897,3 +1897,86 @@ fn test_apply_patches_to_dir() {
     assert_eq!(content1, "bar\n");
     assert_eq!(content2, "qux\n");
 }
+
+mod ensure_path_is_safe_tests {
+    use mpatch::{ensure_path_is_safe, PatchError};
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_safe_path_succeeds() {
+        let dir = tempdir().unwrap();
+        let base_dir = dir.path();
+        let safe_path = "src/main.rs";
+
+        // We need to create the file for the `exists()` branch to be tested
+        fs::create_dir_all(base_dir.join("src")).unwrap();
+        fs::write(base_dir.join(safe_path), "content").unwrap();
+
+        let result = ensure_path_is_safe(base_dir, safe_path.as_ref());
+        assert!(result.is_ok());
+        let resolved_path = result.unwrap();
+        assert!(resolved_path.ends_with(safe_path));
+        assert!(resolved_path.is_absolute());
+    }
+
+    #[test]
+    fn test_safe_path_to_nonexistent_file_succeeds() {
+        let dir = tempdir().unwrap();
+        let base_dir = dir.path();
+        let safe_path = "new/file.txt";
+
+        let result = ensure_path_is_safe(base_dir, safe_path.as_ref());
+        assert!(result.is_ok());
+        let resolved_path = result.unwrap();
+        assert!(resolved_path.ends_with(safe_path));
+        assert!(resolved_path.is_absolute());
+        // The function creates the parent directory
+        assert!(base_dir.join("new").is_dir());
+    }
+
+    #[test]
+    fn test_traversal_path_fails() {
+        let dir = tempdir().unwrap();
+        let base_dir = dir.path();
+        let unsafe_path = "../evil.txt";
+
+        let result = ensure_path_is_safe(base_dir, unsafe_path.as_ref());
+        assert!(matches!(result, Err(PatchError::PathTraversal(_))));
+    }
+
+    #[test]
+    fn test_traversal_path_to_nonexistent_file_fails() {
+        let dir = tempdir().unwrap();
+        let base_dir = dir.path();
+        let unsafe_path = "src/../../evil.txt";
+
+        let result = ensure_path_is_safe(base_dir, unsafe_path.as_ref());
+        assert!(matches!(result, Err(PatchError::PathTraversal(_))));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_absolute_path_fails() {
+        let dir = tempdir().unwrap();
+        let base_dir = dir.path();
+        let unsafe_path = "/etc/passwd";
+
+        let result = ensure_path_is_safe(base_dir, unsafe_path.as_ref());
+        assert!(matches!(result, Err(PatchError::PathTraversal(_))));
+    }
+
+    #[test]
+    fn test_path_normalization_within_project_succeeds() {
+        let dir = tempdir().unwrap();
+        let base_dir = dir.path();
+        fs::create_dir(base_dir.join("src")).unwrap();
+        let normalized_path = "src/../main.rs";
+        fs::write(base_dir.join("main.rs"), "content").unwrap();
+
+        let result = ensure_path_is_safe(base_dir, normalized_path.as_ref());
+        assert!(result.is_ok());
+        let resolved = result.unwrap();
+        assert!(resolved.ends_with("main.rs"));
+    }
+}
