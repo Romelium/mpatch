@@ -199,6 +199,24 @@ impl ApplyResult {
     /// Checks if all hunks in the patch were applied successfully or skipped.
     ///
     /// Returns `false` if any hunk failed to apply.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use mpatch::{ApplyResult, HunkApplyStatus, HunkApplyError};
+    /// let successful_result = ApplyResult {
+    ///     hunk_results: vec![HunkApplyStatus::Applied, HunkApplyStatus::SkippedNoChanges],
+    /// };
+    /// assert!(successful_result.all_applied_cleanly());
+    ///
+    /// let failed_result = ApplyResult {
+    ///     hunk_results: vec![
+    ///         HunkApplyStatus::Applied,
+    ///         HunkApplyStatus::Failed(HunkApplyError::ContextNotFound),
+    ///     ],
+    /// };
+    /// assert!(!failed_result.all_applied_cleanly());
+    /// ```
     pub fn all_applied_cleanly(&self) -> bool {
         self.hunk_results
             .iter()
@@ -519,6 +537,43 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, PatchError> {
 ///   in dry-run mode).
 /// - `Err(PatchError)` for "hard" errors like I/O problems, path traversal violations,
 ///   or a missing target file.
+///
+/// # Example
+///
+/// ````
+/// # use mpatch::{parse_diffs, apply_patch, ApplyOptions};
+/// # use std::fs;
+/// # use tempfile::tempdir;
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // 1. Setup a temporary directory and a file to patch.
+/// let dir = tempdir()?;
+/// let file_path = dir.path().join("hello.txt");
+/// fs::write(&file_path, "Hello, world!\n")?;
+///
+/// // 2. Define and parse the patch.
+/// let diff_content = r#"
+/// ```diff
+/// --- a/hello.txt
+/// +++ b/hello.txt
+/// @@ -1 +1 @@
+/// -Hello, world!
+/// +Hello, mpatch!
+/// ```
+/// "#;
+/// let patches = parse_diffs(diff_content)?;
+/// let patch = &patches[0];
+///
+/// // 3. Apply the patch to the directory.
+/// let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+/// let result = apply_patch(patch, dir.path(), options)?;
+///
+/// // 4. Verify the results.
+/// assert!(result.report.all_applied_cleanly());
+/// let new_content = fs::read_to_string(&file_path)?;
+/// assert_eq!(new_content, "Hello, mpatch!\n");
+/// # Ok(())
+/// # }
+/// ````
 pub fn apply_patch(
     patch: &Patch,
     target_dir: &Path,
