@@ -62,6 +62,11 @@ jobs:
           components: clippy, rustfmt
         # This step always runs, as caching makes it fast, and subsequent steps might need it.
 
+      - name: Install cargo-hack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
+
       - name: Check Formatting (cargo fmt)
         # Only run if Rust code or manifest files changed
         if: steps.changed_files.outputs.code_any_changed == 'true'
@@ -69,23 +74,19 @@ jobs:
 
       - name: Linting (cargo clippy)
         if: steps.changed_files.outputs.code_any_changed == 'true'
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo hack --each-feature clippy --all-targets -- -D warnings
 
       - name: Run Tests (cargo test)
         if: steps.changed_files.outputs.code_any_changed == 'true'
-        run: cargo test --all-targets --verbose
+        run: cargo hack --each-feature test --all-targets --verbose
 
       - name: Run ignored (network-dependent) tests
         if: steps.changed_files.outputs.code_any_changed == 'true'
-        run: cargo test --all-targets -- --ignored
+        run: cargo hack --each-feature test --all-targets -- --ignored
 
-      - name: Build (Debug)
+      - name: Build (Release) for each feature
         if: steps.changed_files.outputs.code_any_changed == 'true'
-        run: cargo build --verbose
-
-      - name: Build (Release)
-        if: steps.changed_files.outputs.code_any_changed == 'true'
-        run: cargo build --release --verbose
+        run: cargo hack --each-feature build --release --verbose
 
       - name: Indicate checks skipped (if applicable)
         if: steps.changed_files.outputs.code_any_changed == 'false'
