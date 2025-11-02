@@ -83,6 +83,7 @@
 //! # }
 //! ````
 use log::{debug, info, trace, warn};
+use rayon::prelude::*;
 use similar::udiff::unified_diff;
 use similar::TextDiff;
 use std::fs;
@@ -871,49 +872,66 @@ fn find_hunk_location(
         let search_ranges = find_search_ranges(match_block, target_lines, len);
         trace!("    Using search ranges: {:?}", search_ranges);
 
-        for (range_start, range_end) in search_ranges {
-            let target_slice = &target_lines[range_start..range_end];
+        // When the anchor heuristic fails, the search can be slow. We parallelize
+        // the scoring of all possible windows using Rayon.
+        let all_scored_windows: Vec<(f64, f64, f64, f64, f64, usize, usize)> = search_ranges
+            .par_iter()
+            .flat_map(|&(range_start, range_end)| {
+                // By creating local references, we ensure that the inner `move` closures
+                // capture these references (which are `Copy`) instead of attempting to move
+                // the original non-`Copy` `Vec` and `String` from the outer scope.
+                let match_stripped_lines = &match_stripped_lines;
+                let match_content = &match_content;
+                let target_slice = &target_lines[range_start..range_end];
 
-            // Iterate through all possible window sizes.
-            for window_len in min_len..=max_len {
-                if window_len > target_slice.len() {
-                    continue;
-                }
+                (min_len..=max_len)
+                    .into_par_iter()
+                    .filter(move |&window_len| window_len <= target_slice.len())
+                    .flat_map(move |window_len| {
+                        (0..=target_slice.len() - window_len)
+                            .into_par_iter()
+                            .map(move |i| {
+                                let window = &target_slice[i..i + window_len];
+                                let absolute_index = range_start + i;
 
-                // Iterate through all windows of the current size.
-                for (i, window) in target_slice.windows(window_len).enumerate() {
-                    let absolute_index = range_start + i;
-                    // HYBRID SCORING: Combine line-based and word-based similarity.
-                    // This correctly handles both structural changes (added/removed lines)
-                    // and content changes (modified text within lines).
-                    let window_stripped_lines: Vec<_> =
-                        window.iter().map(|s| s.trim_end()).collect();
+                                // HYBRID SCORING: (Copied from original sequential loop)
+                                let window_stripped_lines: Vec<_> =
+                                    window.iter().map(|s| s.trim_end()).collect();
+                                let diff_lines = similar::TextDiff::from_slices(
+                                    &window_stripped_lines,
+                                    match_stripped_lines,
+                                );
+                                let ratio_lines = diff_lines.ratio() as f64;
+                                let window_content = window_stripped_lines.join("\n");
+                                let diff_words =
+                                    similar::TextDiff::from_words(&window_content, match_content);
+                                let ratio_words = diff_words.ratio() as f64;
+                                let ratio = 0.6 * ratio_lines + 0.4 * ratio_words;
+                                let size_diff = window_len.abs_diff(len) as f64;
+                                let penalty = (size_diff / len.max(window_len) as f64) * 0.2;
+                                let score = ratio - penalty;
 
-                    // 1. Line-based score for structural similarity
-                    let diff_lines = similar::TextDiff::from_slices(
-                        &window_stripped_lines,
-                        &match_stripped_lines,
-                    );
-                    let ratio_lines = diff_lines.ratio() as f64;
+                                (
+                                    score,
+                                    ratio,
+                                    ratio_lines,
+                                    ratio_words,
+                                    penalty,
+                                    absolute_index,
+                                    window_len,
+                                )
+                            })
+                    })
+            })
+            .collect();
 
-                    // 2. Word-based score for content similarity
-                    let window_content = window_stripped_lines.join("\n");
-                    let diff_words = similar::TextDiff::from_words(&window_content, &match_content);
-                    let ratio_words = diff_words.ratio() as f64;
-
-                    // 3. Combine them (weighting structure more heavily)
-                    let ratio = 0.6 * ratio_lines + 0.4 * ratio_words;
-
-                    // Penalize matches that have a different size from the match_block.
-                    // This helps prefer matches of the correct size even if a smaller
-                    // sub-window has a slightly higher raw ratio.
-                    let size_diff = window_len.abs_diff(len) as f64;
-                    let penalty = (size_diff / len.max(window_len) as f64) * 0.2;
-                    let score = ratio - penalty;
-
-                    // Check if this is the new best score.
-                    if score > best_score {
-                        trace!(
+        // Process the collected results sequentially to find the best match and handle tie-breaking.
+        for (score, ratio, ratio_lines, ratio_words, penalty, absolute_index, window_len) in
+            all_scored_windows
+        {
+            // This is the same logic as in the original sequential loop.
+            if score > best_score {
+                trace!(
                         "        New best score: {:.3} (ratio {:.3} [l:{:.3},w:{:.3}], penalty {:.3}) at index {} (window len {})",
                         score,
                         ratio,
@@ -923,43 +941,41 @@ fn find_hunk_location(
                         absolute_index,
                         window_len
                     );
-                        best_score = score;
-                        best_ratio_at_best_score = ratio;
-                        potential_matches.clear();
-                        potential_matches.push((absolute_index, window_len));
-                    } else if (score - best_score).abs() < 1e-9 {
-                        // Tie in score. Prefer the window size closer to the match block size.
-                        // This is mostly redundant due to the penalty, but good for perfect ties.
-                        if potential_matches.is_empty() {
-                            potential_matches.push((absolute_index, window_len));
-                            continue;
-                        }
-                        let current_best_len = potential_matches[0].1;
-                        let dist_new = window_len.abs_diff(len);
-                        let dist_best = current_best_len.abs_diff(len);
+                best_score = score;
+                best_ratio_at_best_score = ratio;
+                potential_matches.clear();
+                potential_matches.push((absolute_index, window_len));
+            } else if (score - best_score).abs() < 1e-9 {
+                // Tie in score. Prefer the window size closer to the match block size.
+                // This is mostly redundant due to the penalty, but good for perfect ties.
+                if potential_matches.is_empty() {
+                    potential_matches.push((absolute_index, window_len));
+                    continue;
+                }
+                let current_best_len = potential_matches[0].1;
+                let dist_new = window_len.abs_diff(len);
+                let dist_best = current_best_len.abs_diff(len);
 
-                        if dist_new < dist_best {
-                            // This window size is a better fit, so it's the new best.
-                            trace!(
+                if dist_new < dist_best {
+                    // This window size is a better fit, so it's the new best.
+                    trace!(
                             "        Tie in score ({:.3}), but window len {} is closer to hunk len {}. New best.",
                             score,
                             window_len,
                             len
                         );
-                            best_ratio_at_best_score = ratio;
-                            potential_matches.clear();
-                            potential_matches.push((absolute_index, window_len));
-                        } else if dist_new == dist_best {
-                            // Same distance, so it's also a potential match.
-                            trace!(
+                    best_ratio_at_best_score = ratio;
+                    potential_matches.clear();
+                    potential_matches.push((absolute_index, window_len));
+                } else if dist_new == dist_best {
+                    // Same distance, so it's also a potential match.
+                    trace!(
                             "        Tie in score ({:.3}) and window distance. Adding candidate: index {}, len {}",
                             score,
                             absolute_index,
                             window_len
                         );
-                            potential_matches.push((absolute_index, window_len));
-                        }
-                    }
+                    potential_matches.push((absolute_index, window_len));
                 }
             }
         }

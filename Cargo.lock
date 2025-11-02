@@ -449,6 +449,7 @@ dependencies = [
  "env_logger",
  "indoc",
  "log",
+ "rayon",
  "similar",
  "tempfile",
  "thiserror",
