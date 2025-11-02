@@ -351,6 +351,84 @@ impl Hunk {
             .collect()
     }
 
+    /// Extracts the context lines from the hunk.
+    ///
+    /// These are lines that start with ' ' and are stripped of the prefix.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use mpatch::Hunk;
+    /// let hunk = Hunk {
+    ///     lines: vec![
+    ///         " context".to_string(),
+    ///         "-deleted".to_string(),
+    ///         "+added".to_string(),
+    ///     ],
+    ///     start_line: None,
+    /// };
+    /// assert_eq!(hunk.context_lines(), vec!["context"]);
+    /// ```
+    pub fn context_lines(&self) -> Vec<&str> {
+        self.lines
+            .iter()
+            .filter(|l| l.starts_with(' '))
+            .map(|l| &l[1..])
+            .collect()
+    }
+
+    /// Extracts the added lines from the hunk.
+    ///
+    /// These are lines that start with '+' and are stripped of the prefix.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use mpatch::Hunk;
+    /// let hunk = Hunk {
+    ///     lines: vec![
+    ///         " context".to_string(),
+    ///         "-deleted".to_string(),
+    ///         "+added".to_string(),
+    ///     ],
+    ///     start_line: None,
+    /// };
+    /// assert_eq!(hunk.added_lines(), vec!["added"]);
+    /// ```
+    pub fn added_lines(&self) -> Vec<&str> {
+        self.lines
+            .iter()
+            .filter(|l| l.starts_with('+'))
+            .map(|l| &l[1..])
+            .collect()
+    }
+
+    /// Extracts the removed lines from the hunk.
+    ///
+    /// These are lines that start with '-' and are stripped of the prefix.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use mpatch::Hunk;
+    /// let hunk = Hunk {
+    ///     lines: vec![
+    ///         " context".to_string(),
+    ///         "-deleted".to_string(),
+    ///         "+added".to_string(),
+    ///     ],
+    ///     start_line: None,
+    /// };
+    /// assert_eq!(hunk.removed_lines(), vec!["deleted"]);
+    /// ```
+    pub fn removed_lines(&self) -> Vec<&str> {
+        self.lines
+            .iter()
+            .filter(|l| l.starts_with('-'))
+            .map(|l| &l[1..])
+            .collect()
+    }
+
     /// Checks if the hunk contains any effective changes (additions or deletions).
     ///
     /// A hunk with only context lines has no changes and can be skipped.
@@ -404,6 +482,62 @@ pub struct Patch {
     /// This is determined by the presence of `\ No newline at end of file`
     /// in the diff.
     pub ends_with_newline: bool,
+}
+
+impl Patch {
+    /// Checks if the patch represents a file creation.
+    ///
+    /// A patch is considered a creation if its first hunk is an addition-only
+    /// hunk that applies to an empty file (i.e., its "match block" is empty).
+    ///
+    /// # Example
+    ///
+    /// ````
+    /// # use mpatch::parse_diffs;
+    /// let creation_diff = r#"
+    /// ```diff
+    /// --- a/new_file.txt
+    /// +++ b/new_file.txt
+    /// @@ -0,0 +1,2 @@
+    /// +Hello
+    /// +World
+    /// ```
+    /// "#;
+    /// let patches = parse_diffs(creation_diff).unwrap();
+    /// assert!(patches[0].is_creation());
+    /// ````
+    pub fn is_creation(&self) -> bool {
+        self.hunks
+            .first()
+            .is_some_and(|h| h.get_match_block().is_empty())
+    }
+
+    /// Checks if the patch represents a full file deletion.
+    ///
+    /// A patch is considered a deletion if it contains at least one hunk, and
+    /// all of its hunks result in removing content without adding any new content
+    /// (i.e., their "replace blocks" are empty). This is typical for a diff
+    /// that empties a file.
+    ///
+    /// # Example
+    ///
+    /// ````
+    /// # use mpatch::parse_diffs;
+    /// let deletion_diff = r#"
+    /// ```diff
+    /// --- a/old_file.txt
+    /// +++ b/old_file.txt
+    /// @@ -1,2 +0,0 @@
+    /// -Hello
+    /// -World
+    /// ```
+    /// "#;
+    /// let patches = parse_diffs(deletion_diff).unwrap();
+    /// assert!(patches[0].is_deletion());
+    /// ````
+    pub fn is_deletion(&self) -> bool {
+        !self.hunks.is_empty() && self.hunks.iter().all(|h| h.get_replace_block().is_empty())
+    }
 }
 
 // --- Core Logic ---
@@ -711,11 +845,7 @@ pub fn apply_patch(
         (content, false)
     } else {
         // File doesn't exist. This is only okay if it's a file creation patch.
-        if patch
-            .hunks
-            .first()
-            .is_none_or(|h| !h.get_match_block().is_empty())
-        {
+        if !patch.is_creation() {
             return Err(PatchError::TargetNotFound(target_file_path));
         }
         info!("  Target file does not exist. Assuming file creation.");

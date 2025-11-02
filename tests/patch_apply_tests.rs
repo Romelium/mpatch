@@ -1694,3 +1694,89 @@ fn test_ambiguous_match_fails_with_equidistant_line_hint() {
     let content = fs::read_to_string(file_path).unwrap();
     assert_eq!(content, original_content, "File should be unchanged");
 }
+
+#[test]
+fn test_hunk_semantic_helpers() {
+    let hunk = mpatch::Hunk {
+        lines: vec![
+            " context 1".to_string(),
+            "-removed 1".to_string(),
+            "-removed 2".to_string(),
+            "+added 1".to_string(),
+            " context 2".to_string(),
+        ],
+        start_line: Some(1),
+    };
+
+    assert_eq!(hunk.context_lines(), vec!["context 1", "context 2"]);
+    assert_eq!(hunk.added_lines(), vec!["added 1"]);
+    assert_eq!(hunk.removed_lines(), vec!["removed 1", "removed 2"]);
+}
+
+#[test]
+fn test_patch_is_creation() {
+    let creation_diff = indoc! {r#"
+        ```diff
+        --- a/new_file.txt
+        +++ b/new_file.txt
+        @@ -0,0 +1,2 @@
+        +Hello
+        +World
+        ```
+    "#};
+    let patches = parse_diffs(creation_diff).unwrap();
+    assert!(patches[0].is_creation());
+
+    let modification_diff = indoc! {r#"
+        ```diff
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1,1 +1,1 @@
+        -foo
+        +bar
+        ```
+    "#};
+    let patches = parse_diffs(modification_diff).unwrap();
+    assert!(!patches[0].is_creation());
+}
+
+#[test]
+fn test_patch_is_deletion() {
+    let deletion_diff = indoc! {r#"
+        ```diff
+        --- a/old_file.txt
+        +++ b/old_file.txt
+        @@ -1,2 +0,0 @@
+        -Hello
+        -World
+        ```
+    "#};
+    let patches = parse_diffs(deletion_diff).unwrap();
+    assert!(patches[0].is_deletion());
+
+    let modification_diff = indoc! {r#"
+        ```diff
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1,1 +1,1 @@
+        -foo
+        +bar
+        ```
+    "#};
+    let patches = parse_diffs(modification_diff).unwrap();
+    assert!(!patches[0].is_deletion());
+
+    let partial_removal_diff = indoc! {r#"
+        ```diff
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1,3 +1,1 @@
+        -foo
+        -bar
+         baz
+        ```
+    "#};
+    let patches = parse_diffs(partial_removal_diff).unwrap();
+    // This is not a full deletion because the replace block contains "baz".
+    assert!(!patches[0].is_deletion());
+}
