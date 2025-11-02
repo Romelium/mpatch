@@ -1,6 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use indoc::indoc;
-use mpatch::{apply_patch_to_content, parse_diffs, Patch};
+use mpatch::{apply_patch_to_content, parse_diffs, ApplyOptions, Patch};
 
 // --- Parsing Benchmarks ---
 
@@ -82,6 +82,15 @@ struct ApplyBenchSetup {
 fn applying_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Applying");
 
+    let options_exact = ApplyOptions {
+        fuzz_factor: 0.0,
+        ..Default::default()
+    };
+    let options_fuzzy = ApplyOptions {
+        fuzz_factor: 0.7,
+        ..Default::default()
+    };
+
     // --- Benchmark 1: File Creation ---
     let creation_setup = ApplyBenchSetup {
         patch: parse_diffs(indoc! {r#"
@@ -103,7 +112,7 @@ fn applying_benches(c: &mut Criterion) {
             criterion::black_box(apply_patch_to_content(
                 black_box(&creation_setup.patch),
                 black_box(None),
-                0.0,
+                &options_exact,
             ));
         });
     });
@@ -137,7 +146,7 @@ fn applying_benches(c: &mut Criterion) {
             criterion::black_box(apply_patch_to_content(
                 black_box(&exact_large_setup.patch),
                 black_box(Some(&exact_large_setup.initial_content)),
-                0.0,
+                &options_exact,
             ));
         });
     });
@@ -156,7 +165,7 @@ fn applying_benches(c: &mut Criterion) {
             criterion::black_box(apply_patch_to_content(
                 black_box(&fuzzy_anchor_setup.patch),
                 black_box(Some(&fuzzy_anchor_setup.initial_content)),
-                0.7,
+                &options_fuzzy,
             ));
         });
     });
@@ -186,7 +195,7 @@ fn applying_benches(c: &mut Criterion) {
             criterion::black_box(apply_patch_to_content(
                 black_box(&worst_case_setup.patch),
                 black_box(Some(&worst_case_setup.initial_content)),
-                0.7,
+                &options_fuzzy,
             ));
         });
     });
@@ -227,7 +236,7 @@ fn applying_benches(c: &mut Criterion) {
             criterion::black_box(apply_patch_to_content(
                 black_box(&ambiguous_setup.patch),
                 black_box(Some(&ambiguous_setup.initial_content)),
-                0.0,
+                &options_exact,
             ));
         });
     });

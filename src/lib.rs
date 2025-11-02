@@ -125,7 +125,8 @@
 //! let patch = &patches[0];
 //!
 //! // 3. Apply the patch to the content in memory.
-//! let (new_content, result) = apply_patch_to_content(patch, Some(original_content), 0.0);
+//! let options = mpatch::ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+//! let (new_content, result) = apply_patch_to_content(patch, Some(original_content), &options);
 //!
 //! // 4. Verify that the patch did not apply cleanly.
 //! assert!(!result.all_applied_cleanly());
@@ -917,7 +918,7 @@ pub fn apply_patch_to_file(
         } else {
             Some(&original_content)
         },
-        options.fuzz_factor,
+        &options,
     );
 
     let mut diff = None;
@@ -975,7 +976,7 @@ pub fn apply_patch_to_file(
 /// * `patch` - The [`Patch`] object to apply.
 /// * `original_content` - An `Option<&str>` representing the file's content.
 ///   `Some(content)` for an existing file, `None` for a new file (creation).
-/// * `fuzz_factor` - The similarity threshold for fuzzy matching.
+/// * `options` - Configuration for the patch operation, such as `fuzz_factor`.
 ///
 /// # Returns
 ///
@@ -986,7 +987,7 @@ pub fn apply_patch_to_file(
 /// # Example
 ///
 /// ```rust
-/// # use mpatch::{parse_diffs, apply_patch_to_content};
+/// # use mpatch::{parse_diffs, apply_patch_to_content, ApplyOptions};
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// // 1. Define original content and the patch.
 /// let original_content = "Hello, world!\n";
@@ -1006,7 +1007,8 @@ pub fn apply_patch_to_file(
 /// let patch = &patches[0];
 ///
 /// // 3. Apply the patch to the content in memory.
-/// let (new_content, result) = apply_patch_to_content(patch, Some(original_content), 0.0);
+/// let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+/// let (new_content, result) = apply_patch_to_content(patch, Some(original_content), &options);
 ///
 /// // 4. Check the results.
 /// assert_eq!(new_content, "Hello, mpatch!\n");
@@ -1017,7 +1019,7 @@ pub fn apply_patch_to_file(
 pub fn apply_patch_to_content(
     patch: &Patch,
     original_content: Option<&str>,
-    fuzz_factor: f32,
+    options: &ApplyOptions,
 ) -> (String, ApplyResult) {
     let mut current_lines: Vec<String> = original_content
         .map(|c| c.lines().map(String::from).collect())
@@ -1060,12 +1062,7 @@ pub fn apply_patch_to_content(
         trace!("    -----------------------------");
 
         // This is the core logic: find where the hunk should be applied.
-        match find_hunk_location_internal(
-            &match_block,
-            &current_lines,
-            fuzz_factor,
-            hunk.start_line,
-        ) {
+        match find_hunk_location_internal(&match_block, &current_lines, options, hunk.start_line) {
             Ok((start_index, match_len)) => {
                 trace!(
                     "    Found location: start_index={}, match_len={}",
@@ -1130,8 +1127,7 @@ pub fn apply_patch_to_content(
 ///
 /// * `hunk` - A reference to the [`Hunk`] to be located.
 /// * `target_content` - A string slice of the content to search within.
-/// * `fuzz_factor` - The similarity threshold for fuzzy matching (0.0 to 1.0).
-///   Higher is stricter. `0.0` disables fuzzy matching.
+/// * `options` - Configuration for the patch operation, such as `fuzz_factor`.
 ///
 /// # Returns
 ///
@@ -1143,7 +1139,7 @@ pub fn apply_patch_to_content(
 /// # Example
 ///
 /// ````rust
-/// # use mpatch::{parse_diffs, find_hunk_location, HunkLocation};
+/// # use mpatch::{parse_diffs, find_hunk_location, HunkLocation, ApplyOptions};
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let original_content = "line 1\nline two\nline 3\n";
 /// let diff_content = r#"
@@ -1161,7 +1157,8 @@ pub fn apply_patch_to_content(
 /// let patches = parse_diffs(diff_content)?;
 /// let hunk = &patches[0].hunks[0];
 ///
-/// let location = find_hunk_location(hunk, original_content, 0.0)?;
+/// let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+/// let location = find_hunk_location(hunk, original_content, &options)?;
 ///
 /// assert_eq!(location, HunkLocation { start_index: 0, length: 3 });
 /// # Ok(())
@@ -1170,11 +1167,11 @@ pub fn apply_patch_to_content(
 pub fn find_hunk_location(
     hunk: &Hunk,
     target_content: &str,
-    fuzz_factor: f32,
+    options: &ApplyOptions,
 ) -> Result<HunkLocation, HunkApplyError> {
     let target_lines: Vec<String> = target_content.lines().map(String::from).collect();
     let match_block = hunk.get_match_block();
-    find_hunk_location_internal(&match_block, &target_lines, fuzz_factor, hunk.start_line).map(
+    find_hunk_location_internal(&match_block, &target_lines, options, hunk.start_line).map(
         |(start_index, length)| HunkLocation {
             start_index,
             length,
@@ -1288,7 +1285,7 @@ fn merge_ranges(mut ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
 fn find_hunk_location_internal(
     match_block: &[&str],
     target_lines: &[String],
-    fuzz_threshold: f32,
+    options: &ApplyOptions,
     start_line: Option<usize>,
 ) -> Result<(usize, usize), HunkApplyError> {
     trace!(
@@ -1381,10 +1378,10 @@ fn find_hunk_location_internal(
     // the best-fitting slice in the target file, allowing the slice to be
     // slightly larger or smaller than the patch's context. This handles cases
     // where lines have been added or removed near the patch location.
-    if fuzz_threshold > 0.0 && !match_block.is_empty() {
+    if options.fuzz_factor > 0.0 && !match_block.is_empty() {
         trace!(
             "    Exact matches failed. Attempting flexible fuzzy match (threshold={:.2})...",
-            fuzz_threshold
+            options.fuzz_factor
         );
 
         // Hoist invariants for performance
@@ -1582,7 +1579,7 @@ fn find_hunk_location_internal(
         );
 
         // Check if the best match found meets the user-defined threshold.
-        if best_ratio_at_best_score >= f64::from(fuzz_threshold) {
+        if best_ratio_at_best_score >= f64::from(options.fuzz_factor) {
             if potential_matches.len() == 1 {
                 let (start, len) = potential_matches[0];
                 debug!(
@@ -1638,18 +1635,18 @@ fn find_hunk_location_internal(
             let (start, len) = potential_matches.first().copied().unwrap_or((0, 0));
             trace!(
                 "    Fuzzy match: Best location (index {}, len {}, similarity {:.3}) did not meet threshold of {:.2}.",
-                start, len, best_ratio_at_best_score, fuzz_threshold
+                start, len, best_ratio_at_best_score, options.fuzz_factor
             );
             return Err(HunkApplyError::FuzzyMatchBelowThreshold {
                 best_score: best_ratio_at_best_score,
-                threshold: fuzz_threshold,
+                threshold: options.fuzz_factor,
             });
         } else {
             // No potential matches found at all
             debug!("    Fuzzy match: Could not find any potential match location.");
             // Fall through to the final ContextNotFound error
         }
-    } else if fuzz_threshold <= 0.0 {
+    } else if options.fuzz_factor <= 0.0 {
         trace!("    Failed exact matches. Fuzzy matching disabled.");
     }
 
@@ -1657,7 +1654,10 @@ fn find_hunk_location_internal(
     // This handles cases where the entire file is a good fuzzy match for the
     // start of the hunk context, which can happen if the file is missing
     // context lines that the patch expects to be there at the end.
-    if !target_lines.is_empty() && target_lines.len() < match_block.len() && fuzz_threshold > 0.0 {
+    if !target_lines.is_empty()
+        && target_lines.len() < match_block.len()
+        && options.fuzz_factor > 0.0
+    {
         trace!("    Target file is shorter than hunk. Attempting end-of-file fuzzy match...");
         let target_stripped: Vec<_> = target_lines.iter().map(|s| s.trim_end()).collect();
         let match_stripped: Vec<_> = match_block.iter().map(|s| s.trim_end()).collect();
@@ -1665,7 +1665,7 @@ fn find_hunk_location_internal(
         let ratio = diff.ratio();
 
         // Be slightly more lenient for this specific end-of-file prefix case.
-        let effective_threshold = (f64::from(fuzz_threshold) - 0.1).max(0.5);
+        let effective_threshold = (f64::from(options.fuzz_factor) - 0.1).max(0.5);
         trace!(
             "      Using effective threshold for EOF match: {:.3}",
             effective_threshold

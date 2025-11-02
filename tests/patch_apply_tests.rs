@@ -1013,7 +1013,11 @@ fn test_find_hunk_location_exact_match() {
     let patches = parse_diffs(diff).unwrap();
     let hunk = &patches[0].hunks[0];
 
-    let location = find_hunk_location(hunk, original_content, 0.0).unwrap();
+    let options = mpatch::ApplyOptions {
+        fuzz_factor: 0.0,
+        ..Default::default()
+    };
+    let location = find_hunk_location(hunk, original_content, &options).unwrap();
     assert_eq!(
         location,
         HunkLocation {
@@ -1042,7 +1046,11 @@ fn test_find_hunk_location_fuzzy_match() {
     let hunk = &patches[0].hunks[0];
 
     // The flexible window should find a match of length 4.
-    let location = find_hunk_location(hunk, original_content, 0.7).unwrap();
+    let options = mpatch::ApplyOptions {
+        fuzz_factor: 0.7,
+        ..Default::default()
+    };
+    let location = find_hunk_location(hunk, original_content, &options).unwrap();
     assert_eq!(
         location,
         HunkLocation {
@@ -1067,7 +1075,11 @@ fn test_find_hunk_location_not_found() {
     let patches = parse_diffs(diff).unwrap();
     let hunk = &patches[0].hunks[0];
 
-    let result = find_hunk_location(hunk, original_content, 0.9);
+    let options = mpatch::ApplyOptions {
+        fuzz_factor: 0.9,
+        ..Default::default()
+    };
+    let result = find_hunk_location(hunk, original_content, &options);
     assert!(matches!(
         result,
         Err(HunkApplyError::FuzzyMatchBelowThreshold { .. })
@@ -1089,7 +1101,11 @@ fn test_find_hunk_location_ambiguous() {
     let patches = parse_diffs(diff).unwrap();
     let hunk = &patches[0].hunks[0];
 
-    let result = find_hunk_location(hunk, original_content, 0.0);
+    let options = mpatch::ApplyOptions {
+        fuzz_factor: 0.0,
+        ..Default::default()
+    };
+    let result = find_hunk_location(hunk, original_content, &options);
     assert!(matches!(
         result,
         Err(HunkApplyError::AmbiguousExactMatch(_))
