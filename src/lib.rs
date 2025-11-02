@@ -100,6 +100,20 @@ use thiserror::Error;
 
 // --- Error Types ---
 
+/// Represents errors that can occur during the parsing of a diff file.
+#[derive(Error, Debug, PartialEq)]
+pub enum ParseError {
+    /// A ` ```diff` block was found, but it was missing the `--- a/path/to/file`
+    /// header required to identify the target file.
+    #[error(
+        "Diff block starting on line {line} was found without a file path header (e.g., '--- a/path/to/file')"
+    )]
+    MissingFileHeader {
+        /// The line number where the diff block started.
+        line: usize,
+    },
+}
+
 /// Represents the possible errors that can occur during patch operations.
 #[derive(Error, Debug)]
 pub enum PatchError {
@@ -120,15 +134,6 @@ pub enum PatchError {
     /// appear to be for file creation (i.e., its first hunk was not an addition-only hunk).
     #[error("Target file not found for patching: {0}")]
     TargetNotFound(PathBuf),
-    /// A ` ```diff` block was found, but it was missing the `--- a/path/to/file`
-    /// header required to identify the target file.
-    #[error(
-        "Diff block starting on line {line} was found without a file path header (e.g., '--- a/path/to/file')"
-    )]
-    MissingFileHeader {
-        /// The line number where the diff block started.
-        line: usize,
-    },
 }
 
 /// The reason a hunk failed to apply.
@@ -198,6 +203,15 @@ pub struct ApplyResult {
     pub hunk_results: Vec<HunkApplyStatus>,
 }
 
+/// Details about a hunk that failed to apply.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HunkFailure {
+    /// The 1-based index of the hunk that failed.
+    pub hunk_index: usize,
+    /// The reason for the failure.
+    pub reason: HunkApplyError,
+}
+
 impl ApplyResult {
     /// Checks if all hunks in the patch were applied successfully or skipped.
     ///
@@ -206,7 +220,7 @@ impl ApplyResult {
     /// # Example
     ///
     /// ```
-    /// # use mpatch::{ApplyResult, HunkApplyStatus, HunkApplyError};
+    /// # use mpatch::{ApplyResult, HunkApplyStatus, HunkApplyError, HunkFailure};
     /// let successful_result = ApplyResult {
     ///     hunk_results: vec![HunkApplyStatus::Applied, HunkApplyStatus::SkippedNoChanges],
     /// };
@@ -224,6 +238,45 @@ impl ApplyResult {
         self.hunk_results
             .iter()
             .all(|r| !matches!(r, HunkApplyStatus::Failed(_)))
+    }
+
+    /// Returns a list of all hunks that failed to apply, along with their index.
+    ///
+    /// This provides a more convenient way to inspect failures than iterating
+    /// through [`hunk_results`](Self::hunk_results) manually.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use mpatch::{ApplyResult, HunkApplyStatus, HunkApplyError, HunkFailure};
+    /// let failed_result = ApplyResult {
+    ///     hunk_results: vec![
+    ///         HunkApplyStatus::Applied,
+    ///         HunkApplyStatus::Failed(HunkApplyError::ContextNotFound),
+    ///     ],
+    /// };
+    /// let failures = failed_result.failures();
+    /// assert_eq!(failures.len(), 1);
+    /// assert_eq!(failures[0], HunkFailure {
+    ///     hunk_index: 2, // 1-based index
+    ///     reason: HunkApplyError::ContextNotFound,
+    /// });
+    /// ```
+    pub fn failures(&self) -> Vec<HunkFailure> {
+        self.hunk_results
+            .iter()
+            .enumerate()
+            .filter_map(|(i, status)| {
+                if let HunkApplyStatus::Failed(reason) = status {
+                    Some(HunkFailure {
+                        hunk_index: i + 1,
+                        reason: reason.clone(),
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 }
 // --- Data Structures ---
@@ -367,7 +420,7 @@ pub struct Patch {
 ///
 /// # Errors
 ///
-/// Returns `Err(PatchError::MissingFileHeader)` if a diff block contains patch
+/// Returns `Err(ParseError::MissingFileHeader)` if a diff block contains patch
 /// hunks but no `--- a/path/to/file` header.
 ///
 /// # Example
@@ -392,7 +445,7 @@ pub struct Patch {
 /// assert_eq!(patches[0].file_path.to_str(), Some("src/main.rs"));
 /// assert_eq!(patches[0].hunks.len(), 1);
 /// ````
-pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, PatchError> {
+pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
     let mut all_patches = Vec::new();
     let mut lines = content.lines().enumerate().peekable();
 
@@ -503,7 +556,7 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, PatchError> {
             }
         } else if !current_hunks.is_empty() {
             // If we have hunks but never determined a file path, it's an error.
-            return Err(PatchError::MissingFileHeader {
+            return Err(ParseError::MissingFileHeader {
                 line: diff_block_start_line,
             });
         }

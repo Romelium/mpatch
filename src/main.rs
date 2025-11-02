@@ -3,7 +3,7 @@ use clap::Parser;
 use colored::Colorize;
 use env_logger::Builder;
 use log::{error, info, warn, Level, LevelFilter};
-use mpatch::{apply_patch, HunkApplyStatus};
+use mpatch::{apply_patch};
 use mpatch::{parse_diffs, Patch};
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -145,10 +145,8 @@ fn run(args: Args) -> Result<()> {
 
 /// Logs the reasons why hunks failed to apply.
 fn log_failed_hunks(apply_result: &mpatch::ApplyResult) {
-    for (i, status) in apply_result.hunk_results.iter().enumerate() {
-        if let HunkApplyStatus::Failed(reason) = status {
-            warn!("  - Hunk {} failed: {}", i + 1, reason);
-        }
+    for failure in apply_result.failures() {
+        warn!("  - Hunk {} failed: {}", failure.hunk_index, failure.reason);
     }
 }
 

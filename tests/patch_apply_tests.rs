@@ -1,7 +1,7 @@
 use indoc::indoc;
 use mpatch::{
-    apply_patch, find_best_hunk_location, parse_diffs, ApplyOptions, HunkApplyError, HunkLocation,
-    HunkApplyStatus, PatchError,
+    apply_patch, find_best_hunk_location, parse_diffs, ApplyOptions, HunkApplyError,
+    HunkLocation, HunkApplyStatus, ParseError, PatchError,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -259,7 +259,7 @@ fn test_parse_error_on_missing_file_header() {
     let result = parse_diffs(diff);
     assert!(matches!(
         result,
-        Err(PatchError::MissingFileHeader { line: _ })
+        Err(ParseError::MissingFileHeader { line: 2 })
     ));
 }
 
@@ -772,6 +772,14 @@ fn test_partial_apply_fails_on_second_hunk() {
     // The operation should be reported as a soft failure.
     assert!(!result.report.all_applied_cleanly());
 
+    // Check the new failures() method
+    let failures = result.report.failures();
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].hunk_index, 2);
+    assert!(matches!(
+        failures[0].reason,
+        HunkApplyError::ContextNotFound
+    ));
     // The file should be in a partially-patched state (first hunk applied).
     let content = fs::read_to_string(file_path).unwrap();
     assert_eq!(result.report.hunk_results.len(), 2);
