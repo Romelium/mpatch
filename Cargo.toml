@@ -23,6 +23,7 @@ thiserror = "1.0.69"
 [dev-dependencies]
 indoc = "2.0.7"
 tempfile = "3.23.0"
+criterion = { version = "0.5.1", features = ["html_reports"] }
 
 [[bin]]
 name = "mpatch"
@@ -31,3 +32,7 @@ path = "src/main.rs"
 [lib]
 name = "mpatch"
 path = "src/lib.rs"
+
+[[bench]]
+name = "mpatch_bench"
+harness = false
