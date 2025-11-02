@@ -11,9 +11,10 @@
 //!
 //! ## Core Features
 //!
-//! - **Markdown-Aware:** Directly parses unified diffs from within ````diff ` or ````patch ` code blocks.
-//! - **Context-Driven:** Ignores `@@ ... @@` line numbers, finding patch locations by
-//!   matching context lines.
+//! - **Markdown-Aware:** Directly parses unified diffs from within ` ```diff` or ` ```patch` code blocks.
+//! - **Context-Driven:** Primarily finds patch locations by matching context lines.
+//!   It intelligently uses the `@@ ... @@` line numbers as a hint to resolve
+//!   ambiguity when the same context appears in multiple places.
 //! - **Fuzzy Matching:** If an exact context match isn't found, `mpatch` uses a
 //!   similarity algorithm to find the *best* fuzzy match.
 //! - **Safe by Design:** Includes a dry-run mode and protection against path traversal attacks.

@@ -34,6 +34,7 @@ This same logic makes it perfect for other common developer scenarios where patc
 *   **Markdown-Aware:** Directly parses unified diffs from within ` ```diff` or ` ```patch` code blocks in any text or markdown file.
 *   **Context-Driven:** Ignores `@@ ... @@` line numbers, finding patch locations by matching context lines. This makes it resilient to minor preceding changes in a file.
 *   **Fuzzy Matching:** If an exact context match isn't found, `mpatch` uses a sophisticated similarity algorithm to find the *best* fuzzy match. This logic can handle cases where lines have been added or removed near the patch location, allowing patches to apply even when the surrounding context has moderately diverged.
+*   **Context-Driven:** Primarily finds patch locations by matching context lines, making it resilient to preceding file changes. It intelligently uses the `@@ ... @@` line numbers as a hint to resolve ambiguity when the same context appears in multiple places.
 *   **Safe & Secure:** Includes a `--dry-run` mode to preview changes and built-in protection against path traversal attacks.
 *   **Flexible:** Handles multiple files and multiple hunks in a single pass. It correctly processes file creations, modifications, and deletions (by removing all content from a file).
 *   **Informative Logging:** Adjustable verbosity levels (`-v`, `-vv`) to see exactly what `mpatch` is doing.
@@ -46,24 +47,49 @@ This same logic makes it perfect for other common developer scenarios where patc
 
 For users with the [Rust toolchain](https://rustup.rs/), `cargo-binstall` is the fastest way to install `mpatch`. It downloads pre-compiled binaries, avoiding a local build.
 
-First, install `cargo-binstall` if you don't have it:
+First, install `cargo-binstall` if you don't have it. Here are a few quick methods:
+
+**On Linux and macOS:**
 ```bash
-cargo install cargo-binstall
+curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+```
+*Or, if you use Homebrew:*
+```bash
+brew install cargo-binstall
 ```
 
-Then, install `mpatch`:
+**On Windows (PowerShell):**
+```powershell
+Set-ExecutionPolicy Unrestricted -Scope Process; iex (iwr "https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.ps1").Content
+```
+
+Once `cargo-binstall` is installed, you can install `mpatch`:
+
 ```bash
 cargo binstall mpatch
 ```
 
 ### Method 2: From GitHub Releases (Manual)
 
-For users who don't need to build from source, pre-compiled binaries are the simplest option.
+Pre-compiled binaries for various platforms are available for direct download.
 
 1.  Navigate to the [**GitHub Releases page**](https://github.com/romelium/mpatch/releases).
-2.  Download the appropriate archive for your system (e.g., `mpatch-x86_64-unknown-linux-gnu.tar.gz`).
-3.  Extract the `mpatch` executable.
-4.  Move the executable to a directory in your system's `PATH` (e.g., `/usr/local/bin` on Linux/macOS, or `~/.cargo/bin`).
+2.  Find the latest release and download the archive that matches your system (e.g., `.tar.gz` for Linux/macOS, `.zip` for Windows).
+3.  Extract the `mpatch` executable (`mpatch.exe` on Windows).
+4.  Move the executable to a directory in your system's `PATH` (e.g., `/usr/local/bin` on Linux/macOS).
+
+Binaries are available for the following targets:
+
+| OS      | Architecture | Target Triple                  |
+|---------|--------------|--------------------------------|
+| Linux   | x86-64       | `x86_64-unknown-linux-gnu`     |
+| Linux   | x86-64       | `x86_64-unknown-linux-musl` (static) |
+| Linux   | ARM64        | `aarch64-unknown-linux-gnu`    |
+| macOS   | Intel        | `x86_64-apple-darwin`          |
+| macOS   | Apple Silicon| `aarch64-apple-darwin`         |
+| Windows | x86-64       | `x86_64-pc-windows-msvc`       |
+| Windows | x86 (32-bit) | `i686-pc-windows-msvc`         |
+| Windows | ARM64        | `aarch64-pc-windows-msvc`      |
 
 ### Method 3: From Crates.io (Build from Source)
 
