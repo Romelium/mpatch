@@ -770,17 +770,17 @@ impl Patch {
         // Wrap in markdown block for our parser
         let full_diff = format!("```diff\n{}\n```", diff_text);
 
-        let mut patches = parse_diffs(&full_diff)?;
+        let patches = parse_diffs(&full_diff)?;
 
-        if patches.is_empty() {
+        if let Some(patch) = patches.into_iter().next() {
+            Ok(patch)
+        } else {
             // This should not happen if diff_text was not empty, but as a safeguard:
             Ok(Patch {
                 file_path: path,
                 hunks: vec![],
                 ends_with_newline: new_text.ends_with('\n') || new_text.is_empty(),
             })
-        } else {
-            Ok(patches.remove(0))
         }
     }
 
@@ -1221,9 +1221,8 @@ pub fn apply_patch_to_file(
 
     let (original_content, is_new_file) = if safe_target_path.is_file() {
         trace!("  Reading target file '{}'", patch.file_path.display());
-        let content =
-            fs::read_to_string(&safe_target_path)
-                .map_err(|e| map_io_error(safe_target_path.clone(), e))?;
+        let content = fs::read_to_string(&safe_target_path)
+            .map_err(|e| map_io_error(safe_target_path.clone(), e))?;
         (content, false)
     } else {
         // File doesn't exist. This is only okay if it's a file creation patch.
@@ -2228,8 +2227,71 @@ fn tie_break_with_line_number(
         }
     };
 
-    let second_match = matches.next();
-    if second_match.is_none() {
+    if let Some(second_match) = matches.next() {
+        // --- Step 2: Multiple matches found, collect and tie-break ---
+        // At least two matches exist. Collect them all for analysis.
+        let mut all_matches = vec![first_match, second_match];
+        all_matches.extend(matches);
+
+        trace!(
+            "      Found {} {} match candidate(s) at indices: {:?}",
+            all_matches.len(),
+            match_type,
+            all_matches
+        );
+
+        // More than 1 match, try to tie-break using the line number hint.
+        if let Some(line) = start_line {
+            trace!(
+            "    Ambiguous {} match found at {:?}. Attempting to tie-break using line number hint: {}",
+            match_type,
+            all_matches,
+            line
+        );
+            let mut closest_index = 0;
+            let mut min_distance = usize::MAX;
+            let mut is_tie = false;
+
+            // Find the match that is numerically closest to the hint.
+            for &match_index in &all_matches {
+                // Hunk line numbers are 1-based, indices are 0-based.
+                trace!(
+                    "      Candidate index {}: distance from line hint {} is {}",
+                    match_index,
+                    line,
+                    (match_index + 1).abs_diff(line)
+                );
+                let distance = (match_index + 1).abs_diff(line);
+                if distance < min_distance {
+                    min_distance = distance;
+                    closest_index = match_index;
+                    is_tie = false;
+                } else if distance == min_distance {
+                    // If another match has the same minimum distance, it's a tie.
+                    is_tie = true;
+                }
+            }
+
+            if !is_tie {
+                trace!(
+                    "      Successfully tie-broke using line number. Best match is at index {}.",
+                    closest_index
+                );
+                return Ok(Some(closest_index));
+            }
+            trace!(
+                "    Tie-breaking failed: multiple matches are equidistant from the line number hint."
+            );
+        } else {
+            trace!(
+                "    tie_break: Ambiguous '{}' match, but no line number hint provided.",
+                match_type
+            );
+        }
+
+        // If we reach here, the ambiguity could not be resolved.
+        Err(all_matches)
+    } else {
         // Exactly one match was found.
         trace!(
             "      Found 1 {} match candidate at index: {}",
@@ -2241,73 +2303,8 @@ fn tie_break_with_line_number(
             match_type,
             first_match
         );
-        return Ok(Some(first_match));
+        Ok(Some(first_match))
     }
-
-    // --- Step 2: Multiple matches found, collect and tie-break ---
-    // At least two matches exist. Collect them all for analysis.
-    let mut all_matches = vec![first_match];
-    all_matches.push(second_match.unwrap());
-    all_matches.extend(matches);
-
-    trace!(
-        "      Found {} {} match candidate(s) at indices: {:?}",
-        all_matches.len(),
-        match_type,
-        all_matches
-    );
-
-    // More than 1 match, try to tie-break using the line number hint.
-    if let Some(line) = start_line {
-        trace!(
-            "    Ambiguous {} match found at {:?}. Attempting to tie-break using line number hint: {}",
-            match_type,
-            all_matches,
-            line
-        );
-        let mut closest_index = 0;
-        let mut min_distance = usize::MAX;
-        let mut is_tie = false;
-
-        // Find the match that is numerically closest to the hint.
-        for &match_index in &all_matches {
-            // Hunk line numbers are 1-based, indices are 0-based.
-            trace!(
-                "      Candidate index {}: distance from line hint {} is {}",
-                match_index,
-                line,
-                (match_index + 1).abs_diff(line)
-            );
-            let distance = (match_index + 1).abs_diff(line);
-            if distance < min_distance {
-                min_distance = distance;
-                closest_index = match_index;
-                is_tie = false;
-            } else if distance == min_distance {
-                // If another match has the same minimum distance, it's a tie.
-                is_tie = true;
-            }
-        }
-
-        if !is_tie {
-            trace!(
-                "      Successfully tie-broke using line number. Best match is at index {}.",
-                closest_index
-            );
-            return Ok(Some(closest_index));
-        }
-        trace!(
-            "    Tie-breaking failed: multiple matches are equidistant from the line number hint."
-        );
-    } else {
-        trace!(
-            "    tie_break: Ambiguous '{}' match, but no line number hint provided.",
-            match_type
-        );
-    }
-
-    // If we reach here, the ambiguity could not be resolved.
-    Err(all_matches)
 }
 
 /// Parses a hunk header line (e.g., "@@ -1,3 +1,3 @@") to extract the starting line number.
