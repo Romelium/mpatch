@@ -196,6 +196,28 @@
 //! # Ok(())
 //! # }
 //! ````
+//!
+//! ## Feature Flags
+//!
+//! `mpatch` includes the following optional features:
+//!
+//! ### `parallel`
+//!
+//! - **Enabled by default.**
+//! - This feature enables parallel processing for the fuzzy matching algorithm using the
+//!   [`rayon`](https://crates.io/crates/rayon) crate. When an exact match for a hunk
+//!   is not found, `mpatch` performs a computationally intensive search for the best
+//!   fuzzy match. The `parallel` feature significantly speeds up this process on
+//!   multi-core systems by distributing the search across multiple threads.
+//!
+//! - **To disable this feature**, specify `default-features = false` in your `Cargo.toml`:
+//!   ```toml
+//!   [dependencies]
+//!   mpatch = { version = "0.3.1", default-features = false }
+//!   ```
+//!   You might want to disable this feature if you are compiling for a target that
+//!   does not support threading (like `wasm32-unknown-unknown`) or if you want to
+//!   minimize dependencies and binary size.
 use log::{debug, info, trace, warn};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
