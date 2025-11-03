@@ -1,8 +1,9 @@
 use indoc::indoc;
 use mpatch::{
     apply_hunk_to_lines, apply_patch_to_file, apply_patch_to_lines, apply_patches_to_dir,
-    find_hunk_location, find_hunk_location_in_lines, parse_diffs, ApplyOptions, HunkApplyError,
-    HunkApplyStatus, HunkLocation, MatchType, ParseError, Patch, PatchError,
+    find_hunk_location, find_hunk_location_in_lines, parse_diffs, ApplyOptions, DefaultHunkFinder,
+    HunkApplyError, HunkApplyStatus, HunkFinder, HunkLocation, MatchType, ParseError, Patch,
+    PatchError,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -2149,5 +2150,133 @@ mod ensure_path_is_safe_tests {
         assert!(result.is_ok());
         let resolved = result.unwrap();
         assert!(resolved.ends_with("main.rs"));
+    }
+}
+
+mod hunk_finder_tests {
+    use super::*; // Import everything from the parent module
+    use mpatch::Hunk;
+
+    fn setup_hunk(diff_content: &str) -> Hunk {
+        parse_diffs(diff_content).unwrap().remove(0).hunks.remove(0)
+    }
+
+    #[test]
+    fn test_default_finder_exact_match() {
+        let options = ApplyOptions {
+            fuzz_factor: 0.0,
+            ..Default::default()
+        };
+        let finder = DefaultHunkFinder::new(&options);
+
+        let hunk = setup_hunk(indoc! {r#"
+            ```diff
+            --- a/file.txt
+            +++ b/file.txt
+            @@ -1,3 +1,3 @@
+             line 1
+            -line two
+            +line 2
+             line 3
+            ```
+        "#});
+        let target_lines = vec!["line 1", "line two", "line 3"];
+
+        let (location, match_type) = finder.find_location(&hunk, &target_lines).unwrap();
+
+        assert_eq!(
+            location,
+            HunkLocation {
+                start_index: 0,
+                length: 3
+            }
+        );
+        assert!(matches!(match_type, MatchType::Exact));
+    }
+
+    #[test]
+    fn test_default_finder_fuzzy_match() {
+        let options = ApplyOptions {
+            fuzz_factor: 0.7,
+            ..Default::default()
+        };
+        let finder = DefaultHunkFinder::new(&options);
+
+        let hunk = setup_hunk(indoc! {r#"
+            ```diff
+            --- a/file.txt
+            +++ b/file.txt
+            @@ -1,3 +1,3 @@
+             context A
+            -line to change
+            +line was changed
+             context C
+            ```
+        "#});
+        // File has an extra line, requiring a flexible fuzzy match
+        let target_lines = vec!["context A", "inserted line", "line to change", "context C"];
+
+        let (location, match_type) = finder.find_location(&hunk, &target_lines).unwrap();
+
+        assert_eq!(
+            location,
+            HunkLocation {
+                start_index: 0,
+                length: 4
+            }
+        );
+        assert!(matches!(match_type, MatchType::Fuzzy { .. }));
+    }
+
+    #[test]
+    fn test_default_finder_not_found() {
+        let options = ApplyOptions {
+            fuzz_factor: 0.9,
+            ..Default::default()
+        };
+        let finder = DefaultHunkFinder::new(&options);
+
+        let hunk = setup_hunk(indoc! {r#"
+            ```diff
+            --- a/file.txt
+            +++ b/file.txt
+            @@ -1,1 +1,1 @@
+            -foo
+            +bar
+            ```
+        "#});
+        let target_lines = vec!["completely", "different", "content"];
+
+        let result = finder.find_location(&hunk, &target_lines);
+        assert!(matches!(
+            result,
+            Err(HunkApplyError::FuzzyMatchBelowThreshold { .. })
+        ));
+    }
+
+    #[test]
+    fn test_default_finder_ambiguous_match() {
+        let options = ApplyOptions {
+            fuzz_factor: 0.0,
+            ..Default::default()
+        };
+        let finder = DefaultHunkFinder::new(&options);
+
+        let hunk = setup_hunk(indoc! {r#"
+            ```diff
+            --- a/file.txt
+            +++ b/file.txt
+            @@ -2,1 +2,1 @@
+            -duplicate
+            +changed
+            ```
+        "#});
+        let target_lines = vec!["duplicate", "", "duplicate"];
+
+        let result = finder.find_location(&hunk, &target_lines);
+        assert!(matches!(
+            result,
+            Err(HunkApplyError::AmbiguousExactMatch(_))
+        ));
     }
 }

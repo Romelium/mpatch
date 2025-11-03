@@ -1633,6 +1633,723 @@ pub fn apply_hunk_to_lines(
     }
 }
 
+/// A trait for strategies that find the location to apply a hunk.
+///
+/// This allows the core matching algorithm to be pluggable, enabling different
+/// search strategies to be used if needed.
+pub trait HunkFinder {
+    /// Finds the location to apply a hunk to a slice of lines.
+    ///
+    /// # Arguments
+    ///
+    /// * `hunk` - The hunk to locate.
+    /// * `target_lines` - The content to search within.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok((HunkLocation, MatchType))` on success.
+    /// - `Err(HunkApplyError)` if no suitable location could be found.
+    fn find_location<T: AsRef<str> + Sync>(
+        &self,
+        hunk: &Hunk,
+        target_lines: &[T],
+    ) -> Result<(HunkLocation, MatchType), HunkApplyError>;
+}
+
+/// The default, built-in strategy for finding hunk locations.
+///
+/// This implementation uses a hierarchical approach:
+/// 1.  Exact match.
+/// 2.  Exact match ignoring trailing whitespace.
+/// 3.  Flexible fuzzy match using a similarity algorithm.
+///
+/// It uses line number hints from the patch to resolve ambiguities.
+#[derive(Debug)]
+pub struct DefaultHunkFinder<'a> {
+    options: &'a ApplyOptions,
+}
+
+impl<'a> DefaultHunkFinder<'a> {
+    /// Creates a new finder with the given options.
+    pub fn new(options: &'a ApplyOptions) -> Self {
+        Self { options }
+    }
+
+    /// Finds optimized search ranges within the target file to perform the fuzzy search.
+    ///
+    /// This is a performance heuristic. It tries to find an "anchor" line from the
+    /// hunk that is relatively uncommon in the target file. If successful, it returns
+    /// small search windows around the occurrences of that anchor. If no good anchor
+    /// is found, it returns a single range covering the entire file.
+    fn find_search_ranges<T: AsRef<str>>(
+        match_block: &[&str],
+        target_lines: &[T],
+        hunk_size: usize,
+    ) -> Vec<(usize, usize)> {
+        const MAX_ANCHOR_OCCURRENCES: usize = 5;
+        const MIN_ANCHOR_LEN: usize = 5;
+        // Search radius is this factor times the hunk size, with a minimum.
+        const SEARCH_RADIUS_FACTOR: usize = 2;
+        const MIN_SEARCH_RADIUS: usize = 15;
+
+        if hunk_size == 0 {
+            return vec![(0, target_lines.len())];
+        }
+
+        // Iterate from the middle of the hunk outwards to find a good anchor line.
+        // The middle is often more stable than the edges.
+        let mid = hunk_size / 2;
+        for i in 0..=mid {
+            let indices_to_check = [Some(mid + i), if i > 0 { Some(mid - i) } else { None }];
+
+            for &line_idx_opt in &indices_to_check {
+                if let Some(line_idx) = line_idx_opt {
+                    if line_idx >= hunk_size {
+                        continue;
+                    }
+
+                    let anchor_line = match_block[line_idx].trim_end();
+                    // Ignore short or empty lines as they are poor anchors.
+                    if anchor_line.trim().len() < MIN_ANCHOR_LEN {
+                        continue;
+                    }
+
+                    // Find all occurrences of the anchor line.
+                    let occurrences: Vec<_> = target_lines
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, l)| l.as_ref().trim_end() == anchor_line)
+                        .map(|(i, _)| i)
+                        .collect();
+
+                    // If the line is unique enough, use it to create search ranges.
+                    if !occurrences.is_empty() && occurrences.len() <= MAX_ANCHOR_OCCURRENCES {
+                        trace!(
+                            "      Found good anchor line (hunk line {}) with {} occurrences: '{}'",
+                            line_idx + 1,
+                            occurrences.len(),
+                            anchor_line.trim()
+                        );
+                        let mut ranges = Vec::new();
+                        let search_radius =
+                            (hunk_size * SEARCH_RADIUS_FACTOR).max(MIN_SEARCH_RADIUS);
+
+                        for &occurrence_idx in &occurrences {
+                            // Estimate where the hunk would start based on the anchor's position.
+                            let estimated_start = occurrence_idx.saturating_sub(line_idx);
+                            let start = estimated_start.saturating_sub(search_radius);
+                            let end = (estimated_start + hunk_size + search_radius)
+                                .min(target_lines.len());
+                            ranges.push((start, end));
+                        }
+                        // Merge any overlapping ranges created by nearby occurrences.
+                        return Self::merge_ranges(ranges);
+                    }
+                }
+            }
+        }
+
+        // If no good anchor was found, we must search the entire file.
+        debug!("      No suitable anchor line found. Falling back to full file scan.");
+        vec![(0, target_lines.len())]
+    }
+
+    /// Merges a list of overlapping or adjacent ranges into a minimal set of disjoint ranges.
+    fn merge_ranges(mut ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+        if ranges.is_empty() {
+            return vec![];
+        }
+        ranges.sort_unstable_by_key(|k| k.0);
+        let mut merged = Vec::with_capacity(ranges.len());
+        let mut current_range = ranges[0];
+
+        for &(start, end) in &ranges[1..] {
+            if start <= current_range.1 {
+                // Overlap or adjacent, merge them.
+                current_range.1 = current_range.1.max(end);
+            } else {
+                // No overlap, push the current range and start a new one.
+                merged.push(current_range);
+                current_range = (start, end);
+            }
+        }
+        merged.push(current_range);
+        merged
+    }
+
+    /// Finds the starting index of the hunk's match block in the target lines.
+    /// This function implements the core hierarchical search strategy.
+    fn find_hunk_location_internal<T: AsRef<str> + Sync>(
+        &self,
+        match_block: &[&str],
+        target_lines: &[T],
+        old_start_line: Option<usize>,
+    ) -> Result<(HunkLocation, MatchType), HunkApplyError> {
+        trace!(
+            "  find_hunk_location_internal called for a hunk with {} lines to match against {} target lines.",
+            match_block.len(),
+            target_lines.len()
+        );
+
+        if match_block.is_empty() {
+            // An empty match block (file creation) can only be applied to an empty file.
+            trace!("    Match block is empty (file creation).");
+            return if target_lines.is_empty() {
+                trace!("    Target is empty, match successful at (0, 0).");
+                Ok((
+                    HunkLocation {
+                        start_index: 0,
+                        length: 0,
+                    },
+                    MatchType::Exact,
+                ))
+            } else {
+                trace!("    Target is not empty, match failed.");
+                Err(HunkApplyError::ContextNotFound)
+            };
+        }
+
+        // --- STRATEGY 1: Exact Match ---
+        // The fastest and most reliable method.
+        trace!("    Attempting exact match for hunk...");
+        {
+            let exact_matches: Box<dyn Iterator<Item = usize>> =
+                if match_block.len() <= target_lines.len() {
+                    Box::new(
+                        target_lines
+                            .windows(match_block.len())
+                            .enumerate()
+                            .filter(|(_, window)| {
+                                window
+                                    .iter()
+                                    .map(|s| s.as_ref())
+                                    .eq(match_block.iter().copied())
+                            })
+                            .map(|(i, _)| i),
+                    )
+                } else {
+                    Box::new(std::iter::empty())
+                };
+
+            match Self::tie_break_with_line_number(exact_matches, old_start_line, "exact") {
+                Ok(Some(index)) => {
+                    debug!("    Found unique exact match at index {}.", index);
+                    return Ok((
+                        HunkLocation {
+                            start_index: index,
+                            length: match_block.len(),
+                        },
+                        MatchType::Exact,
+                    ));
+                }
+                Ok(None) => {} // No exact matches, continue to next strategy.
+                Err(matches) => return Err(HunkApplyError::AmbiguousExactMatch(matches)),
+            }
+        }
+
+        // --- STRATEGY 2: Exact Match (Ignoring Trailing Whitespace) ---
+        // Handles minor formatting differences.
+        trace!("    Attempting exact match (ignoring trailing whitespace)...");
+        {
+            let match_stripped: Vec<_> = match_block.iter().map(|s| s.trim_end()).collect();
+            let stripped_matches: Box<dyn Iterator<Item = usize>> =
+                if match_block.len() <= target_lines.len() {
+                    Box::new(
+                        target_lines
+                            .windows(match_block.len())
+                            .enumerate()
+                            .filter(move |(_, window)| {
+                                window
+                                    .iter()
+                                    .map(|s| s.as_ref().trim_end())
+                                    .eq(match_stripped.iter().copied())
+                            })
+                            .map(|(i, _)| i),
+                    )
+                } else {
+                    Box::new(std::iter::empty())
+                };
+
+            match Self::tie_break_with_line_number(
+                stripped_matches,
+                old_start_line,
+                "exact (ignoring whitespace)",
+            ) {
+                Ok(Some(index)) => {
+                    debug!(
+                        "    Found unique whitespace-insensitive match at index {}.",
+                        index
+                    );
+                    return Ok((
+                        HunkLocation {
+                            start_index: index,
+                            length: match_block.len(),
+                        },
+                        MatchType::ExactIgnoringWhitespace,
+                    ));
+                }
+                Ok(None) => {} // No matches, continue.
+                Err(matches) => return Err(HunkApplyError::AmbiguousExactMatch(matches)),
+            }
+        }
+
+        // --- STRATEGY 3: Fuzzy Match (with flexible window) ---
+        // This is the core "smart" logic. If an exact match fails, we search for
+        // the best-fitting slice in the target file, allowing the slice to be
+        // slightly larger or smaller than the patch's context. This handles cases
+        // where lines have been added or removed near the patch location.
+        if self.options.fuzz_factor > 0.0 && !match_block.is_empty() {
+            trace!(
+                "    Exact matches failed. Attempting flexible fuzzy match (threshold={:.2})...",
+                self.options.fuzz_factor
+            );
+
+            // Hoist invariants for performance
+            let match_stripped_lines: Vec<_> = match_block.iter().map(|s| s.trim_end()).collect();
+            let match_content = match_stripped_lines.join("\n");
+
+            let mut best_score = -1.0;
+            let mut best_ratio_at_best_score = -1.0;
+            let mut potential_matches = Vec::new(); // Vec<(start_index, length)>
+
+            let len = match_block.len();
+            // Define how far to search for different-sized windows.
+            // Proportional to hunk size, but with reasonable bounds.
+            let fuzz_distance = (len / 4).clamp(3, 8);
+            let min_len = len.saturating_sub(fuzz_distance).max(1);
+            let max_len = len.saturating_add(fuzz_distance);
+            trace!(
+                "      Searching with window sizes from {} to {} (hunk size: {}, fuzz distance: {})",
+                min_len,
+                max_len,
+                len,
+                fuzz_distance
+            );
+
+            // Performance heuristic: narrow down the search space using anchor lines.
+            let search_ranges = Self::find_search_ranges(match_block, target_lines, len);
+            trace!("    Using search ranges: {:?}", search_ranges);
+
+            // When the anchor heuristic fails, the search can be slow. We parallelize the
+            // scoring of all possible windows using Rayon if the `parallel` feature is enabled.
+            #[cfg(feature = "parallel")]
+            let all_scored_windows: Vec<(f64, f64, f64, f64, f64, usize, usize)> = search_ranges
+                .par_iter()
+                .flat_map(|&(range_start, range_end)| {
+                    // By creating local references, we ensure that the inner `move` closures
+                    // capture these references (which are `Copy`) instead of attempting to move
+                    // the original non-`Copy` `Vec` and `String` from the outer scope.
+                    let match_stripped_lines = &match_stripped_lines;
+                    let match_content = &match_content;
+                    let target_slice = &target_lines[range_start..range_end];
+
+                    (min_len..=max_len)
+                        .into_par_iter()
+                        .filter(move |&window_len| window_len <= target_slice.len())
+                        .flat_map(move |window_len| {
+                            (0..=target_slice.len() - window_len)
+                                .into_par_iter()
+                                .map(move |i| {
+                                    let window = &target_slice[i..i + window_len];
+                                    let absolute_index = range_start + i;
+
+                                    // HYBRID SCORING: (Copied from original sequential loop)
+                                    let window_stripped_lines: Vec<_> =
+                                        window.iter().map(|s| s.as_ref().trim_end()).collect();
+                                    let diff_lines = similar::TextDiff::from_slices(
+                                        &window_stripped_lines,
+                                        match_stripped_lines,
+                                    );
+                                    let ratio_lines = diff_lines.ratio() as f64;
+                                    let window_content = window_stripped_lines.join("\n");
+                                    let diff_words = similar::TextDiff::from_words(
+                                        &window_content,
+                                        match_content,
+                                    );
+                                    let ratio_words = diff_words.ratio() as f64;
+                                    let ratio = 0.6 * ratio_lines + 0.4 * ratio_words;
+                                    let size_diff = window_len.abs_diff(len) as f64;
+                                    let penalty = (size_diff / len.max(window_len) as f64) * 0.2;
+                                    let score = ratio - penalty;
+
+                                    (
+                                        score,
+                                        ratio,
+                                        ratio_lines,
+                                        ratio_words,
+                                        penalty,
+                                        absolute_index,
+                                        window_len,
+                                    )
+                                })
+                        })
+                })
+                .collect();
+
+            #[cfg(not(feature = "parallel"))]
+            let all_scored_windows: Vec<(f64, f64, f64, f64, f64, usize, usize)> = search_ranges
+                .iter()
+                .flat_map(|&(range_start, range_end)| {
+                    // By creating local references, we ensure that the inner `move` closures
+                    // capture these references (which are `Copy`) instead of attempting to move
+                    // the original non-`Copy` `Vec` and `String` from the outer scope.
+                    let match_stripped_lines = &match_stripped_lines;
+                    let match_content = &match_content;
+                    let target_slice = &target_lines[range_start..range_end];
+
+                    (min_len..=max_len)
+                        .into_iter()
+                        .filter(move |&window_len| window_len <= target_slice.len())
+                        .flat_map(move |window_len| {
+                            (0..=target_slice.len() - window_len)
+                                .into_iter()
+                                .map(move |i| {
+                                    let window = &target_slice[i..i + window_len];
+                                    let absolute_index = range_start + i;
+
+                                    // HYBRID SCORING: (Copied from original sequential loop)
+                                    let window_stripped_lines: Vec<_> =
+                                        window.iter().map(|s| s.as_ref().trim_end()).collect();
+                                    let diff_lines = similar::TextDiff::from_slices(
+                                        &window_stripped_lines,
+                                        match_stripped_lines,
+                                    );
+                                    let ratio_lines = diff_lines.ratio() as f64;
+                                    let window_content = window_stripped_lines.join("\n");
+                                    let diff_words = similar::TextDiff::from_words(
+                                        &window_content,
+                                        match_content,
+                                    );
+                                    let ratio_words = diff_words.ratio() as f64;
+                                    let ratio = 0.6 * ratio_lines + 0.4 * ratio_words;
+                                    let size_diff = window_len.abs_diff(len) as f64;
+                                    let penalty = (size_diff / len.max(window_len) as f64) * 0.2;
+                                    let score = ratio - penalty;
+
+                                    (
+                                        score,
+                                        ratio,
+                                        ratio_lines,
+                                        ratio_words,
+                                        penalty,
+                                        absolute_index,
+                                        window_len,
+                                    )
+                                })
+                        })
+                })
+                .collect();
+
+            // Process the collected results sequentially to find the best match and handle tie-breaking.
+            for (score, ratio, ratio_lines, ratio_words, penalty, absolute_index, window_len) in
+                all_scored_windows
+            {
+                // This is the same logic as in the original sequential loop.
+                if score > best_score {
+                    trace!(
+                        "        New best score: {:.3} (ratio {:.3} [l:{:.3},w:{:.3}], penalty {:.3}) at index {} (window len {})",
+                        score,
+                        ratio,
+                        ratio_lines,
+                        ratio_words,
+                        penalty,
+                        absolute_index,
+                        window_len
+                    );
+                    best_score = score;
+                    best_ratio_at_best_score = ratio;
+                    potential_matches.clear();
+                    potential_matches.push((absolute_index, window_len));
+                } else if (score - best_score).abs() < 1e-9 {
+                    // Tie in score. Prefer the window size closer to the match block size.
+                    // This is mostly redundant due to the penalty, but good for perfect ties.
+                    if potential_matches.is_empty() {
+                        potential_matches.push((absolute_index, window_len));
+                        continue;
+                    }
+                    let current_best_len = potential_matches[0].1;
+                    let dist_new = window_len.abs_diff(len);
+                    let dist_best = current_best_len.abs_diff(len);
+
+                    if dist_new < dist_best {
+                        // This window size is a better fit, so it's the new best.
+                        trace!(
+                            "        Tie in score ({:.3}), but window len {} is closer to hunk len {}. New best.",
+                            score,
+                            window_len,
+                            len
+                        );
+                        best_ratio_at_best_score = ratio;
+                        potential_matches.clear();
+                        potential_matches.push((absolute_index, window_len));
+                    } else if dist_new == dist_best {
+                        // Same distance, so it's also a potential match.
+                        trace!(
+                            "        Tie in score ({:.3}) and window distance. Adding candidate: index {}, len {}",
+                            score,
+                            absolute_index,
+                            window_len
+                        );
+                        potential_matches.push((absolute_index, window_len));
+                    }
+                }
+            }
+
+            trace!(
+                "    Fuzzy search complete. Best score: {:.3}, best ratio: {:.3}, potential matches: {:?}",
+                best_score,
+                best_ratio_at_best_score,
+                potential_matches
+            );
+
+            // Check if the best match found meets the user-defined threshold.
+            if best_ratio_at_best_score >= f64::from(self.options.fuzz_factor) {
+                if potential_matches.len() == 1 {
+                    let (start, len) = potential_matches[0];
+                    debug!(
+                        "    Found best fuzzy match at index {} (length {}, similarity: {:.3}).",
+                        start, len, best_ratio_at_best_score
+                    );
+                    return Ok((
+                        HunkLocation {
+                            start_index: start,
+                            length: len,
+                        },
+                        MatchType::Fuzzy {
+                            score: best_ratio_at_best_score,
+                        },
+                    ));
+                }
+                // AMBIGUOUS FUZZY MATCH - TRY TO TIE-BREAK
+                if let Some(line) = old_start_line {
+                    trace!(
+                            "    Ambiguous fuzzy match found at {:?}. Attempting to tie-break using line number hint: {}",
+                            potential_matches,
+                            line
+                        );
+                    let mut closest_match: Option<(usize, usize)> = None;
+                    let mut min_distance = usize::MAX;
+                    let mut is_tie = false;
+
+                    for &(match_index, match_len) in &potential_matches {
+                        // Hunk line numbers are 1-based, indices are 0-based.
+                        trace!(
+                            "      Candidate {:?}: distance from line hint is {}",
+                            (match_index, match_len),
+                            (match_index + 1).abs_diff(line)
+                        );
+                        let distance = (match_index + 1).abs_diff(line);
+                        if distance < min_distance {
+                            min_distance = distance;
+                            closest_match = Some((match_index, match_len));
+                            is_tie = false;
+                        } else if distance == min_distance {
+                            is_tie = true;
+                        }
+                    }
+
+                    if !is_tie {
+                        if let Some((start, len)) = closest_match {
+                            debug!(
+                                    "    Tie-broke ambiguous fuzzy match using line number. Best match is at index {} (length {}, similarity: {:.3}).",
+                                    start, len, best_ratio_at_best_score
+                                );
+                            return Ok((
+                                HunkLocation {
+                                    start_index: start,
+                                    length: len,
+                                },
+                                MatchType::Fuzzy {
+                                    score: best_ratio_at_best_score,
+                                },
+                            ));
+                        }
+                    } else {
+                        trace!("    Tie-breaking failed: multiple fuzzy matches are equidistant from the line number hint.");
+                    }
+                }
+                warn!("    Ambiguous fuzzy match: Multiple locations found with same top score ({:.3}): {:?}. Skipping.", best_ratio_at_best_score, potential_matches);
+                return Err(HunkApplyError::AmbiguousFuzzyMatch(potential_matches));
+            } else if best_ratio_at_best_score >= 0.0 {
+                // Did not meet threshold
+                let (start, len) = potential_matches.first().copied().unwrap_or((0, 0));
+                trace!(
+                    "    Fuzzy match: Best location (index {}, len {}, similarity {:.3}) did not meet threshold of {:.2}.",
+                    start, len, best_ratio_at_best_score, self.options.fuzz_factor
+                );
+                return Err(HunkApplyError::FuzzyMatchBelowThreshold {
+                    best_score: best_ratio_at_best_score,
+                    threshold: self.options.fuzz_factor,
+                });
+            } else {
+                // No potential matches found at all
+                debug!("    Fuzzy match: Could not find any potential match location.");
+                // Fall through to the final ContextNotFound error
+            }
+        } else if self.options.fuzz_factor <= 0.0 {
+            trace!("    Failed exact matches. Fuzzy matching disabled.");
+        }
+
+        // --- STRATEGY 4: End-of-file fuzzy match for short files ---
+        // This handles cases where the entire file is a good fuzzy match for the
+        // start of the hunk context, which can happen if the file is missing
+        // context lines that the patch expects to be there at the end.
+        if !target_lines.is_empty()
+            && target_lines.len() < match_block.len()
+            && self.options.fuzz_factor > 0.0
+        {
+            trace!("    Target file is shorter than hunk. Attempting end-of-file fuzzy match...");
+            let target_stripped: Vec<_> =
+                target_lines.iter().map(|s| s.as_ref().trim_end()).collect();
+            let match_stripped: Vec<_> = match_block.iter().map(|s| s.trim_end()).collect();
+            let diff = TextDiff::from_slices(&target_stripped, &match_stripped);
+            let ratio = diff.ratio();
+
+            // Be slightly more lenient for this specific end-of-file prefix case.
+            let effective_threshold = (f64::from(self.options.fuzz_factor) - 0.1).max(0.5);
+            trace!(
+                "      Using effective threshold for EOF match: {:.3}",
+                effective_threshold
+            );
+
+            if ratio as f64 >= effective_threshold {
+                debug!(
+                    "    End-of-file fuzzy match succeeded with ratio {:.3} (threshold {:.3}). Treating as full-file match.",
+                    ratio, effective_threshold
+                );
+                // We are matching the entire file from the beginning.
+                return Ok((
+                    HunkLocation {
+                        start_index: 0,
+                        length: target_lines.len(),
+                    },
+                    MatchType::Fuzzy {
+                        score: ratio as f64,
+                    },
+                ));
+            } else {
+                trace!(
+                    "    End-of-file fuzzy match ratio {:.3} did not meet effective threshold {:.3}.",
+                    ratio,
+                    effective_threshold
+                );
+            }
+        }
+
+        debug!("    Failed to find any suitable match location for hunk.");
+        Err(HunkApplyError::ContextNotFound)
+    }
+
+    /// Given an iterator of match indices, attempts to find the best one using the
+    /// hunk's original line number as a hint. Returns the index of the best match,
+    /// or `None` if the ambiguity cannot be resolved.
+    /// This function avoids collecting matches into a vector if there are 0 or 1 matches.
+    fn tie_break_with_line_number(
+        mut matches: impl Iterator<Item = usize>,
+        start_line: Option<usize>,
+        match_type: &str,
+    ) -> Result<Option<usize>, Vec<usize>> {
+        // --- Step 1: Check for 0 or 1 matches without allocation ---
+        let first_match = match matches.next() {
+            Some(m) => m,
+            None => {
+                trace!("      No {} matches found.", match_type);
+                return Ok(None);
+            }
+        };
+
+        if let Some(second_match) = matches.next() {
+            // --- Step 2: Multiple matches found, collect and tie-break ---
+            // At least two matches exist. Collect them all for analysis.
+            let mut all_matches = vec![first_match, second_match];
+            all_matches.extend(matches);
+
+            trace!(
+                "      Found {} {} match candidate(s) at indices: {:?}",
+                all_matches.len(),
+                match_type,
+                all_matches
+            );
+
+            // More than 1 match, try to tie-break using the line number hint.
+            if let Some(line) = start_line {
+                trace!(
+                "    Ambiguous {} match found at {:?}. Attempting to tie-break using line number hint: {}",
+                match_type,
+                all_matches,
+                line
+            );
+                let mut closest_index = 0;
+                let mut min_distance = usize::MAX;
+                let mut is_tie = false;
+
+                // Find the match that is numerically closest to the hint.
+                for &match_index in &all_matches {
+                    // Hunk line numbers are 1-based, indices are 0-based.
+                    trace!(
+                        "      Candidate index {}: distance from line hint {} is {}",
+                        match_index,
+                        line,
+                        (match_index + 1).abs_diff(line)
+                    );
+                    let distance = (match_index + 1).abs_diff(line);
+                    if distance < min_distance {
+                        min_distance = distance;
+                        closest_index = match_index;
+                        is_tie = false;
+                    } else if distance == min_distance {
+                        // If another match has the same minimum distance, it's a tie.
+                        is_tie = true;
+                    }
+                }
+
+                if !is_tie {
+                    trace!(
+                        "      Successfully tie-broke using line number. Best match is at index {}.",
+                        closest_index
+                    );
+                    return Ok(Some(closest_index));
+                }
+                trace!(
+                    "    Tie-breaking failed: multiple matches are equidistant from the line number hint."
+                );
+            } else {
+                trace!(
+                    "    tie_break: Ambiguous '{}' match, but no line number hint provided.",
+                    match_type
+                );
+            }
+
+            // If we reach here, the ambiguity could not be resolved.
+            Err(all_matches)
+        } else {
+            // Exactly one match was found.
+            trace!(
+                "      Found 1 {} match candidate at index: {}",
+                match_type,
+                first_match
+            );
+            trace!(
+                "    tie_break: Only one match found for '{}' match at index {}. No tie-break needed.",
+                match_type,
+                first_match
+            );
+            Ok(Some(first_match))
+        }
+    }
+}
+
+impl<'a> HunkFinder for DefaultHunkFinder<'a> {
+    fn find_location<T: AsRef<str> + Sync>(
+        &self,
+        hunk: &Hunk,
+        target_lines: &[T],
+    ) -> Result<(HunkLocation, MatchType), HunkApplyError> {
+        let match_block = hunk.get_match_block();
+        self.find_hunk_location_internal(&match_block, target_lines, hunk.old_start_line)
+    }
+}
+
 /// Finds the location to apply a hunk to a given text content without modifying it.
 ///
 /// This function encapsulates the core context-aware search logic of `mpatch`. It
@@ -1692,7 +2409,7 @@ pub fn find_hunk_location(
     target_content: &str,
     options: &ApplyOptions,
 ) -> Result<(HunkLocation, MatchType), HunkApplyError> {
-    let target_lines: Vec<String> = target_content.lines().map(String::from).collect();
+    let target_lines: Vec<_> = target_content.lines().collect();
     find_hunk_location_in_lines(hunk, &target_lines, options)
 }
 
@@ -1750,665 +2467,8 @@ pub fn find_hunk_location_in_lines<T: AsRef<str> + Sync>(
     target_lines: &[T],
     options: &ApplyOptions,
 ) -> Result<(HunkLocation, MatchType), HunkApplyError> {
-    let match_block = hunk.get_match_block();
-    find_hunk_location_internal(&match_block, target_lines, options, hunk.old_start_line)
-}
-
-/// Finds optimized search ranges within the target file to perform the fuzzy search.
-///
-/// This is a performance heuristic. It tries to find an "anchor" line from the
-/// hunk that is relatively uncommon in the target file. If successful, it returns
-/// small search windows around the occurrences of that anchor. If no good anchor
-/// is found, it returns a single range covering the entire file.
-fn find_search_ranges<T: AsRef<str>>(
-    match_block: &[&str],
-    target_lines: &[T],
-    hunk_size: usize,
-) -> Vec<(usize, usize)> {
-    const MAX_ANCHOR_OCCURRENCES: usize = 5;
-    const MIN_ANCHOR_LEN: usize = 5;
-    // Search radius is this factor times the hunk size, with a minimum.
-    const SEARCH_RADIUS_FACTOR: usize = 2;
-    const MIN_SEARCH_RADIUS: usize = 15;
-
-    if hunk_size == 0 {
-        return vec![(0, target_lines.len())];
-    }
-
-    // Iterate from the middle of the hunk outwards to find a good anchor line.
-    // The middle is often more stable than the edges.
-    let mid = hunk_size / 2;
-    for i in 0..=mid {
-        let indices_to_check = [Some(mid + i), if i > 0 { Some(mid - i) } else { None }];
-
-        for &line_idx_opt in &indices_to_check {
-            if let Some(line_idx) = line_idx_opt {
-                if line_idx >= hunk_size {
-                    continue;
-                }
-
-                let anchor_line = match_block[line_idx].trim_end();
-                // Ignore short or empty lines as they are poor anchors.
-                if anchor_line.trim().len() < MIN_ANCHOR_LEN {
-                    continue;
-                }
-
-                // Find all occurrences of the anchor line.
-                let occurrences: Vec<_> = target_lines
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, l)| l.as_ref().trim_end() == anchor_line)
-                    .map(|(i, _)| i)
-                    .collect();
-
-                // If the line is unique enough, use it to create search ranges.
-                if !occurrences.is_empty() && occurrences.len() <= MAX_ANCHOR_OCCURRENCES {
-                    trace!(
-                        "      Found good anchor line (hunk line {}) with {} occurrences: '{}'",
-                        line_idx + 1,
-                        occurrences.len(),
-                        anchor_line.trim()
-                    );
-                    let mut ranges = Vec::new();
-                    let search_radius = (hunk_size * SEARCH_RADIUS_FACTOR).max(MIN_SEARCH_RADIUS);
-
-                    for &occurrence_idx in &occurrences {
-                        // Estimate where the hunk would start based on the anchor's position.
-                        let estimated_start = occurrence_idx.saturating_sub(line_idx);
-                        let start = estimated_start.saturating_sub(search_radius);
-                        let end =
-                            (estimated_start + hunk_size + search_radius).min(target_lines.len());
-                        ranges.push((start, end));
-                    }
-                    // Merge any overlapping ranges created by nearby occurrences.
-                    return merge_ranges(ranges);
-                }
-            }
-        }
-    }
-
-    // If no good anchor was found, we must search the entire file.
-    debug!("      No suitable anchor line found. Falling back to full file scan.");
-    vec![(0, target_lines.len())]
-}
-
-/// Merges a list of overlapping or adjacent ranges into a minimal set of disjoint ranges.
-fn merge_ranges(mut ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
-    if ranges.is_empty() {
-        return vec![];
-    }
-    ranges.sort_unstable_by_key(|k| k.0);
-    let mut merged = Vec::with_capacity(ranges.len());
-    let mut current_range = ranges[0];
-
-    for &(start, end) in &ranges[1..] {
-        if start <= current_range.1 {
-            // Overlap or adjacent, merge them.
-            current_range.1 = current_range.1.max(end);
-        } else {
-            // No overlap, push the current range and start a new one.
-            merged.push(current_range);
-            current_range = (start, end);
-        }
-    }
-    merged.push(current_range);
-    merged
-}
-
-/// Finds the starting index of the hunk's match block in the target lines.
-/// This function implements the core hierarchical search strategy.
-fn find_hunk_location_internal<T: AsRef<str> + Sync>(
-    match_block: &[&str],
-    target_lines: &[T],
-    options: &ApplyOptions,
-    old_start_line: Option<usize>,
-) -> Result<(HunkLocation, MatchType), HunkApplyError> {
-    trace!(
-        "  find_hunk_location_internal called for a hunk with {} lines to match against {} target lines.",
-        match_block.len(),
-        target_lines.len()
-    );
-
-    if match_block.is_empty() {
-        // An empty match block (file creation) can only be applied to an empty file.
-        trace!("    Match block is empty (file creation).");
-        return if target_lines.is_empty() {
-            trace!("    Target is empty, match successful at (0, 0).");
-            Ok((
-                HunkLocation {
-                    start_index: 0,
-                    length: 0,
-                },
-                MatchType::Exact,
-            ))
-        } else {
-            trace!("    Target is not empty, match failed.");
-            Err(HunkApplyError::ContextNotFound)
-        };
-    }
-
-    // --- STRATEGY 1: Exact Match ---
-    // The fastest and most reliable method.
-    trace!("    Attempting exact match for hunk...");
-    {
-        let exact_matches: Box<dyn Iterator<Item = usize>> =
-            if match_block.len() <= target_lines.len() {
-                Box::new(
-                    target_lines
-                        .windows(match_block.len())
-                        .enumerate()
-                        .filter(|(_, window)| {
-                            window
-                                .iter()
-                                .map(|s| s.as_ref())
-                                .eq(match_block.iter().copied())
-                        })
-                        .map(|(i, _)| i),
-                )
-            } else {
-                Box::new(std::iter::empty())
-            };
-
-        match tie_break_with_line_number(exact_matches, old_start_line, "exact") {
-            Ok(Some(index)) => {
-                debug!("    Found unique exact match at index {}.", index);
-                return Ok((
-                    HunkLocation {
-                        start_index: index,
-                        length: match_block.len(),
-                    },
-                    MatchType::Exact,
-                ));
-            }
-            Ok(None) => {} // No exact matches, continue to next strategy.
-            Err(matches) => return Err(HunkApplyError::AmbiguousExactMatch(matches)),
-        }
-    }
-
-    // --- STRATEGY 2: Exact Match (Ignoring Trailing Whitespace) ---
-    // Handles minor formatting differences.
-    trace!("    Attempting exact match (ignoring trailing whitespace)...");
-    {
-        let match_stripped: Vec<_> = match_block.iter().map(|s| s.trim_end()).collect();
-        let stripped_matches: Box<dyn Iterator<Item = usize>> =
-            if match_block.len() <= target_lines.len() {
-                Box::new(
-                    target_lines
-                        .windows(match_block.len())
-                        .enumerate()
-                        .filter(move |(_, window)| {
-                            window
-                                .iter()
-                                .map(|s| s.as_ref().trim_end())
-                                .eq(match_stripped.iter().copied())
-                        })
-                        .map(|(i, _)| i),
-                )
-            } else {
-                Box::new(std::iter::empty())
-            };
-
-        match tie_break_with_line_number(
-            stripped_matches,
-            old_start_line,
-            "exact (ignoring whitespace)",
-        ) {
-            Ok(Some(index)) => {
-                debug!(
-                    "    Found unique whitespace-insensitive match at index {}.",
-                    index
-                );
-                return Ok((
-                    HunkLocation {
-                        start_index: index,
-                        length: match_block.len(),
-                    },
-                    MatchType::ExactIgnoringWhitespace,
-                ));
-            }
-            Ok(None) => {} // No matches, continue.
-            Err(matches) => return Err(HunkApplyError::AmbiguousExactMatch(matches)),
-        }
-    }
-
-    // --- STRATEGY 3: Fuzzy Match (with flexible window) ---
-    // This is the core "smart" logic. If an exact match fails, we search for
-    // the best-fitting slice in the target file, allowing the slice to be
-    // slightly larger or smaller than the patch's context. This handles cases
-    // where lines have been added or removed near the patch location.
-    if options.fuzz_factor > 0.0 && !match_block.is_empty() {
-        trace!(
-            "    Exact matches failed. Attempting flexible fuzzy match (threshold={:.2})...",
-            options.fuzz_factor
-        );
-
-        // Hoist invariants for performance
-        let match_stripped_lines: Vec<_> = match_block.iter().map(|s| s.trim_end()).collect();
-        let match_content = match_stripped_lines.join("\n");
-
-        let mut best_score = -1.0;
-        let mut best_ratio_at_best_score = -1.0;
-        let mut potential_matches = Vec::new(); // Vec<(start_index, length)>
-
-        let len = match_block.len();
-        // Define how far to search for different-sized windows.
-        // Proportional to hunk size, but with reasonable bounds.
-        let fuzz_distance = (len / 4).clamp(3, 8);
-        let min_len = len.saturating_sub(fuzz_distance).max(1);
-        let max_len = len.saturating_add(fuzz_distance);
-        trace!(
-            "      Searching with window sizes from {} to {} (hunk size: {}, fuzz distance: {})",
-            min_len,
-            max_len,
-            len,
-            fuzz_distance
-        );
-
-        // Performance heuristic: narrow down the search space using anchor lines.
-        let search_ranges = find_search_ranges(match_block, target_lines, len);
-        trace!("    Using search ranges: {:?}", search_ranges);
-
-        // When the anchor heuristic fails, the search can be slow. We parallelize the
-        // scoring of all possible windows using Rayon if the `parallel` feature is enabled.
-        #[cfg(feature = "parallel")]
-        let all_scored_windows: Vec<(f64, f64, f64, f64, f64, usize, usize)> = search_ranges
-            .par_iter()
-            .flat_map(|&(range_start, range_end)| {
-                // By creating local references, we ensure that the inner `move` closures
-                // capture these references (which are `Copy`) instead of attempting to move
-                // the original non-`Copy` `Vec` and `String` from the outer scope.
-                let match_stripped_lines = &match_stripped_lines;
-                let match_content = &match_content;
-                let target_slice = &target_lines[range_start..range_end];
-
-                (min_len..=max_len)
-                    .into_par_iter()
-                    .filter(move |&window_len| window_len <= target_slice.len())
-                    .flat_map(move |window_len| {
-                        (0..=target_slice.len() - window_len)
-                            .into_par_iter()
-                            .map(move |i| {
-                                let window = &target_slice[i..i + window_len];
-                                let absolute_index = range_start + i;
-
-                                // HYBRID SCORING: (Copied from original sequential loop)
-                                let window_stripped_lines: Vec<_> =
-                                    window.iter().map(|s| s.as_ref().trim_end()).collect();
-                                let diff_lines = similar::TextDiff::from_slices(
-                                    &window_stripped_lines,
-                                    match_stripped_lines,
-                                );
-                                let ratio_lines = diff_lines.ratio() as f64;
-                                let window_content = window_stripped_lines.join("\n");
-                                let diff_words =
-                                    similar::TextDiff::from_words(&window_content, match_content);
-                                let ratio_words = diff_words.ratio() as f64;
-                                let ratio = 0.6 * ratio_lines + 0.4 * ratio_words;
-                                let size_diff = window_len.abs_diff(len) as f64;
-                                let penalty = (size_diff / len.max(window_len) as f64) * 0.2;
-                                let score = ratio - penalty;
-
-                                (
-                                    score,
-                                    ratio,
-                                    ratio_lines,
-                                    ratio_words,
-                                    penalty,
-                                    absolute_index,
-                                    window_len,
-                                )
-                            })
-                    })
-            })
-            .collect();
-
-        #[cfg(not(feature = "parallel"))]
-        let all_scored_windows: Vec<(f64, f64, f64, f64, f64, usize, usize)> = search_ranges
-            .iter()
-            .flat_map(|&(range_start, range_end)| {
-                // By creating local references, we ensure that the inner `move` closures
-                // capture these references (which are `Copy`) instead of attempting to move
-                // the original non-`Copy` `Vec` and `String` from the outer scope.
-                let match_stripped_lines = &match_stripped_lines;
-                let match_content = &match_content;
-                let target_slice = &target_lines[range_start..range_end];
-
-                (min_len..=max_len)
-                    .into_iter()
-                    .filter(move |&window_len| window_len <= target_slice.len())
-                    .flat_map(move |window_len| {
-                        (0..=target_slice.len() - window_len)
-                            .into_iter()
-                            .map(move |i| {
-                                let window = &target_slice[i..i + window_len];
-                                let absolute_index = range_start + i;
-
-                                // HYBRID SCORING: (Copied from original sequential loop)
-                                let window_stripped_lines: Vec<_> =
-                                    window.iter().map(|s| s.as_ref().trim_end()).collect();
-                                let diff_lines = similar::TextDiff::from_slices(
-                                    &window_stripped_lines,
-                                    match_stripped_lines,
-                                );
-                                let ratio_lines = diff_lines.ratio() as f64;
-                                let window_content = window_stripped_lines.join("\n");
-                                let diff_words =
-                                    similar::TextDiff::from_words(&window_content, match_content);
-                                let ratio_words = diff_words.ratio() as f64;
-                                let ratio = 0.6 * ratio_lines + 0.4 * ratio_words;
-                                let size_diff = window_len.abs_diff(len) as f64;
-                                let penalty = (size_diff / len.max(window_len) as f64) * 0.2;
-                                let score = ratio - penalty;
-
-                                (
-                                    score,
-                                    ratio,
-                                    ratio_lines,
-                                    ratio_words,
-                                    penalty,
-                                    absolute_index,
-                                    window_len,
-                                )
-                            })
-                    })
-            })
-            .collect();
-
-        // Process the collected results sequentially to find the best match and handle tie-breaking.
-        for (score, ratio, ratio_lines, ratio_words, penalty, absolute_index, window_len) in
-            all_scored_windows
-        {
-            // This is the same logic as in the original sequential loop.
-            if score > best_score {
-                trace!(
-                        "        New best score: {:.3} (ratio {:.3} [l:{:.3},w:{:.3}], penalty {:.3}) at index {} (window len {})",
-                        score,
-                        ratio,
-                        ratio_lines,
-                        ratio_words,
-                        penalty,
-                        absolute_index,
-                        window_len
-                    );
-                best_score = score;
-                best_ratio_at_best_score = ratio;
-                potential_matches.clear();
-                potential_matches.push((absolute_index, window_len));
-            } else if (score - best_score).abs() < 1e-9 {
-                // Tie in score. Prefer the window size closer to the match block size.
-                // This is mostly redundant due to the penalty, but good for perfect ties.
-                if potential_matches.is_empty() {
-                    potential_matches.push((absolute_index, window_len));
-                    continue;
-                }
-                let current_best_len = potential_matches[0].1;
-                let dist_new = window_len.abs_diff(len);
-                let dist_best = current_best_len.abs_diff(len);
-
-                if dist_new < dist_best {
-                    // This window size is a better fit, so it's the new best.
-                    trace!(
-                            "        Tie in score ({:.3}), but window len {} is closer to hunk len {}. New best.",
-                            score,
-                            window_len,
-                            len
-                        );
-                    best_ratio_at_best_score = ratio;
-                    potential_matches.clear();
-                    potential_matches.push((absolute_index, window_len));
-                } else if dist_new == dist_best {
-                    // Same distance, so it's also a potential match.
-                    trace!(
-                            "        Tie in score ({:.3}) and window distance. Adding candidate: index {}, len {}",
-                            score,
-                            absolute_index,
-                            window_len
-                        );
-                    potential_matches.push((absolute_index, window_len));
-                }
-            }
-        }
-
-        trace!(
-            "    Fuzzy search complete. Best score: {:.3}, best ratio: {:.3}, potential matches: {:?}",
-            best_score,
-            best_ratio_at_best_score,
-            potential_matches
-        );
-
-        // Check if the best match found meets the user-defined threshold.
-        if best_ratio_at_best_score >= f64::from(options.fuzz_factor) {
-            if potential_matches.len() == 1 {
-                let (start, len) = potential_matches[0];
-                debug!(
-                    "    Found best fuzzy match at index {} (length {}, similarity: {:.3}).",
-                    start, len, best_ratio_at_best_score
-                );
-                return Ok((
-                    HunkLocation {
-                        start_index: start,
-                        length: len,
-                    },
-                    MatchType::Fuzzy {
-                        score: best_ratio_at_best_score,
-                    },
-                ));
-            }
-            // AMBIGUOUS FUZZY MATCH - TRY TO TIE-BREAK
-            if let Some(line) = old_start_line {
-                trace!(
-                            "    Ambiguous fuzzy match found at {:?}. Attempting to tie-break using line number hint: {}",
-                            potential_matches,
-                            line
-                        );
-                let mut closest_match: Option<(usize, usize)> = None;
-                let mut min_distance = usize::MAX;
-                let mut is_tie = false;
-
-                for &(match_index, match_len) in &potential_matches {
-                    // Hunk line numbers are 1-based, indices are 0-based.
-                    trace!(
-                        "      Candidate {:?}: distance from line hint is {}",
-                        (match_index, match_len),
-                        (match_index + 1).abs_diff(line)
-                    );
-                    let distance = (match_index + 1).abs_diff(line);
-                    if distance < min_distance {
-                        min_distance = distance;
-                        closest_match = Some((match_index, match_len));
-                        is_tie = false;
-                    } else if distance == min_distance {
-                        is_tie = true;
-                    }
-                }
-
-                if !is_tie {
-                    if let Some((start, len)) = closest_match {
-                        debug!(
-                                    "    Tie-broke ambiguous fuzzy match using line number. Best match is at index {} (length {}, similarity: {:.3}).",
-                                    start, len, best_ratio_at_best_score
-                                );
-                        return Ok((
-                            HunkLocation {
-                                start_index: start,
-                                length: len,
-                            },
-                            MatchType::Fuzzy {
-                                score: best_ratio_at_best_score,
-                            },
-                        ));
-                    }
-                } else {
-                    trace!("    Tie-breaking failed: multiple fuzzy matches are equidistant from the line number hint.");
-                }
-            }
-            warn!("    Ambiguous fuzzy match: Multiple locations found with same top score ({:.3}): {:?}. Skipping.", best_ratio_at_best_score, potential_matches);
-            return Err(HunkApplyError::AmbiguousFuzzyMatch(potential_matches));
-        } else if best_ratio_at_best_score >= 0.0 {
-            // Did not meet threshold
-            let (start, len) = potential_matches.first().copied().unwrap_or((0, 0));
-            trace!(
-                "    Fuzzy match: Best location (index {}, len {}, similarity {:.3}) did not meet threshold of {:.2}.",
-                start, len, best_ratio_at_best_score, options.fuzz_factor
-            );
-            return Err(HunkApplyError::FuzzyMatchBelowThreshold {
-                best_score: best_ratio_at_best_score,
-                threshold: options.fuzz_factor,
-            });
-        } else {
-            // No potential matches found at all
-            debug!("    Fuzzy match: Could not find any potential match location.");
-            // Fall through to the final ContextNotFound error
-        }
-    } else if options.fuzz_factor <= 0.0 {
-        trace!("    Failed exact matches. Fuzzy matching disabled.");
-    }
-
-    // --- STRATEGY 4: End-of-file fuzzy match for short files ---
-    // This handles cases where the entire file is a good fuzzy match for the
-    // start of the hunk context, which can happen if the file is missing
-    // context lines that the patch expects to be there at the end.
-    if !target_lines.is_empty()
-        && target_lines.len() < match_block.len()
-        && options.fuzz_factor > 0.0
-    {
-        trace!("    Target file is shorter than hunk. Attempting end-of-file fuzzy match...");
-        let target_stripped: Vec<_> = target_lines.iter().map(|s| s.as_ref().trim_end()).collect();
-        let match_stripped: Vec<_> = match_block.iter().map(|s| s.trim_end()).collect();
-        let diff = TextDiff::from_slices(&target_stripped, &match_stripped);
-        let ratio = diff.ratio();
-
-        // Be slightly more lenient for this specific end-of-file prefix case.
-        let effective_threshold = (f64::from(options.fuzz_factor) - 0.1).max(0.5);
-        trace!(
-            "      Using effective threshold for EOF match: {:.3}",
-            effective_threshold
-        );
-
-        if ratio as f64 >= effective_threshold {
-            debug!(
-                "    End-of-file fuzzy match succeeded with ratio {:.3} (threshold {:.3}). Treating as full-file match.",
-                ratio, effective_threshold
-            );
-            // We are matching the entire file from the beginning.
-            return Ok((
-                HunkLocation {
-                    start_index: 0,
-                    length: target_lines.len(),
-                },
-                MatchType::Fuzzy {
-                    score: ratio as f64,
-                },
-            ));
-        } else {
-            trace!(
-                "    End-of-file fuzzy match ratio {:.3} did not meet effective threshold {:.3}.",
-                ratio,
-                effective_threshold
-            );
-        }
-    }
-
-    debug!("    Failed to find any suitable match location for hunk.");
-    Err(HunkApplyError::ContextNotFound)
-}
-
-/// Given an iterator of match indices, attempts to find the best one using the
-/// hunk's original line number as a hint. Returns the index of the best match,
-/// or `None` if the ambiguity cannot be resolved.
-/// This function avoids collecting matches into a vector if there are 0 or 1 matches.
-fn tie_break_with_line_number(
-    mut matches: impl Iterator<Item = usize>,
-    start_line: Option<usize>,
-    match_type: &str,
-) -> Result<Option<usize>, Vec<usize>> {
-    // --- Step 1: Check for 0 or 1 matches without allocation ---
-    let first_match = match matches.next() {
-        Some(m) => m,
-        None => {
-            trace!("      No {} matches found.", match_type);
-            return Ok(None);
-        }
-    };
-
-    if let Some(second_match) = matches.next() {
-        // --- Step 2: Multiple matches found, collect and tie-break ---
-        // At least two matches exist. Collect them all for analysis.
-        let mut all_matches = vec![first_match, second_match];
-        all_matches.extend(matches);
-
-        trace!(
-            "      Found {} {} match candidate(s) at indices: {:?}",
-            all_matches.len(),
-            match_type,
-            all_matches
-        );
-
-        // More than 1 match, try to tie-break using the line number hint.
-        if let Some(line) = start_line {
-            trace!(
-            "    Ambiguous {} match found at {:?}. Attempting to tie-break using line number hint: {}",
-            match_type,
-            all_matches,
-            line
-        );
-            let mut closest_index = 0;
-            let mut min_distance = usize::MAX;
-            let mut is_tie = false;
-
-            // Find the match that is numerically closest to the hint.
-            for &match_index in &all_matches {
-                // Hunk line numbers are 1-based, indices are 0-based.
-                trace!(
-                    "      Candidate index {}: distance from line hint {} is {}",
-                    match_index,
-                    line,
-                    (match_index + 1).abs_diff(line)
-                );
-                let distance = (match_index + 1).abs_diff(line);
-                if distance < min_distance {
-                    min_distance = distance;
-                    closest_index = match_index;
-                    is_tie = false;
-                } else if distance == min_distance {
-                    // If another match has the same minimum distance, it's a tie.
-                    is_tie = true;
-                }
-            }
-
-            if !is_tie {
-                trace!(
-                    "      Successfully tie-broke using line number. Best match is at index {}.",
-                    closest_index
-                );
-                return Ok(Some(closest_index));
-            }
-            trace!(
-                "    Tie-breaking failed: multiple matches are equidistant from the line number hint."
-            );
-        } else {
-            trace!(
-                "    tie_break: Ambiguous '{}' match, but no line number hint provided.",
-                match_type
-            );
-        }
-
-        // If we reach here, the ambiguity could not be resolved.
-        Err(all_matches)
-    } else {
-        // Exactly one match was found.
-        trace!(
-            "      Found 1 {} match candidate at index: {}",
-            match_type,
-            first_match
-        );
-        trace!(
-            "    tie_break: Only one match found for '{}' match at index {}. No tie-break needed.",
-            match_type,
-            first_match
-        );
-        Ok(Some(first_match))
-    }
+    let finder = DefaultHunkFinder::new(options);
+    finder.find_location(hunk, target_lines)
 }
 
 /// Parses a hunk header line (e.g., "@@ -1,3 +1,3 @@") to extract the starting line number.
