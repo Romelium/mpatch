@@ -9,40 +9,11 @@
 //! preceding changes, which is a common scenario when working with AI-generated
 //! diffs, code from pull requests, or snippets from documentation.
 //!
-//! ## Core Features
+//! ## Getting Started
 //!
-//! - **Markdown-Aware:** Directly parses unified diffs from within ` ```diff` or ` ```patch` code blocks.
-//! - **Context-Driven:** Primarily finds patch locations by matching context lines.
-//!   It intelligently uses the `@@ ... @@` line numbers as a hint to resolve
-//!   ambiguity when the same context appears in multiple places.
-//! - **Fuzzy Matching:** If an exact context match isn't found, `mpatch` uses a
-//!   similarity algorithm to find the *best* fuzzy match.
-//! - **Safe by Design:** Includes a dry-run mode and protection against path traversal attacks.
-//!
-//! ## Main Workflow
-//!
-//! The typical library usage involves two main steps:
-//!
-//! 1.  **Parsing:** Use [`parse_diffs`] to read a string (e.g., the content of a
-//!     markdown file) and extract a `Vec<Patch>`. Each [`Patch`] represents the
-//!     changes for a single file. This step is purely in-memory.
-//! 2.  **Analyzing (Read-Only):** Use [`find_hunk_location`] to determine
-//!     where a single [`Hunk`] would be applied within a string of content. This
-//!     is a read-only operation that returns the location without making changes.
-//! 3.  **Applying (In-Memory):** Use [`apply_patch_to_content`] to apply a `Patch`
-//!     to a string of the original file's content. This function is pure and
-//!     doesn't touch the filesystem, returning the new content as a string.
-//! 4.  **Applying (Step-by-Step):** For maximum control, use the [`HunkApplier`]
-//!     iterator to apply changes hunk-by-hunk, allowing you to inspect the
-//!     state of the content after each step.
-//! 5.  **Applying (to Filesystem):** For convenience, the [`apply_patch_to_file`] function
-//!     wraps the entire process of reading a file, calling `apply_patch_to_content`,
-//!     and writing the result back to disk.
-//!
-//! ## Library Usage Example
-//!
-//! Here's a complete example of how to use the library to patch a file in a
-//! temporary directory.
+//! The most common use case is to parse a diff from a string (e.g., a markdown
+//! file) and apply it to a file on disk. This example shows the end-to-end
+//! process in a temporary directory.
 //!
 //! ````rust
 //! use mpatch::{parse_diffs, apply_patch_to_file, ApplyOptions};
@@ -94,7 +65,46 @@
 //! # }
 //! ````
 //!
-//! ### Advanced In-Memory Usage with Error Handling
+//! ## Key Concepts
+//!
+//! ### The Patching Workflow
+//!
+//! Using the `mpatch` library typically involves a two-step process:
+//!
+//! 1.  **Parsing:** Use [`parse_diffs`] to read a string and extract a `Vec<Patch>`.
+//!     This function is markdown-aware, searching for ` ```diff` or ` ```patch`
+//!     blocks and parsing their contents. This step is purely in-memory.
+//! 2.  **Applying:** Use one of the `apply` functions to apply the changes.
+//!     - [`apply_patch_to_file`]: The most convenient function for CLI tools. It
+//!       handles reading the original file and writing the new content back to disk.
+//!     - [`apply_patch_to_content`]: A pure function for in-memory operations. It
+//!       takes the original content as a string and returns the new content.
+//!
+//! ### Core Data Structures
+//!
+//! - [`Patch`]: Represents all the changes for a single file. It contains the
+//!   target file path and a list of hunks.
+//! - [`Hunk`]: Represents a single block of changes within a patch, corresponding
+//!   to a `@@ ... @@` section in a unified diff.
+//!
+//! ### Context-Driven Matching
+//!
+//! The core philosophy of `mpatch` is to ignore strict line numbers. Instead, it
+//! searches for the *context* of a hunk—the lines that are unchanged or being
+//! deleted.
+//!
+//! - **Primary Search:** It first looks for an exact, character-for-character match
+//!   of the hunk's context.
+//! - **Ambiguity Resolution:** If the same context appears in multiple places,
+//!   `mpatch` uses the line numbers from the `@@ ... @@` header as a *hint* to
+//!   find the most likely location.
+//! - **Fuzzy Matching:** If no exact match is found, it uses a similarity algorithm
+//!   to find the *best* fuzzy match, making it resilient to minor changes in the
+//!   surrounding code.
+//!
+//! ## Advanced Usage
+//!
+//! ### In-Memory Operations and Error Handling
 //!
 //! This example demonstrates how to use `apply_patch_to_content` for in-memory
 //! operations and how to programmatically handle cases where a patch only
@@ -147,7 +157,7 @@
 //! # }
 //! ````
 //!
-//! ### Advanced: Step-by-Step Application
+//! ### Step-by-Step Application with `HunkApplier`
 //!
 //! For maximum control, you can use the [`HunkApplier`] iterator to apply hunks
 //! one at a time and inspect the state between each step.
