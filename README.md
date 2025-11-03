@@ -41,7 +41,60 @@ This same logic makes it perfect for other common developer scenarios where patc
 
 ---
 
-## Installation
+## Library Usage
+
+While `mpatch` is a powerful CLI tool, it's also designed to be used as a library in your own Rust projects. The core logic is exposed through a simple and flexible API.
+
+Add `mpatch` to your `Cargo.toml`:
+```bash
+cargo add mpatch
+```
+
+Here's a basic example of how to parse a diff and apply it to a string in memory:
+
+````rust
+use mpatch::{parse_diffs, apply_patch_to_content, ApplyOptions};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Define the original content and the diff.
+    let original_content = "fn main() {\n    println!(\"Hello, world!\");\n}\n";
+    let diff_content = r#"
+        A markdown file with a diff block.
+        ```diff
+        --- a/src/main.rs
+        +++ b/src/main.rs
+        @@ -1,3 +1,3 @@
+         fn main() {
+        -    println!("Hello, world!");
+        +    println!("Hello, mpatch!");
+         }
+        ```
+    "#;
+
+    // 2. Parse the diff content to get a list of patches.
+    let patches = parse_diffs(diff_content)?;
+    let patch = &patches[0];
+
+    // 3. Apply the patch to the content in memory.
+    let options = ApplyOptions::default();
+    let result = apply_patch_to_content(patch, Some(original_content), &options);
+
+    // 4. The patch should apply cleanly.
+    assert!(result.report.all_applied_cleanly());
+
+    // 5. Verify the new content.
+    let expected_content = "fn main() {\n    println!(\"Hello, mpatch!\");\n}\n";
+    assert_eq!(result.new_content, expected_content);
+
+    Ok(())
+}
+````
+
+For more advanced use cases, such as applying patches directly to the filesystem or iterating through hunks one by one, check out the [**library documentation on docs.rs**](https://docs.rs/mpatch).
+
+---
+
+## CLI Installation
 
 ### Method 1: Using `cargo-binstall` (Recommended)
 
@@ -115,7 +168,7 @@ cargo install --path .
 
 ---
 
-## Usage
+## CLI Usage
 
 ### Basic Command
 
