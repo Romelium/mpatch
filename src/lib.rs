@@ -254,8 +254,13 @@ pub enum HunkApplyError {
     #[error("Ambiguous fuzzy match found at locations: {0:?}")]
     AmbiguousFuzzyMatch(Vec<(usize, usize)>),
     /// The best fuzzy match found was below the required similarity threshold.
-    #[error("Best fuzzy match score ({best_score:.3}) was below threshold ({threshold:.3})")]
-    FuzzyMatchBelowThreshold { best_score: f64, threshold: f32 },
+    #[error("Best fuzzy match at {location} (score: {best_score:.3}) was below threshold ({threshold:.3})")]
+    FuzzyMatchBelowThreshold {
+        best_score: f64,
+        threshold: f32,
+        /// The location of the best-scoring (but rejected) fuzzy match.
+        location: HunkLocation,
+    },
 }
 
 /// Describes the method used to successfully locate and apply a hunk.
@@ -281,6 +286,8 @@ pub enum HunkApplyStatus {
         location: HunkLocation,
         /// The type of match that was used to find the location.
         match_type: MatchType,
+        /// The original lines that were replaced by the hunk.
+        replaced_lines: Vec<String>,
     },
     /// The hunk was skipped because it contained no effective changes.
     SkippedNoChanges,
@@ -406,7 +413,7 @@ impl ApplyResult {
     /// # use mpatch::{ApplyResult, HunkApplyStatus, HunkApplyError, HunkFailure, HunkLocation, MatchType};
     /// let successful_result = ApplyResult {
     ///     hunk_results: vec![
-    ///         HunkApplyStatus::Applied { location: HunkLocation { start_index: 0, length: 1 }, match_type: MatchType::Exact },
+    ///         HunkApplyStatus::Applied { location: HunkLocation { start_index: 0, length: 1 }, match_type: MatchType::Exact, replaced_lines: vec!["old".to_string()] },
     ///         HunkApplyStatus::SkippedNoChanges
     ///     ],
     /// };
@@ -414,7 +421,7 @@ impl ApplyResult {
     ///
     /// let failed_result = ApplyResult {
     ///     hunk_results: vec![
-    ///         HunkApplyStatus::Applied { location: HunkLocation { start_index: 0, length: 1 }, match_type: MatchType::Exact },
+    ///         HunkApplyStatus::Applied { location: HunkLocation { start_index: 0, length: 1 }, match_type: MatchType::Exact, replaced_lines: vec!["old".to_string()] },
     ///         HunkApplyStatus::Failed(HunkApplyError::ContextNotFound),
     ///     ],
     /// };
@@ -438,7 +445,7 @@ impl ApplyResult {
     /// let failed_result = ApplyResult {
     ///     hunk_results: vec![
     ///         // The first hunk applied successfully.
-    ///         HunkApplyStatus::Applied { location: HunkLocation { start_index: 0, length: 1 }, match_type: MatchType::Exact },
+    ///         HunkApplyStatus::Applied { location: HunkLocation { start_index: 0, length: 1 }, match_type: MatchType::Exact, replaced_lines: vec!["old".to_string()] },
     ///         HunkApplyStatus::Failed(HunkApplyError::ContextNotFound),
     ///     ],
     /// };
@@ -728,7 +735,7 @@ impl Hunk {
 ///
 /// This is returned by [`find_hunk_location`] and provides the necessary
 /// information to manually apply a patch to a slice of lines.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HunkLocation {
     /// The 0-based starting line index in the target content where the hunk should be applied.
     pub start_index: usize,
@@ -736,6 +743,13 @@ pub struct HunkLocation {
     /// differ from the number of lines in the hunk's "match block" when a fuzzy
     /// match is found.
     pub length: usize,
+}
+
+impl std::fmt::Display for HunkLocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Adding 1 to start_index for a more user-friendly 1-based line number.
+        write!(f, "line {}", self.start_index + 1)
+    }
 }
 
 /// Represents all the changes to be applied to a single file.
@@ -1599,7 +1613,7 @@ pub fn apply_patch_to_content(
 /// let status = apply_hunk_to_lines(hunk, &mut original_lines, &options);
 ///
 /// // 4. Check the results.
-/// assert!(matches!(status, HunkApplyStatus::Applied { .. }));
+/// assert!(matches!(status, HunkApplyStatus::Applied { replaced_lines, .. } if replaced_lines == vec!["Hello, world!"]));
 /// assert_eq!(original_lines, vec!["Hello, mpatch!"]);
 /// # Ok(())
 /// # }
@@ -1617,13 +1631,16 @@ pub fn apply_hunk_to_lines(
     match find_hunk_location_in_lines(hunk, target_lines, options) {
         Ok((location, match_type)) => {
             let replace_block = hunk.get_replace_block();
-            target_lines.splice(
-                location.start_index..location.start_index + location.length,
-                replace_block.into_iter().map(String::from),
-            );
+            let replaced_lines: Vec<String> = target_lines
+                .splice(
+                    location.start_index..location.start_index + location.length,
+                    replace_block.into_iter().map(String::from),
+                )
+                .collect();
             HunkApplyStatus::Applied {
                 location,
                 match_type,
+                replaced_lines,
             }
         }
         Err(error) => {
@@ -2180,6 +2197,10 @@ impl<'a> DefaultHunkFinder<'a> {
                 return Err(HunkApplyError::FuzzyMatchBelowThreshold {
                     best_score: best_ratio_at_best_score,
                     threshold: self.options.fuzz_factor,
+                    location: HunkLocation {
+                        start_index: start,
+                        length: len,
+                    },
                 });
             } else {
                 // No potential matches found at all

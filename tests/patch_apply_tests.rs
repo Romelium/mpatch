@@ -836,10 +836,9 @@ fn test_partial_apply_fails_on_second_hunk() {
     // The file should be in a partially-patched state (first hunk applied).
     let content = fs::read_to_string(file_path).unwrap();
     assert_eq!(result.report.hunk_results.len(), 2);
-    assert!(matches!(
-        result.report.hunk_results[0],
-        HunkApplyStatus::Applied { .. }
-    ));
+    assert!(
+        matches!(&result.report.hunk_results[0], HunkApplyStatus::Applied { replaced_lines, .. } if replaced_lines.as_slice() == ["line 1", "line 2", "line 3"])
+    );
     assert!(matches!(
         result.report.hunk_results[1],
         HunkApplyStatus::Failed(HunkApplyError::ContextNotFound)
@@ -1056,7 +1055,9 @@ fn test_apply_hunk_to_lines_in_place() {
     // Test success case
     let status = apply_hunk_to_lines(hunk, &mut original_lines, &options);
 
-    assert!(matches!(status, HunkApplyStatus::Applied { .. }));
+    assert!(
+        matches!(status, HunkApplyStatus::Applied { replaced_lines, .. } if replaced_lines.as_slice() == ["line 1", "line two", "line 3"])
+    );
     assert_eq!(original_lines, vec!["line 1", "line 2", "line 3"]);
 
     // Test failure case
@@ -1100,7 +1101,9 @@ fn test_hunk_applier_iterator() {
 
     // Apply first hunk
     let status1 = applier.next().unwrap();
-    assert!(matches!(status1, HunkApplyStatus::Applied { .. }));
+    assert!(
+        matches!(status1, HunkApplyStatus::Applied { replaced_lines, .. } if replaced_lines.as_slice() == ["line 1", "line 2", "line 3"])
+    );
     assert_eq!(
         applier.current_lines(),
         &["line 1", "line two", "line 3", "", "line 5", "line 6", "line 7"]
@@ -1160,7 +1163,7 @@ fn test_apply_to_readonly_file_fails() {
     );
     assert!(matches!(
         result.report.hunk_results[0],
-        HunkApplyStatus::Failed(HunkApplyError::FuzzyMatchBelowThreshold { .. })
+        HunkApplyStatus::Failed(HunkApplyError::FuzzyMatchBelowThreshold { location, .. }) if location.start_index == 0
     ));
     let content = fs::read_to_string(file_path).unwrap();
     assert_eq!(content, original_content, "File should be unchanged");
@@ -1254,7 +1257,7 @@ fn test_find_hunk_location_not_found() {
     let result = find_hunk_location(hunk, original_content, &options);
     assert!(matches!(
         result,
-        Err(HunkApplyError::FuzzyMatchBelowThreshold { .. })
+        Err(HunkApplyError::FuzzyMatchBelowThreshold { location, .. }) if location.start_index == 0
     ));
 }
 
@@ -2250,7 +2253,7 @@ mod hunk_finder_tests {
         let result = finder.find_location(&hunk, &target_lines);
         assert!(matches!(
             result,
-            Err(HunkApplyError::FuzzyMatchBelowThreshold { .. })
+            Err(HunkApplyError::FuzzyMatchBelowThreshold { location, .. }) if location.start_index == 0
         ));
     }
 
