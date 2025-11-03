@@ -32,7 +32,10 @@
 //! 3.  **Applying (In-Memory):** Use [`apply_patch_to_content`] to apply a `Patch`
 //!     to a string of the original file's content. This function is pure and
 //!     doesn't touch the filesystem, returning the new content as a string.
-//! 4.  **Applying (to Filesystem):** For convenience, the [`apply_patch_to_file`] function
+//! 4.  **Applying (Step-by-Step):** For maximum control, use the [`HunkApplier`]
+//!     iterator to apply changes hunk-by-hunk, allowing you to inspect the
+//!     state of the content after each step.
+//! 5.  **Applying (to Filesystem):** For convenience, the [`apply_patch_to_file`] function
 //!     wraps the entire process of reading a file, calling `apply_patch_to_content`,
 //!     and writing the result back to disk.
 //!
@@ -140,6 +143,46 @@
 //! // 6. Verify that the content was still partially modified by the successful first hunk.
 //! let expected_content = "line 1\nline two\nline 3\n\nline 5\nline 6\nline 7\n";
 //! assert_eq!(result.new_content, expected_content);
+//! # Ok(())
+//! # }
+//! ````
+//!
+//! ### Advanced: Step-by-Step Application
+//!
+//! For maximum control, you can use the [`HunkApplier`] iterator to apply hunks
+//! one at a time and inspect the state between each step.
+//!
+//! ````rust
+//! use mpatch::{parse_diffs, HunkApplier, HunkApplyStatus, ApplyOptions};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! // 1. Define original content and a patch.
+//! let original_lines = vec!["line 1", "line 2", "line 3"];
+//! let diff_content = r#"
+//! ```diff
+//! --- a/file.txt
+//! +++ b/file.txt
+//! @@ -2,1 +2,1 @@
+//! -line 2
+//! +line two
+//! ```
+//! "#;
+//! let patch = &parse_diffs(diff_content)?[0];
+//! let options = ApplyOptions::default();
+//!
+//! // 2. Create the applier.
+//! let mut applier = HunkApplier::new(patch, Some(&original_lines), &options);
+//!
+//! // 3. Apply the first (and only) hunk.
+//! let status = applier.next().unwrap();
+//! assert!(matches!(status, HunkApplyStatus::Applied { .. }));
+//!
+//! // 4. Check that there are no more hunks.
+//! assert!(applier.next().is_none());
+//!
+//! // 5. Finalize the content.
+//! let new_content = applier.into_content();
+//! assert_eq!(new_content, "line 1\nline two\nline 3\n");
 //! # Ok(())
 //! # }
 //! ````
@@ -1293,11 +1336,78 @@ pub fn apply_patch_to_file(
     })
 }
 
+/// An iterator that applies hunks from a patch one by one.
+///
+/// This struct provides fine-grained control over the patch application process.
+/// It allows you to apply hunks sequentially, inspect the intermediate state of
+/// the content, and handle results on a per-hunk basis.
+///
+/// The iterator yields a [`HunkApplyStatus`] for each hunk in the patch.
+#[derive(Debug)]
+pub struct HunkApplier<'a> {
+    hunks: std::slice::Iter<'a, Hunk>,
+    current_lines: Vec<String>,
+    options: &'a ApplyOptions,
+    patch_ends_with_newline: bool,
+}
+
+impl<'a> HunkApplier<'a> {
+    /// Creates a new `HunkApplier` to begin a step-by-step patch operation.
+    pub fn new<T: AsRef<str>>(
+        patch: &'a Patch,
+        original_lines: Option<&'a [T]>,
+        options: &'a ApplyOptions,
+    ) -> Self {
+        let current_lines: Vec<String> = original_lines
+            .map(|lines| lines.iter().map(|s| s.as_ref().to_string()).collect())
+            .unwrap_or_default();
+        Self {
+            hunks: patch.hunks.iter(),
+            current_lines,
+            options,
+            patch_ends_with_newline: patch.ends_with_newline,
+        }
+    }
+
+    /// Returns a slice of the current lines, reflecting all hunks applied so far.
+    pub fn current_lines(&self) -> &[String] {
+        &self.current_lines
+    }
+
+    /// Consumes the applier and returns the final vector of lines.
+    pub fn into_lines(self) -> Vec<String> {
+        self.current_lines
+    }
+
+    /// Consumes the applier and returns the final formatted content as a string,
+    /// respecting the patch's `ends_with_newline` property.
+    pub fn into_content(self) -> String {
+        let mut new_content = self.current_lines.join("\n");
+        if self.patch_ends_with_newline && !new_content.is_empty() {
+            new_content.push('\n');
+        }
+        new_content
+    }
+}
+
+impl<'a> Iterator for HunkApplier<'a> {
+    type Item = HunkApplyStatus;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let hunk = self.hunks.next()?;
+        Some(apply_hunk_to_lines(
+            hunk,
+            &mut self.current_lines,
+            self.options,
+        ))
+    }
+}
+
 /// Applies the logic of a patch to a slice of lines.
 ///
-/// This is a more allocation-friendly version of [`apply_patch_to_content`] that
-/// operates directly on a slice of strings. It returns an [`InMemoryResult`]
-/// containing the new, joined content as a string and a detailed report.
+/// This is a high-level convenience function that drives a [`HunkApplier`] iterator
+/// to completion and returns the final result. For more granular control, create
+/// and use a `HunkApplier` directly.
 ///
 /// # Arguments
 ///
@@ -1343,41 +1453,35 @@ pub fn apply_patch_to_file(
 /// # Ok(())
 /// # }
 /// ```
-pub fn apply_patch_to_lines<T: AsRef<str> + Sync>(
+pub fn apply_patch_to_lines<T: AsRef<str>>(
     patch: &Patch,
     original_lines: Option<&[T]>,
     options: &ApplyOptions,
 ) -> InMemoryResult {
-    let mut current_lines: Vec<String> = original_lines
-        .map(|lines| lines.iter().map(|s| s.as_ref().to_string()).collect())
-        .unwrap_or_default();
     trace!(
         "  apply_patch_to_lines called with {} lines of original content.",
-        current_lines.len()
+        original_lines.map_or(0, |l| l.len())
     );
 
-    let mut hunk_results = Vec::with_capacity(patch.hunks.len());
+    let mut applier = HunkApplier::new(patch, original_lines, options);
+    let total_hunks = patch.hunks.len();
 
-    // --- Apply Hunks ---
-    // Iterate through each hunk and attempt to apply it to the `current_lines`.
-    for (i, hunk) in patch.hunks.iter().enumerate() {
-        let hunk_index = i + 1;
-        info!("  Applying Hunk {}/{}...", hunk_index, patch.hunks.len());
+    // Drive the iterator to completion, logging progress along the way.
+    let hunk_results: Vec<_> = applier
+        .by_ref()
+        .enumerate()
+        .map(|(i, status)| {
+            let hunk_index = i + 1;
+            info!("  Applying Hunk {}/{}...", hunk_index, total_hunks);
+            if let HunkApplyStatus::Failed(error) = &status {
+                warn!("  Failed to apply Hunk {}. {}", hunk_index, error);
+            }
+            status
+        })
+        .collect();
 
-        let status = apply_hunk_to_lines(hunk, &mut current_lines, options);
-
-        if let HunkApplyStatus::Failed(error) = &status {
-            warn!("  Failed to apply Hunk {}. {}", hunk_index, error);
-        }
-
-        hunk_results.push(status);
-    }
-
-    // --- Format final content ---
-    let mut new_content = current_lines.join("\n");
-    if patch.ends_with_newline && !new_content.is_empty() {
-        new_content.push('\n');
-    }
+    // Finalize the result from the consumed applier.
+    let new_content = applier.into_content();
 
     let report = ApplyResult { hunk_results };
     InMemoryResult {

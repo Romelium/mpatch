@@ -1070,6 +1070,63 @@ fn test_apply_hunk_to_lines_in_place() {
 }
 
 #[test]
+fn test_hunk_applier_iterator() {
+    let original_content = "line 1\nline 2\nline 3\n\nline 5\nline 6\nline 7\n";
+    let original_lines: Vec<_> = original_content.lines().collect();
+    let diff = indoc! {r#"
+        ```diff
+        --- a/partial.txt
+        +++ b/partial.txt
+        @@ -1,3 +1,3 @@
+         line 1
+        -line 2
+        +line two
+         line 3
+        @@ -5,3 +5,3 @@
+         line 5
+        -line WRONG
+        +line six
+         line 7
+        ```
+    "#};
+    let patch = &parse_diffs(diff).unwrap()[0];
+    let options = ApplyOptions {
+        dry_run: false,
+        fuzz_factor: 0.0,
+    };
+
+    let mut applier = mpatch::HunkApplier::new(patch, Some(&original_lines), &options);
+
+    // Apply first hunk
+    let status1 = applier.next().unwrap();
+    assert!(matches!(status1, HunkApplyStatus::Applied { .. }));
+    assert_eq!(
+        applier.current_lines(),
+        &["line 1", "line two", "line 3", "", "line 5", "line 6", "line 7"]
+    );
+
+    // Apply second hunk (which will fail)
+    let status2 = applier.next().unwrap();
+    assert!(matches!(
+        status2,
+        HunkApplyStatus::Failed(HunkApplyError::ContextNotFound)
+    ));
+    // Content should be unchanged from the previous step
+    assert_eq!(
+        applier.current_lines(),
+        &["line 1", "line two", "line 3", "", "line 5", "line 6", "line 7"]
+    );
+
+    // No more hunks
+    assert!(applier.next().is_none());
+
+    // Finalize
+    let new_content = applier.into_content();
+    let expected_content = "line 1\nline two\nline 3\n\nline 5\nline 6\nline 7\n";
+    assert_eq!(new_content, expected_content);
+}
+
+#[test]
 fn test_apply_to_readonly_file_fails() {
     let _ = env_logger::builder().is_test(true).try_init();
     let dir = tempdir().unwrap();
