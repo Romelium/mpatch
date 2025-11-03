@@ -1,8 +1,8 @@
 use indoc::indoc;
 use mpatch::{
-    apply_patch_to_file, apply_patch_to_lines, apply_patches_to_dir, find_hunk_location,
-    find_hunk_location_in_lines, parse_diffs, ApplyOptions, HunkApplyError, HunkApplyStatus,
-    HunkLocation, MatchType, ParseError, Patch, PatchError,
+    apply_hunk_to_lines, apply_patch_to_file, apply_patch_to_lines, apply_patches_to_dir,
+    find_hunk_location, find_hunk_location_in_lines, parse_diffs, ApplyOptions, HunkApplyError,
+    HunkApplyStatus, HunkLocation, MatchType, ParseError, Patch, PatchError,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -1024,6 +1024,49 @@ fn test_apply_patch_to_lines() {
 
     assert_eq!(result.new_content, "Hello, mpatch!\n");
     assert!(result.report.all_applied_cleanly());
+}
+
+#[test]
+fn test_apply_hunk_to_lines_in_place() {
+    let mut original_lines = vec![
+        "line 1".to_string(),
+        "line two".to_string(),
+        "line 3".to_string(),
+    ];
+    let diff = indoc! {r#"
+        ```diff
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1,3 +1,3 @@
+         line 1
+        -line two
+        +line 2
+         line 3
+        ```
+    "#};
+    let patches = parse_diffs(diff).unwrap();
+    let hunk = &patches[0].hunks[0];
+
+    let options = mpatch::ApplyOptions {
+        fuzz_factor: 0.0,
+        ..Default::default()
+    };
+
+    // Test success case
+    let status = apply_hunk_to_lines(hunk, &mut original_lines, &options);
+
+    assert!(matches!(status, HunkApplyStatus::Applied { .. }));
+    assert_eq!(original_lines, vec!["line 1", "line 2", "line 3"]);
+
+    // Test failure case
+    let mut failing_lines = vec!["completely".to_string(), "different".to_string()];
+    let fail_status = apply_hunk_to_lines(hunk, &mut failing_lines, &options);
+    assert!(matches!(
+        fail_status,
+        HunkApplyStatus::Failed(HunkApplyError::ContextNotFound)
+    ));
+    // Ensure lines are unchanged on failure
+    assert_eq!(failing_lines, vec!["completely", "different"]);
 }
 
 #[test]

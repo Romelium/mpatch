@@ -1366,35 +1366,15 @@ pub fn apply_patch_to_lines<T: AsRef<str> + Sync>(
     // Iterate through each hunk and attempt to apply it to the `current_lines`.
     for (i, hunk) in patch.hunks.iter().enumerate() {
         let hunk_index = i + 1;
-        if !hunk.has_changes() {
-            debug!(
-                "  Skipping Hunk {}/{} (no changes).",
-                hunk_index,
-                patch.hunks.len()
-            );
-            hunk_results.push(HunkApplyStatus::SkippedNoChanges);
-            continue;
-        }
         info!("  Applying Hunk {}/{}...", hunk_index, patch.hunks.len());
 
-        let replace_block = hunk.get_replace_block();
+        let status = apply_hunk_to_lines(hunk, &mut current_lines, options);
 
-        match find_hunk_location_in_lines(hunk, &current_lines, options) {
-            Ok((location, match_type)) => {
-                current_lines.splice(
-                    location.start_index..location.start_index + location.length,
-                    replace_block.into_iter().map(String::from),
-                );
-                hunk_results.push(HunkApplyStatus::Applied {
-                    location,
-                    match_type,
-                });
-            }
-            Err(error) => {
-                warn!("  Failed to apply Hunk {}. {}", hunk_index, &error);
-                hunk_results.push(HunkApplyStatus::Failed(error));
-            }
+        if let HunkApplyStatus::Failed(error) = &status {
+            warn!("  Failed to apply Hunk {}. {}", hunk_index, error);
         }
+
+        hunk_results.push(status);
     }
 
     // --- Format final content ---
@@ -1471,6 +1451,86 @@ pub fn apply_patch_to_content(
     let original_lines: Option<Vec<String>> =
         original_content.map(|c| c.lines().map(String::from).collect());
     apply_patch_to_lines(patch, original_lines.as_deref(), options)
+}
+
+/// Applies a single hunk to a mutable vector of lines in-place.
+///
+/// This function provides granular control over the patching process, allowing library
+/// users to apply changes hunk-by-hunk. It modifies the `target_lines` vector
+/// directly based on the changes defined in the `hunk`.
+///
+/// # Arguments
+///
+/// * `hunk` - The [`Hunk`] to apply.
+/// * `target_lines` - A mutable vector of strings representing the file's content.
+///   This vector will be modified by the function.
+/// * `options` - Configuration for the patch operation, such as `fuzz_factor`.
+///
+/// # Returns
+///
+/// A [`HunkApplyStatus`] indicating the outcome:
+/// - `Applied`: The hunk was successfully applied. The `location` and `match_type` are provided.
+/// - `SkippedNoChanges`: The hunk contained only context lines and was skipped.
+/// - `Failed`: The hunk could not be applied. The reason is provided in the associated [`HunkApplyError`].
+///
+/// # Example
+///
+/// ```rust
+/// # use mpatch::{parse_diffs, apply_hunk_to_lines, ApplyOptions, HunkApplyStatus, HunkLocation, MatchType};
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // 1. Define original content and the patch.
+/// let mut original_lines = vec!["Hello, world!".to_string()];
+/// let diff_str = [
+///     "```diff",
+///     "--- a/hello.txt",
+///     "+++ b/hello.txt",
+///     "@@ -1 +1 @@",
+///     "-Hello, world!",
+///     "+Hello, mpatch!",
+///     "```",
+/// ].join("\n");
+///
+/// // 2. Parse the diff to get a Hunk object.
+/// let patches = parse_diffs(&diff_str)?;
+/// let hunk = &patches[0].hunks[0];
+///
+/// // 3. Apply the hunk to the lines in memory.
+/// let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+/// let status = apply_hunk_to_lines(hunk, &mut original_lines, &options);
+///
+/// // 4. Check the results.
+/// assert!(matches!(status, HunkApplyStatus::Applied { .. }));
+/// assert_eq!(original_lines, vec!["Hello, mpatch!"]);
+/// # Ok(())
+/// # }
+/// ```
+pub fn apply_hunk_to_lines(
+    hunk: &Hunk,
+    target_lines: &mut Vec<String>,
+    options: &ApplyOptions,
+) -> HunkApplyStatus {
+    if !hunk.has_changes() {
+        debug!("  Skipping hunk (no changes).");
+        return HunkApplyStatus::SkippedNoChanges;
+    }
+
+    match find_hunk_location_in_lines(hunk, target_lines, options) {
+        Ok((location, match_type)) => {
+            let replace_block = hunk.get_replace_block();
+            target_lines.splice(
+                location.start_index..location.start_index + location.length,
+                replace_block.into_iter().map(String::from),
+            );
+            HunkApplyStatus::Applied {
+                location,
+                match_type,
+            }
+        }
+        Err(error) => {
+            // The calling function will log the failure with context (e.g., hunk index).
+            HunkApplyStatus::Failed(error)
+        }
+    }
 }
 
 /// Finds the location to apply a hunk to a given text content without modifying it.
