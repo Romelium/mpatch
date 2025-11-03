@@ -1297,6 +1297,119 @@ pub fn apply_patch_to_file(
     })
 }
 
+/// Applies the logic of a patch to a slice of lines.
+///
+/// This is a more allocation-friendly version of [`apply_patch_to_content`] that
+/// operates directly on a slice of strings. It returns an [`InMemoryResult`]
+/// containing the new, joined content as a string and a detailed report.
+///
+/// # Arguments
+///
+/// * `patch` - The [`Patch`] object to apply.
+/// * `original_lines` - An `Option` containing a slice of strings representing the file's content.
+///   `Some(lines)` for an existing file, `None` for a new file (creation).
+///   The slice can contain `String` or `&str`.
+/// * `options` - Configuration for the patch operation, such as `fuzz_factor`.
+///
+/// # Returns
+///
+/// An [`InMemoryResult`] containing the new content and a detailed report.
+///
+/// # Example
+///
+/// ```rust
+/// # use mpatch::{parse_diffs, apply_patch_to_lines, ApplyOptions};
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // 1. Define original content and the patch.
+/// let original_lines = vec!["Hello, world!"];
+/// // Construct the diff string programmatically to avoid rustdoc parsing issues with ```.
+/// let diff_str = [
+///     "```diff",
+///     "--- a/hello.txt",
+///     "+++ b/hello.txt",
+///     "@@ -1 +1 @@",
+///     "-Hello, world!",
+///     "+Hello, mpatch!",
+///     "```",
+/// ].join("\n");
+///
+/// // 2. Parse the diff to get a Patch object.
+/// let patches = parse_diffs(&diff_str)?;
+/// let patch = &patches[0];
+///
+/// // 3. Apply the patch to the lines in memory.
+/// let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+/// let result = apply_patch_to_lines(patch, Some(&original_lines), &options);
+///
+/// // 4. Check the results.
+/// assert_eq!(result.new_content, "Hello, mpatch!\n");
+/// assert!(result.report.all_applied_cleanly());
+/// # Ok(())
+/// # }
+/// ```
+pub fn apply_patch_to_lines<T: AsRef<str> + Sync>(
+    patch: &Patch,
+    original_lines: Option<&[T]>,
+    options: &ApplyOptions,
+) -> InMemoryResult {
+    let mut current_lines: Vec<String> = original_lines
+        .map(|lines| lines.iter().map(|s| s.as_ref().to_string()).collect())
+        .unwrap_or_default();
+    trace!(
+        "  apply_patch_to_lines called with {} lines of original content.",
+        current_lines.len()
+    );
+
+    let mut hunk_results = Vec::with_capacity(patch.hunks.len());
+
+    // --- Apply Hunks ---
+    // Iterate through each hunk and attempt to apply it to the `current_lines`.
+    for (i, hunk) in patch.hunks.iter().enumerate() {
+        let hunk_index = i + 1;
+        if !hunk.has_changes() {
+            debug!(
+                "  Skipping Hunk {}/{} (no changes).",
+                hunk_index,
+                patch.hunks.len()
+            );
+            hunk_results.push(HunkApplyStatus::SkippedNoChanges);
+            continue;
+        }
+        info!("  Applying Hunk {}/{}...", hunk_index, patch.hunks.len());
+
+        let replace_block = hunk.get_replace_block();
+
+        match find_hunk_location_in_lines(hunk, &current_lines, options) {
+            Ok((location, match_type)) => {
+                current_lines.splice(
+                    location.start_index..location.start_index + location.length,
+                    replace_block.into_iter().map(String::from),
+                );
+                hunk_results.push(HunkApplyStatus::Applied {
+                    location,
+                    match_type,
+                });
+            }
+            Err(error) => {
+                warn!("  Failed to apply Hunk {}. {}", hunk_index, &error);
+                hunk_results.push(HunkApplyStatus::Failed(error));
+            }
+        }
+    }
+
+    // --- Format final content ---
+    let mut new_content = current_lines.join("\n");
+    if patch.ends_with_newline && !new_content.is_empty() {
+        new_content.push('\n');
+    }
+
+    let report = ApplyResult { hunk_results };
+    InMemoryResult {
+        new_content,
+        report,
+    }
+}
+
 /// Applies the logic of a patch to a string content.
 ///
 /// This is a pure function that takes the patch definition and the original content
@@ -1305,6 +1418,9 @@ pub fn apply_patch_to_file(
 /// or integrating `mpatch`'s logic into other tools.
 ///
 /// # Arguments
+///
+/// **Note:** For improved performance when content is already available as a slice
+/// of lines, consider using [`apply_patch_to_lines`].
 ///
 /// * `patch` - The [`Patch`] object to apply.
 /// * `original_content` - An `Option<&str>` representing the file's content.
@@ -1352,112 +1468,9 @@ pub fn apply_patch_to_content(
     original_content: Option<&str>,
     options: &ApplyOptions,
 ) -> InMemoryResult {
-    let mut current_lines: Vec<String> = original_content
-        .map(|c| c.lines().map(String::from).collect())
-        .unwrap_or_default();
-    trace!(
-        "  apply_patch_to_content called with {} lines of original content.",
-        current_lines.len()
-    );
-
-    let mut hunk_results = Vec::with_capacity(patch.hunks.len());
-
-    // --- Apply Hunks ---
-    // Iterate through each hunk and attempt to apply it to the `current_lines`.
-    for (i, hunk) in patch.hunks.iter().enumerate() {
-        let hunk_index = i + 1;
-        // Optimization: skip hunks that contain no changes.
-        if !hunk.has_changes() {
-            debug!(
-                "  Skipping Hunk {}/{} (no changes).",
-                hunk_index,
-                patch.hunks.len()
-            );
-            hunk_results.push(HunkApplyStatus::SkippedNoChanges);
-            continue;
-        }
-        info!("  Applying Hunk {}/{}...", hunk_index, patch.hunks.len());
-        trace!("    Hunk start line hint: {:?}", hunk.old_start_line);
-
-        let match_block = hunk.get_match_block();
-        let replace_block = hunk.get_replace_block();
-
-        trace!("    --- Match Block ({} lines) ---", match_block.len());
-        for line in &match_block {
-            trace!("      |{}", line);
-        }
-        trace!("    --- Replace Block ({} lines) ---", replace_block.len());
-        for line in &replace_block {
-            trace!("      |{}", line);
-        }
-        trace!("    -----------------------------");
-
-        // This is the core logic: find where the hunk should be applied.
-        match find_hunk_location_internal(
-            &match_block,
-            &current_lines,
-            options,
-            hunk.old_start_line,
-        ) {
-            Ok((location, match_type)) => {
-                trace!(
-                    "    Found location: start_index={}, match_len={}",
-                    location.start_index,
-                    location.length
-                );
-                // Special case: end-of-file fuzzy match where the file is shorter than the context.
-                // In this scenario, we treat it as a command to replace the entire file's content
-                // with the hunk's replacement block.
-                let is_short_file_eof_match = location.start_index == 0
-                    && location.length == current_lines.len()
-                    && !current_lines.is_empty() // Avoid for empty file creation
-                    && current_lines.len() < match_block.len();
-
-                if is_short_file_eof_match {
-                    debug!("    Applying as full-file replacement due to end-of-file fuzzy match.");
-                    current_lines.clear();
-                    current_lines.extend(replace_block.into_iter().map(String::from));
-                } else {
-                    // The main operation: remove the matched lines and insert the replacement lines.
-                    current_lines.splice(
-                        location.start_index..location.start_index + location.length,
-                        replace_block.into_iter().map(String::from),
-                    );
-                }
-                debug!(
-                    "    Hunk applied successfully at index {}.",
-                    location.start_index
-                );
-                hunk_results.push(HunkApplyStatus::Applied {
-                    location,
-                    match_type,
-                });
-            }
-            Err(error) => {
-                // If `find_hunk_location` returns `Err`, the hunk could not be applied.
-                warn!("  Failed to apply Hunk {}. {}", hunk_index, &error);
-                trace!("    --- Expected Block (Context/Deletions) ---");
-                for line in &match_block {
-                    trace!("      '{}'", line);
-                }
-                trace!("    ----------------------------------------");
-                hunk_results.push(HunkApplyStatus::Failed(error));
-            }
-        }
-    }
-
-    // --- Format final content ---
-    let mut new_content = current_lines.join("\n");
-    if patch.ends_with_newline && !new_content.is_empty() {
-        new_content.push('\n');
-    }
-    trace!("  Final content has {} characters.", new_content.len());
-
-    let report = ApplyResult { hunk_results };
-    InMemoryResult {
-        new_content,
-        report,
-    }
+    let original_lines: Option<Vec<String>> =
+        original_content.map(|c| c.lines().map(String::from).collect());
+    apply_patch_to_lines(patch, original_lines.as_deref(), options)
 }
 
 /// Finds the location to apply a hunk to a given text content without modifying it.
@@ -1470,6 +1483,9 @@ pub fn apply_patch_to_content(
 /// actually performing the patch, or for building custom patch application logic.
 ///
 /// # Arguments
+///
+/// **Note:** For improved performance when content is already available as a slice
+/// of lines, consider using [`find_hunk_location_in_lines`].
 ///
 /// * `hunk` - A reference to the [`Hunk`] to be located.
 /// * `target_content` - A string slice of the content to search within.
@@ -1517,8 +1533,65 @@ pub fn find_hunk_location(
     options: &ApplyOptions,
 ) -> Result<(HunkLocation, MatchType), HunkApplyError> {
     let target_lines: Vec<String> = target_content.lines().map(String::from).collect();
+    find_hunk_location_in_lines(hunk, &target_lines, options)
+}
+
+/// Finds the location to apply a hunk to a slice of lines without modifying it.
+///
+/// This is a more allocation-friendly version of [`find_hunk_location`] that
+/// operates directly on a slice of strings, avoiding the need to join and re-split
+/// content. This is useful for tools that already have content in a line-based
+/// format.
+///
+/// # Arguments
+///
+/// * `hunk` - A reference to the [`Hunk`] to be located.
+/// * `target_lines` - A slice of strings representing the content to search within.
+///   The slice can contain `String` or `&str`.
+/// * `options` - Configuration for the patch operation, such as `fuzz_factor`.
+///
+/// # Returns
+///
+/// - `Ok((HunkLocation, MatchType))` on success, containing the location and the
+///   type of match that was found.
+/// - `Err(HunkApplyError)` if no suitable location could be found.
+///
+/// # Example
+///
+/// ````rust
+/// # use mpatch::{parse_diffs, find_hunk_location_in_lines, HunkLocation, ApplyOptions, MatchType};
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let original_lines = vec!["line 1", "line two", "line 3"];
+/// let diff_content = r#"
+/// ```diff
+/// --- a/file.txt
+/// +++ b/file.txt
+/// @@ -1,3 +1,3 @@
+///  line 1
+/// -line two
+/// +line 2
+///  line 3
+/// ```
+/// "#;
+///
+/// let patches = parse_diffs(diff_content)?;
+/// let hunk = &patches[0].hunks[0];
+///
+/// let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+/// let (location, match_type) = find_hunk_location_in_lines(hunk, &original_lines, &options)?;
+///
+/// assert_eq!(location, HunkLocation { start_index: 0, length: 3 });
+/// assert!(matches!(match_type, MatchType::Exact));
+/// # Ok(())
+/// # }
+/// ````
+pub fn find_hunk_location_in_lines<T: AsRef<str> + Sync>(
+    hunk: &Hunk,
+    target_lines: &[T],
+    options: &ApplyOptions,
+) -> Result<(HunkLocation, MatchType), HunkApplyError> {
     let match_block = hunk.get_match_block();
-    find_hunk_location_internal(&match_block, &target_lines, options, hunk.old_start_line)
+    find_hunk_location_internal(&match_block, target_lines, options, hunk.old_start_line)
 }
 
 /// Finds optimized search ranges within the target file to perform the fuzzy search.
@@ -1527,9 +1600,9 @@ pub fn find_hunk_location(
 /// hunk that is relatively uncommon in the target file. If successful, it returns
 /// small search windows around the occurrences of that anchor. If no good anchor
 /// is found, it returns a single range covering the entire file.
-fn find_search_ranges(
+fn find_search_ranges<T: AsRef<str>>(
     match_block: &[&str],
-    target_lines: &[String],
+    target_lines: &[T],
     hunk_size: usize,
 ) -> Vec<(usize, usize)> {
     const MAX_ANCHOR_OCCURRENCES: usize = 5;
@@ -1564,7 +1637,7 @@ fn find_search_ranges(
                 let occurrences: Vec<_> = target_lines
                     .iter()
                     .enumerate()
-                    .filter(|(_, l)| l.trim_end() == anchor_line)
+                    .filter(|(_, l)| l.as_ref().trim_end() == anchor_line)
                     .map(|(i, _)| i)
                     .collect();
 
@@ -1624,9 +1697,9 @@ fn merge_ranges(mut ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
 
 /// Finds the starting index of the hunk's match block in the target lines.
 /// This function implements the core hierarchical search strategy.
-fn find_hunk_location_internal(
+fn find_hunk_location_internal<T: AsRef<str> + Sync>(
     match_block: &[&str],
-    target_lines: &[String],
+    target_lines: &[T],
     options: &ApplyOptions,
     old_start_line: Option<usize>,
 ) -> Result<(HunkLocation, MatchType), HunkApplyError> {
@@ -1664,7 +1737,12 @@ fn find_hunk_location_internal(
                     target_lines
                         .windows(match_block.len())
                         .enumerate()
-                        .filter(|(_, window)| *window == match_block)
+                        .filter(|(_, window)| {
+                            window
+                                .iter()
+                                .map(|s| s.as_ref())
+                                .eq(match_block.iter().copied())
+                        })
                         .map(|(i, _)| i),
                 )
             } else {
@@ -1701,7 +1779,7 @@ fn find_hunk_location_internal(
                         .filter(move |(_, window)| {
                             window
                                 .iter()
-                                .map(|s| s.trim_end())
+                                .map(|s| s.as_ref().trim_end())
                                 .eq(match_stripped.iter().copied())
                         })
                         .map(|(i, _)| i),
@@ -1795,7 +1873,7 @@ fn find_hunk_location_internal(
 
                                 // HYBRID SCORING: (Copied from original sequential loop)
                                 let window_stripped_lines: Vec<_> =
-                                    window.iter().map(|s| s.trim_end()).collect();
+                                    window.iter().map(|s| s.as_ref().trim_end()).collect();
                                 let diff_lines = similar::TextDiff::from_slices(
                                     &window_stripped_lines,
                                     match_stripped_lines,
@@ -1847,7 +1925,7 @@ fn find_hunk_location_internal(
 
                                 // HYBRID SCORING: (Copied from original sequential loop)
                                 let window_stripped_lines: Vec<_> =
-                                    window.iter().map(|s| s.trim_end()).collect();
+                                    window.iter().map(|s| s.as_ref().trim_end()).collect();
                                 let diff_lines = similar::TextDiff::from_slices(
                                     &window_stripped_lines,
                                     match_stripped_lines,
@@ -2035,7 +2113,7 @@ fn find_hunk_location_internal(
         && options.fuzz_factor > 0.0
     {
         trace!("    Target file is shorter than hunk. Attempting end-of-file fuzzy match...");
-        let target_stripped: Vec<_> = target_lines.iter().map(|s| s.trim_end()).collect();
+        let target_stripped: Vec<_> = target_lines.iter().map(|s| s.as_ref().trim_end()).collect();
         let match_stripped: Vec<_> = match_block.iter().map(|s| s.trim_end()).collect();
         let diff = TextDiff::from_slices(&target_stripped, &match_stripped);
         let ratio = diff.ratio();

@@ -1,7 +1,8 @@
 use indoc::indoc;
 use mpatch::{
-    apply_patch_to_file, apply_patches_to_dir, find_hunk_location, parse_diffs, ApplyOptions,
-    HunkApplyError, HunkApplyStatus, HunkLocation, MatchType, ParseError, Patch, PatchError,
+    apply_patch_to_file, apply_patch_to_lines, apply_patches_to_dir, find_hunk_location,
+    find_hunk_location_in_lines, parse_diffs, ApplyOptions, HunkApplyError, HunkApplyStatus,
+    HunkLocation, MatchType, ParseError, Patch, PatchError,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -958,7 +959,75 @@ fn test_indented_diff_block_is_ignored() {
 }
 
 #[test]
-fn test_fuzzy_match_fails_below_threshold() {
+fn test_find_hunk_location_in_lines() {
+    let original_lines = vec!["line 1", "line two", "line 3"];
+    let diff = indoc! {r#"
+        ```diff
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1,3 +1,3 @@
+         line 1
+        -line two
+        +line 2
+         line 3
+        ```
+    "#};
+    let patches = parse_diffs(diff).unwrap();
+    let hunk = &patches[0].hunks[0];
+
+    let options = mpatch::ApplyOptions {
+        fuzz_factor: 0.0,
+        ..Default::default()
+    };
+    // Test with &[&str]
+    let (location, match_type) =
+        find_hunk_location_in_lines(hunk, &original_lines, &options).unwrap();
+    assert_eq!(
+        location,
+        HunkLocation {
+            start_index: 0,
+            length: 3
+        }
+    );
+    assert!(matches!(match_type, MatchType::Exact));
+
+    // Test with &[String]
+    let original_lines_string: Vec<String> = original_lines.iter().map(|s| s.to_string()).collect();
+    let (location2, match_type2) =
+        find_hunk_location_in_lines(hunk, &original_lines_string, &options).unwrap();
+    assert_eq!(location, location2);
+    assert_eq!(match_type, match_type2);
+}
+
+#[test]
+fn test_apply_patch_to_lines() {
+    let original_lines = vec!["Hello, world!"];
+    let diff_str = [
+        "```diff",
+        "--- a/hello.txt",
+        "+++ b/hello.txt",
+        "@@ -1 +1 @@",
+        "-Hello, world!",
+        "+Hello, mpatch!",
+        "```",
+    ]
+    .join("\n");
+
+    let patches = parse_diffs(&diff_str).unwrap();
+    let patch = &patches[0];
+
+    let options = ApplyOptions {
+        dry_run: false,
+        fuzz_factor: 0.0,
+    };
+    let result = apply_patch_to_lines(patch, Some(&original_lines), &options);
+
+    assert_eq!(result.new_content, "Hello, mpatch!\n");
+    assert!(result.report.all_applied_cleanly());
+}
+
+#[test]
+fn test_apply_to_readonly_file_fails() {
     let _ = env_logger::builder().is_test(true).try_init();
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("test.txt");
