@@ -171,14 +171,6 @@ pub enum ParseError {
 /// Represents the possible errors that can occur during patch operations.
 #[derive(Error, Debug)]
 pub enum PatchError {
-    /// An I/O error occurred while reading or writing a file.
-    /// This is a "hard" error that stops the entire process.
-    #[error("I/O error while processing {path:?}: {source}")]
-    Io {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
     /// The patch attempted to access a path outside the target directory.
     /// This is a security measure to prevent malicious patches from modifying
     /// unintended files (e.g., `--- a/../../etc/passwd`).
@@ -188,6 +180,20 @@ pub enum PatchError {
     /// appear to be for file creation (i.e., its first hunk was not an addition-only hunk).
     #[error("Target file not found for patching: {0}")]
     TargetNotFound(PathBuf),
+    /// The user does not have permission to read or write to the specified path.
+    #[error("Permission denied for path: {path:?}")]
+    PermissionDenied { path: PathBuf },
+    /// The target path for a patch exists but is a directory, not a file.
+    #[error("Target path is a directory, not a file: {path:?}")]
+    TargetIsDirectory { path: PathBuf },
+    /// An I/O error occurred while reading or writing a file.
+    /// This is a "hard" error that stops the entire process.
+    #[error("I/O error while processing {path:?}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// The reason a hunk failed to apply.
@@ -1037,6 +1043,15 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
     Ok(all_patches)
 }
 
+/// Converts a `std::io::Error` into a more specific `PatchError`.
+fn map_io_error(path: PathBuf, e: std::io::Error) -> PatchError {
+    match e.kind() {
+        std::io::ErrorKind::PermissionDenied => PatchError::PermissionDenied { path },
+        std::io::ErrorKind::IsADirectory => PatchError::TargetIsDirectory { path },
+        _ => PatchError::Io { path, source: e },
+    }
+}
+
 /// Ensures a relative path, when joined to a base directory, resolves to a location
 /// that is still inside that base directory.
 ///
@@ -1086,21 +1101,13 @@ pub fn ensure_path_is_safe(base_dir: &Path, relative_path: &Path) -> Result<Path
         base_dir.display(),
         relative_path.display()
     );
-    let base_path = fs::canonicalize(base_dir).map_err(|e| PatchError::Io {
-        path: base_dir.to_path_buf(),
-        source: e,
-    })?;
+    let base_path =
+        fs::canonicalize(base_dir).map_err(|e| map_io_error(base_dir.to_path_buf(), e))?;
     let target_file_path = base_dir.join(relative_path);
     let parent = target_file_path.parent().unwrap_or(Path::new(""));
-    fs::create_dir_all(parent).map_err(|e| PatchError::Io {
-        path: parent.to_path_buf(),
-        source: e,
-    })?;
+    fs::create_dir_all(parent).map_err(|e| map_io_error(parent.to_path_buf(), e))?;
     let final_path = fs::canonicalize(parent)
-        .map_err(|e| PatchError::Io {
-            path: parent.to_path_buf(),
-            source: e,
-        })?
+        .map_err(|e| map_io_error(parent.to_path_buf(), e))?
         .join(target_file_path.file_name().unwrap_or_default());
     if !final_path.starts_with(&base_path) {
         return Err(PatchError::PathTraversal(relative_path.to_path_buf()));
@@ -1207,21 +1214,16 @@ pub fn apply_patch_to_file(
     // --- Read Original File ---
     // All subsequent operations use the verified `safe_target_path`.
     if safe_target_path.is_dir() {
-        return Err(PatchError::Io {
+        return Err(PatchError::TargetIsDirectory {
             path: safe_target_path,
-            source: std::io::Error::new(
-                std::io::ErrorKind::IsADirectory,
-                "target path is a directory, not a file",
-            ),
         });
     }
 
     let (original_content, is_new_file) = if safe_target_path.is_file() {
         trace!("  Reading target file '{}'", patch.file_path.display());
-        let content = fs::read_to_string(&safe_target_path).map_err(|e| PatchError::Io {
-            path: safe_target_path.clone(),
-            source: e,
-        })?;
+        let content =
+            fs::read_to_string(&safe_target_path)
+                .map_err(|e| map_io_error(safe_target_path.clone(), e))?;
         (content, false)
     } else {
         // File doesn't exist. This is only okay if it's a file creation patch.
@@ -1272,15 +1274,10 @@ pub fn apply_patch_to_file(
         // The parent directory might have been created by `ensure_path_is_safe`
         // for a new file, but we ensure it again just in case.
         if let Some(parent) = safe_target_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| PatchError::Io {
-                path: parent.to_path_buf(),
-                source: e,
-            })?;
+            fs::create_dir_all(parent).map_err(|e| map_io_error(parent.to_path_buf(), e))?;
         }
-        fs::write(&safe_target_path, new_content).map_err(|e| PatchError::Io {
-            path: safe_target_path.clone(),
-            source: e,
-        })?;
+        fs::write(&safe_target_path, new_content)
+            .map_err(|e| map_io_error(safe_target_path.clone(), e))?;
         if apply_result.all_applied_cleanly() {
             info!(
                 "  Successfully wrote changes to '{}'",

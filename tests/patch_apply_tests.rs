@@ -1260,8 +1260,8 @@ fn test_apply_to_readonly_file_fails() {
     let result = apply_patch_to_file(patch, dir.path(), options);
 
     assert!(
-        matches!(result, Err(PatchError::Io { .. })),
-        "Applying patch to a read-only file should result in an I/O error"
+        matches!(result, Err(PatchError::PermissionDenied { .. })),
+        "Applying patch to a read-only file should result in a PermissionDenied error"
     );
 
     // Reset permissions to allow cleanup by tempdir
@@ -1299,8 +1299,8 @@ fn test_apply_to_path_that_is_a_directory() {
 
     // Reading the original file content will fail because it's a directory.
     assert!(
-        matches!(result, Err(PatchError::Io { .. })),
-        "Applying patch to a path that is a directory should fail"
+        matches!(result, Err(PatchError::TargetIsDirectory { .. })),
+        "Applying patch to a path that is a directory should fail with TargetIsDirectory"
     );
 }
 
