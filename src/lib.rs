@@ -2047,11 +2047,9 @@ impl<'a> DefaultHunkFinder<'a> {
                     let target_slice = &target_lines[range_start..range_end];
 
                     (min_len..=max_len)
-                        .into_iter()
                         .filter(move |&window_len| window_len <= target_slice.len())
                         .flat_map(move |window_len| {
                             (0..=target_slice.len() - window_len)
-                                .into_iter()
                                 .map(move |i| {
                                     let window = &target_slice[i..i + window_len];
                                     let absolute_index = range_start + i;
