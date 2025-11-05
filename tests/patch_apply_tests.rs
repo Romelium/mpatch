@@ -1131,7 +1131,7 @@ fn test_hunk_applier_iterator() {
 }
 
 #[test]
-fn test_apply_to_readonly_file_fails() {
+fn test_fuzzy_match_below_threshold_fails() {
     let _ = env_logger::builder().is_test(true).try_init();
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("test.txt");
