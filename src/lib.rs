@@ -2049,40 +2049,37 @@ impl<'a> DefaultHunkFinder<'a> {
                     (min_len..=max_len)
                         .filter(move |&window_len| window_len <= target_slice.len())
                         .flat_map(move |window_len| {
-                            (0..=target_slice.len() - window_len)
-                                .map(move |i| {
-                                    let window = &target_slice[i..i + window_len];
-                                    let absolute_index = range_start + i;
+                            (0..=target_slice.len() - window_len).map(move |i| {
+                                let window = &target_slice[i..i + window_len];
+                                let absolute_index = range_start + i;
 
-                                    // HYBRID SCORING: (Copied from original sequential loop)
-                                    let window_stripped_lines: Vec<_> =
-                                        window.iter().map(|s| s.as_ref().trim_end()).collect();
-                                    let diff_lines = similar::TextDiff::from_slices(
-                                        &window_stripped_lines,
-                                        match_stripped_lines,
-                                    );
-                                    let ratio_lines = diff_lines.ratio() as f64;
-                                    let window_content = window_stripped_lines.join("\n");
-                                    let diff_words = similar::TextDiff::from_words(
-                                        &window_content,
-                                        match_content,
-                                    );
-                                    let ratio_words = diff_words.ratio() as f64;
-                                    let ratio = 0.6 * ratio_lines + 0.4 * ratio_words;
-                                    let size_diff = window_len.abs_diff(len) as f64;
-                                    let penalty = (size_diff / len.max(window_len) as f64) * 0.2;
-                                    let score = ratio - penalty;
+                                // HYBRID SCORING: (Copied from original sequential loop)
+                                let window_stripped_lines: Vec<_> =
+                                    window.iter().map(|s| s.as_ref().trim_end()).collect();
+                                let diff_lines = similar::TextDiff::from_slices(
+                                    &window_stripped_lines,
+                                    match_stripped_lines,
+                                );
+                                let ratio_lines = diff_lines.ratio() as f64;
+                                let window_content = window_stripped_lines.join("\n");
+                                let diff_words =
+                                    similar::TextDiff::from_words(&window_content, match_content);
+                                let ratio_words = diff_words.ratio() as f64;
+                                let ratio = 0.6 * ratio_lines + 0.4 * ratio_words;
+                                let size_diff = window_len.abs_diff(len) as f64;
+                                let penalty = (size_diff / len.max(window_len) as f64) * 0.2;
+                                let score = ratio - penalty;
 
-                                    (
-                                        score,
-                                        ratio,
-                                        ratio_lines,
-                                        ratio_words,
-                                        penalty,
-                                        absolute_index,
-                                        window_len,
-                                    )
-                                })
+                                (
+                                    score,
+                                    ratio,
+                                    ratio_lines,
+                                    ratio_words,
+                                    penalty,
+                                    absolute_index,
+                                    window_len,
+                                )
+                            })
                         })
                 })
                 .collect();
