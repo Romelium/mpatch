@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.0] - YYYY-MM-DD
+## [1.1.0] - 2025-11-11
+
+### Added
+
+-   **Parser:** The markdown parser now supports flexible code block headers. It will recognize a block as a diff if it contains `diff` or `patch` as a distinct word, allowing for headers like ` ```rust, diff` or ` ```diff rust`.
+
+## [1.0.0] - 2025-11-05
 
 This version marks the first major stable release of `mpatch`. It introduces a comprehensive overhaul of the library API to improve clarity, modularity, and programmatic control. Due to the extensive nature of these improvements, several breaking changes were necessary to create a more robust and extensible foundation for the future.
 
