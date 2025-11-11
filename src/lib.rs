@@ -72,8 +72,9 @@
 //! Using the `mpatch` library typically involves a two-step process:
 //!
 //! 1.  **Parsing:** Use [`parse_diffs`] to read a string and extract a `Vec<Patch>`.
-//!     This function is markdown-aware, searching for ` ```diff` or ` ```patch`
-//!     blocks and parsing their contents. This step is purely in-memory.
+//!     This function is markdown-aware, searching for code blocks annotated with `diff`
+//!     or `patch` (e.g., ` ```diff`, ` ```rust, patch`) and parsing their contents.
+//!     This step is purely in-memory.
 //! 2.  **Applying:** Use one of the `apply` functions to apply the changes.
 //!     - [`apply_patch_to_file`]: The most convenient function for CLI tools. It
 //!       handles reading the original file and writing the new content back to disk.
@@ -948,11 +949,12 @@ impl Patch {
 
 // --- Core Logic ---
 
-/// Parses a string containing one or more ` ```diff` or ` ```patch` blocks into a vector of [`Patch`] objects.
+/// Parses a string containing one or more markdown diff blocks into a vector of [`Patch`] objects.
 ///
-/// This function scans the input `content` for markdown-style diff blocks
-/// (i.e., ` ````diff ... ``` ` or ` ```patch ... ``` `).. It can handle multiple blocks in one string,
-/// and multiple file patches within a single block.
+/// This function scans the input `content` for markdown-style code blocks annotated
+/// with `diff` or `patch` (e.g., ` ````diff ... ``` `, ` ````rust, patch ... ``` `).
+/// It can handle multiple blocks in one string, and multiple file patches within a
+/// single block.
 ///
 /// # Arguments
 ///
@@ -991,10 +993,19 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
 
     // The `find` call consumes the iterator until it finds the start of a diff block.
     // The loop continues searching for more blocks from where the last one ended.
-    while let Some((line_index, _)) = lines
-        .by_ref()
-        .find(|(_, l)| l.starts_with("```diff") || l.starts_with("```patch"))
-    {
+    while let Some((line_index, _)) = lines.by_ref().find(|(_, line)| {
+        if !line.starts_with("```") {
+            return false;
+        }
+        // Take the info string part after the backticks.
+        let info_string = &line[3..];
+        // Check if any "word" in the info string is "diff" or "patch".
+        // We treat it as a comma-separated list of tags, where each tag can have multiple words.
+        info_string.split(',').any(|part| {
+            part.split_whitespace()
+                .any(|word| word == "diff" || word == "patch")
+        })
+    }) {
         let diff_block_start_line = line_index + 1; // Convert 0-based index to 1-based line number
 
         // This temporary vec will hold all patch sections found in this block,

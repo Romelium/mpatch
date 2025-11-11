@@ -75,6 +75,53 @@ fn test_parse_patch_block_header() {
 }
 
 #[test]
+fn test_parse_flexible_diff_block_headers() {
+    let test_cases = vec![
+        "```diff,rust",
+        "```rust, diff",
+        "```  patch ",
+        "``` some info,patch,more info ",
+        "```diff",       // no space
+        "```patch",      // no space
+        "``` diff",      // with space
+        "``` diff rust", // multiple words
+    ];
+
+    for header in test_cases {
+        let diff = format!(
+            "{}\n--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-a\n+b\n```",
+            header
+        );
+        let patches = parse_diffs(&diff).unwrap();
+        assert_eq!(patches.len(), 1, "Failed for header: {}", header);
+        assert_eq!(patches[0].file_path.to_str().unwrap(), "file.txt");
+    }
+}
+
+#[test]
+fn test_parse_ignores_non_diff_blocks() {
+    let test_cases = vec![
+        "```rust",
+        "```",
+        "``` dif",        // partial match
+        "``` patch-work", // not a whole word
+        "```mydiff",      // not a whole word
+        "```different",   // not a whole word
+        "``` a,b,c",      // no diff/patch keyword
+        "```patchwork",   // not a whole word
+    ];
+
+    for header in test_cases {
+        let diff = format!(
+            "{}\n--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-a\n+b\n```",
+            header
+        );
+        let patches = parse_diffs(&diff).unwrap();
+        assert!(patches.is_empty(), "Should have ignored header: {}", header);
+    }
+}
+
+#[test]
 fn test_parse_multiple_diff_blocks() {
     let diff = indoc! {r#"
         First change:
