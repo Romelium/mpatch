@@ -253,7 +253,7 @@ This command will:
 1.  Print full trace logs to your terminal.
 2.  Create a file named `mpatch-debug-report-[timestamp].md` in your current directory.
 
-This single markdown file contains everything needed to reproduce the issue: the command you ran, system information, the full input patch file, the original content of all target files, and the complete trace log.
+This single markdown file contains everything needed to reproduce the issue: the command you ran, system information, the full input patch file, the original content of all target files, the final content of all target files after patching, and the complete trace log.
 
 ---
 
@@ -278,7 +278,7 @@ When opening an issue, the best way to help us is to provide a debug report.
 4.  Drag and drop the generated `.md` file into the issue description to attach it.
 5.  Add any additional comments about what you expected to happen versus what actually happened.
 
-This self-contained report gives us all the context we need to investigate the problem efficiently.
+The report includes the original and final state of all affected files, which is crucial for debugging. This self-contained report gives us all the context we need to investigate the problem efficiently.
 
 ### Pull Requests
 

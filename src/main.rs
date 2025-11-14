@@ -4,11 +4,12 @@ use colored::Colorize;
 use env_logger::Builder;
 use log::{error, info, warn, Level, LevelFilter};
 use mpatch::{apply_patches_to_dir, parse_diffs, Patch};
+use std::fmt::Write as FmtWrite;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{collections::HashMap, time::SystemTime, time::UNIX_EPOCH};
 
 const DEFAULT_FUZZ_THRESHOLD: f32 = 0.7;
 
@@ -55,8 +56,19 @@ fn run(args: Args) -> Result<()> {
     // this function (no matter how it exits), its `drop` method is called,
     // which guarantees the report file is correctly finalized.
     let report_arc = setup_logging_and_reporting(&args, &content, &all_patches)?;
-    let _finalizer = ReportFinalizer::new(report_arc);
+    let (report_file_arc, original_contents) = if let Some((arc, contents)) = report_arc {
+        (Some(arc), Some(contents))
+    } else {
+        (None, None)
+    };
 
+    // This closure will be called at the end of the function to finalize the report.
+    // This is done manually instead of with a Drop guard to allow access to `batch_result`.
+    let finalize_report = |batch_result: Option<&mpatch::BatchResult>| {
+        if let (Some(arc), Some(contents)) = (&report_file_arc, &original_contents) {
+            write_report_footer(arc, &args, &all_patches, batch_result, contents);
+        }
+    };
     // --- Core Patching Logic ---
     if all_patches.is_empty() {
         info!("No valid diff blocks found or processed in the input file.");
@@ -87,7 +99,7 @@ fn run(args: Args) -> Result<()> {
     let num_ops = batch_result.results.len();
 
     // Iterate through the results to provide detailed CLI feedback.
-    for (i, (path, result)) in batch_result.results.into_iter().enumerate() {
+    for (i, (path, result)) in batch_result.results.iter().enumerate() {
         info!(""); // Vertical spacing
         info!(">>> Operation {}/{}", i + 1, num_ops);
         match result {
@@ -108,7 +120,8 @@ fn run(args: Args) -> Result<()> {
             Err(e) => {
                 // A "hard" error occurred (e.g., I/O error, path traversal).
                 // This is fatal, so we stop and return the error.
-                return Err(anyhow::Error::from(e)).with_context(|| {
+                // Since `e` is a reference from `.iter()`, we create a new error from its display representation.
+                return Err(anyhow!("{}", e)).with_context(|| {
                     format!(
                         "A fatal error occurred while applying patch for: {}",
                         path.display()
@@ -120,6 +133,7 @@ fn run(args: Args) -> Result<()> {
 
     // --- Final Summary ---
     info!("\n--- Summary ---");
+    finalize_report(Some(&batch_result));
     info!("Successful operations: {}", success_count);
     info!("Failed operations:     {}", fail_count);
     if args.dry_run {
@@ -128,6 +142,7 @@ fn run(args: Args) -> Result<()> {
 
     if fail_count > 0 {
         warn!("Review the log for errors. Some files may be in a partially patched state.");
+
         // Return an error to set a non-zero exit code.
         return Err(anyhow!(
             "Completed with {} failed patch operations.",
@@ -135,10 +150,14 @@ fn run(args: Args) -> Result<()> {
         ));
     }
 
+    finalize_report(None); // Finalize report on success if not already done
     Ok(())
 }
 
 // --- Helper Structs and Functions ---
+
+/// A tuple containing the shared handle to the report file and a map of original file contents.
+type ReportData = (Arc<Mutex<File>>, HashMap<PathBuf, String>);
 
 /// Logs the reasons why hunks failed to apply.
 fn log_failed_hunks(apply_result: &mpatch::ApplyResult) {
@@ -200,46 +219,23 @@ impl Write for TeeWriter {
     }
 }
 
-/// A "Drop Guard" to ensure the report file is always finalized correctly.
-/// When an instance of this struct goes out of scope, its `drop` method is
-/// called, which writes the closing markdown fence for the log block.
-/// This ensures the report is valid even if the program panics or exits early.
-struct ReportFinalizer {
-    file_arc: Option<Arc<Mutex<File>>>,
-}
-impl ReportFinalizer {
-    fn new(file_arc: Option<Arc<Mutex<File>>>) -> Self {
-        Self { file_arc }
-    }
-}
-impl Drop for ReportFinalizer {
-    fn drop(&mut self) {
-        if let Some(arc) = &self.file_arc {
-            log::logger().flush();
-            let mut file = arc.lock().unwrap();
-            // Use `let _ = ...` to ignore potential write errors during cleanup.
-            let _ = writeln!(file, "````");
-        }
-    }
-}
-
 /// Sets up the global logger, creating a report file if verbosity is >= 4.
 fn setup_logging_and_reporting(
     args: &Args,
     patch_content: &str,
     patches: &[Patch],
-) -> Result<Option<Arc<Mutex<File>>>> {
+) -> Result<Option<ReportData>> {
     let mut builder = Builder::new();
-    let report_arc = if args.verbose >= 4 {
+    let report_data = if args.verbose >= 4 {
         // --- Create and Write Report Header ---
-        let arc = create_report_file(args, patch_content, patches)?;
+        let (file_arc, original_contents) = create_report_file(args, patch_content, patches)?;
         // --- Configure Logger to Tee to the Report File ---
         builder
             .filter_level(LevelFilter::Trace) // Max verbosity for the report
             .target(env_logger::Target::Pipe(Box::new(TeeWriter {
-                file: arc.clone(),
+                file: file_arc.clone(),
             })));
-        Some(arc)
+        Some((file_arc, original_contents))
     } else {
         // --- Configure Standard Logger ---
         let log_level = match args.verbose {
@@ -263,7 +259,7 @@ fn setup_logging_and_reporting(
         })
         .init();
 
-    Ok(report_arc)
+    Ok(report_data)
 }
 
 /// Creates the report file, writes the header, and returns a shared pointer to it.
@@ -271,7 +267,7 @@ fn create_report_file(
     args: &Args,
     patch_content: &str,
     patches: &[Patch],
-) -> Result<Arc<Mutex<File>>> {
+) -> Result<ReportData> {
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let report_filename = format!("mpatch-debug-report-{}.md", timestamp);
     let mut file = File::create(&report_filename)
@@ -308,6 +304,7 @@ fn create_report_file(
 
     // --- Write Original Target Files ---
     writeln!(file, "\n## Original Target File(s)\n")?;
+    let mut original_contents = HashMap::new();
     for patch in patches {
         let target_file_path = args.target_dir.join(&patch.file_path);
         writeln!(file, "### File: `{}`\n", patch.file_path.display())?;
@@ -320,6 +317,7 @@ fn create_report_file(
                 writeln!(file, "````{}", lang)?;
                 writeln!(file, "{}", file_content)?;
                 writeln!(file, "````")?;
+                original_contents.insert(patch.file_path.clone(), file_content);
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 writeln!(file, "*File does not exist.*")?;
@@ -333,7 +331,190 @@ fn create_report_file(
     writeln!(file, "````log")?;
 
     // Return a thread-safe, reference-counted pointer to the file.
-    Ok(Arc::new(Mutex::new(file)))
+    Ok((Arc::new(Mutex::new(file)), original_contents))
+}
+
+/// Writes the final sections of the debug report, including the discrepancy check.
+fn write_report_footer(
+    file_arc: &Arc<Mutex<File>>,
+    args: &Args,
+    all_patches: &[Patch],
+    batch_result: Option<&mpatch::BatchResult>,
+    original_contents: &HashMap<PathBuf, String>,
+) {
+    // Use a static bool to ensure this only runs once.
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static IS_FINALIZED: AtomicBool = AtomicBool::new(false);
+    if IS_FINALIZED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    log::logger().flush();
+    let mut file = file_arc.lock().unwrap();
+
+    // Use `let _ = ...` to ignore potential write errors during cleanup.
+    let _ = writeln!(file, "````"); // Close the log block
+
+    // --- Final Target Files Section ---
+    let _ = writeln!(file, "\n## Final Target File(s)\n");
+    let _ = writeln!(file, "> This section shows the state of the target files *after* the patch operation was attempted.\n");
+
+    if args.dry_run {
+        let _ = writeln!(
+            file,
+            "*Final file state is the same as the original state because `--dry-run` was active.*"
+        );
+    } else {
+        for patch in all_patches {
+            let target_file_path = args.target_dir.join(&patch.file_path);
+            let _ = writeln!(file, "### File: `{}`\n", patch.file_path.display());
+            match fs::read_to_string(&target_file_path) {
+                Ok(file_content) => {
+                    if file_content.is_empty() {
+                        let _ = writeln!(file, "*File is empty.*");
+                    } else {
+                        let lang = target_file_path
+                            .extension()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("");
+                        let _ = writeln!(file, "````{}", lang);
+                        let _ = writeln!(file, "{}", file_content);
+                        let _ = writeln!(file, "````");
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    let _ = writeln!(file, "*File does not exist.*");
+                }
+                Err(e) => _ = writeln!(file, "*Error reading file: {}*", e),
+            }
+        }
+    }
+    // Use `let _ = ...` to ignore potential write errors during cleanup.
+    let _ = writeln!(file, "````"); // Close the log block
+
+    // --- Final Target Files Section ---
+    let _ = writeln!(file, "\n## Final Target File(s)\n");
+    let _ = writeln!(file, "> This section shows the state of the target files *after* the patch operation was attempted.\n");
+
+    if args.dry_run {
+        let _ = writeln!(
+            file,
+            "*Final file state is the same as the original state because `--dry-run` was active.*"
+        );
+    } else {
+        for patch in all_patches {
+            let target_file_path = args.target_dir.join(&patch.file_path);
+            let _ = writeln!(file, "### File: `{}`\n", patch.file_path.display());
+            match fs::read_to_string(&target_file_path) {
+                Ok(file_content) => {
+                    if file_content.is_empty() {
+                        let _ = writeln!(file, "*File is empty.*");
+                    } else {
+                        let lang = target_file_path
+                            .extension()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("");
+                        let _ = writeln!(file, "````{}", lang);
+                        let _ = writeln!(file, "{}", file_content);
+                        let _ = writeln!(file, "````");
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    let _ = writeln!(file, "*File does not exist.*");
+                }
+                Err(e) => _ = writeln!(file, "*Error reading file: {}*", e),
+            }
+        }
+    }
+
+    // --- Discrepancy Check Section ---
+    let _ = writeln!(file, "\n## Discrepancy Check\n");
+    let _ = writeln!(file, "> This section verifies that applying the patch and then creating a new diff from the result reproduces the original input patch. This is a key integrity check.\n");
+
+    if args.dry_run {
+        let _ = writeln!(
+            file,
+            "*Discrepancy check was skipped because `--dry-run` was active.*"
+        );
+        return;
+    }
+
+    let Some(batch_result) = batch_result else {
+        let _ = writeln!(
+            file,
+            "*Discrepancy check was skipped as patch application did not complete.*"
+        );
+        return;
+    };
+
+    for (original_patch, (path, result)) in all_patches.iter().zip(batch_result.results.iter()) {
+        let _ = writeln!(file, "### File: `{}`", path.display());
+        match result {
+            Ok(_) => {
+                let Some(old_content) = original_contents.get(path) else {
+                    let _ = writeln!(file, "\n- **Result:** <span style='color:orange;'>SKIPPED</span> (Could not read original file content for comparison).");
+                    continue;
+                };
+
+                let new_content_res = fs::read_to_string(args.target_dir.join(path));
+                let Ok(new_content) = new_content_res else {
+                    let _ = writeln!(file, "\n- **Result:** <span style='color:orange;'>SKIPPED</span> (Could not read new file content after patching).");
+                    continue;
+                };
+
+                // Re-create a patch from the before/after state.
+                let recreated_patch =
+                    Patch::from_texts(path, old_content, &new_content, 3).unwrap();
+
+                if compare_patches(original_patch, &recreated_patch) {
+                    let _ = writeln!(file, "\n- **Result:** <span style='color:green;'>SUCCESS</span>\n- **Details:** The regenerated patch is identical to the input patch.");
+                } else {
+                    let _ = writeln!(file, "\n- **Result:** <span style='color:red;'>FAILURE</span>\n- **Details:** The regenerated patch does not match the input patch. This may indicate an issue with how a fuzzy match was applied.");
+                    let _ = writeln!(file, "\nClick to see original vs. regenerated patch\n");
+                    let _ = writeln!(file, "**Original Input Patch:**");
+                    let _ = writeln!(
+                        file,
+                        "```diff\n{}```",
+                        format_patch_for_report(original_patch)
+                    );
+                    let _ = writeln!(file, "\n**Regenerated Patch (from file changes):**");
+                    let _ = writeln!(
+                        file,
+                        "```diff\n{}```",
+                        format_patch_for_report(&recreated_patch)
+                    );
+                }
+            }
+            Err(e) => {
+                let _ = writeln!(file, "\n- **Result:** <span style='color:orange;'>SKIPPED</span> (Patch application failed with a hard error: {}).", e);
+            }
+        }
+    }
+}
+
+/// Formats a `Patch` struct back into a human-readable diff string for reporting.
+fn format_patch_for_report(patch: &Patch) -> String {
+    let mut output = String::new();
+    let _ = writeln!(output, "--- a/{}", patch.file_path.display());
+    let _ = writeln!(output, "+++ b/{}", patch.file_path.display());
+    for hunk in &patch.hunks {
+        let old_len = hunk.lines.iter().filter(|l| !l.starts_with('+')).count();
+        let new_len = hunk.lines.iter().filter(|l| !l.starts_with('-')).count();
+        let old_start = hunk.old_start_line.unwrap_or(1);
+        let new_start = hunk.new_start_line.unwrap_or(1);
+        let _ = writeln!(
+            output,
+            "@@ -{},{} +{},{} @@",
+            old_start, old_len, new_start, new_len
+        );
+        for line in &hunk.lines {
+            let _ = writeln!(output, "{}", line);
+        }
+    }
+    if !patch.ends_with_newline {
+        let _ = write!(output, "\\ No newline at end of file");
+    }
+    output
 }
 
 /// Replaces sensitive paths in command line arguments with placeholders.
@@ -365,4 +546,24 @@ fn anonymize_command_args(args: &Args) -> String {
         }
     }
     anonymized_args.join(" ")
+}
+
+/// Compares two patches for semantic equivalence, focusing on the actual line changes.
+/// It ignores `old_start_line` and `new_start_line` because these can differ legitimately
+/// after a fuzzy match finds a new location.
+fn compare_patches(original: &Patch, recreated: &Patch) -> bool {
+    if original.hunks.len() != recreated.hunks.len() {
+        return false;
+    }
+    for (h1, h2) in original.hunks.iter().zip(recreated.hunks.iter()) {
+        // Compare the actual changes, ignoring context lines.
+        if h1.added_lines() != h2.added_lines() {
+            return false;
+        }
+        if h1.removed_lines() != h2.removed_lines() {
+            return false;
+        }
+    }
+    // Also check newline status, which is part of the patch's semantics.
+    original.ends_with_newline == recreated.ends_with_newline
 }
