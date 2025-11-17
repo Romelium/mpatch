@@ -301,6 +301,31 @@ pub enum StrictApplyError {
     },
 }
 
+/// Represents errors that can occur during the high-level `patch_content_str` operation.
+#[derive(Error, Debug)]
+#[non_exhaustive]
+pub enum OneShotError {
+    /// An error occurred while parsing the diff content.
+    #[error("Failed to parse diff content")]
+    Parse(#[from] ParseError),
+
+    /// An error occurred while applying the patch. This includes partial applications.
+    #[error("Failed to apply patch")]
+    Apply(#[from] StrictApplyError),
+
+    /// The provided diff content did not contain any valid ` ```diff` blocks.
+    #[error("No patches were found in the provided diff content")]
+    NoPatchesFound,
+
+    /// The provided diff content contained patches for more than one file, which is not
+    /// supported by this simplified function. Use `parse_diffs` and `apply_patches_to_dir`
+    /// for multi-file operations.
+    #[error(
+        "Found patches for multiple files ({0} files), but this function only supports single-file diffs"
+    )]
+    MultiplePatchesFound(usize),
+}
+
 /// The reason a hunk failed to apply.
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum HunkApplyError {
@@ -1668,7 +1693,8 @@ pub fn try_apply_patch_to_file(
     patch: &Patch,
     target_dir: &Path,
     options: ApplyOptions,
-) -> Result<PatchResult, StrictApplyError> { // This line was already correct
+) -> Result<PatchResult, StrictApplyError> {
+    // This line was already correct
     let result = apply_patch_to_file(patch, target_dir, options)?;
     if result.report.all_applied_cleanly() {
         Ok(result)
@@ -1913,7 +1939,8 @@ pub fn try_apply_patch_to_lines<T: AsRef<str>>(
     patch: &Patch,
     original_lines: Option<&[T]>,
     options: &ApplyOptions,
-) -> Result<InMemoryResult, StrictApplyError> { // This line was already correct
+) -> Result<InMemoryResult, StrictApplyError> {
+    // This line was already correct
     let result = apply_patch_to_lines(patch, original_lines, options);
     if result.report.all_applied_cleanly() {
         Ok(result)
@@ -2048,7 +2075,8 @@ pub fn try_apply_patch_to_content(
     patch: &Patch,
     original_content: Option<&str>,
     options: &ApplyOptions,
-) -> Result<InMemoryResult, StrictApplyError> { // This line was already correct
+) -> Result<InMemoryResult, StrictApplyError> {
+    // This line was already correct
     let result = apply_patch_to_content(patch, original_content, options);
     if result.report.all_applied_cleanly() {
         Ok(result)
@@ -2057,6 +2085,81 @@ pub fn try_apply_patch_to_content(
             report: result.report,
         })
     }
+}
+
+/// A high-level, one-shot function to parse a diff and apply it to a string.
+///
+/// This function is the most convenient entry point for the common workflow of
+/// taking a diff (e.g., from a markdown file) and applying it to some existing
+/// content in memory. It combines parsing and strict application into a single call.
+///
+/// It performs the following steps:
+/// 1.  Parses the `diff_content` using [`parse_diffs`].
+/// 2.  Ensures that exactly one `Patch` is found. If zero or more than one are
+///     found, it returns an error.
+/// 3.  Applies the single patch to `original_content` using the strict logic of
+///     [`try_apply_patch_to_content`].
+///
+/// # Arguments
+///
+/// * `diff_content` - A string slice containing the diff, typically inside a
+///   markdown code block (e.g., ` ```diff ... ``` `).
+/// * `original_content` - An `Option<&str>` representing the content to be patched.
+///   Use `Some(content)` for an existing file, or `None` for a file creation patch.
+/// * `options` - Configuration for the patch operation, such as `fuzz_factor`.
+///
+/// # Returns
+///
+/// - `Ok(String)`: The new, patched content if the patch applied cleanly.
+/// - `Err(OneShotError)`: If any step fails, including parsing errors, finding
+///   the wrong number of patches, or if the patch does not apply cleanly (i.e.,
+///   any hunk fails).
+///
+/// # Example
+///
+/// ````rust
+/// # use mpatch::{patch_content_str, ApplyOptions, OneShotError};
+/// # fn main() -> Result<(), OneShotError> {
+/// // 1. Define the original content and the diff.
+/// let original_content = "fn main() {\n    println!(\"Hello, world!\");\n}\n";
+/// let diff_content = r#"
+/// ```diff
+/// --- a/src/main.rs
+/// +++ b/src/main.rs
+/// @@ -1,3 +1,3 @@
+///  fn main() {
+/// -    println!("Hello, world!");
+/// +    println!("Hello, mpatch!");
+///  }
+/// ```
+/// "#;
+///
+/// // 2. Call the one-shot function.
+/// let options = ApplyOptions::default();
+/// let new_content = patch_content_str(diff_content, Some(original_content), &options)?;
+///
+/// // 3. Verify the new content.
+/// let expected_content = "fn main() {\n    println!(\"Hello, mpatch!\");\n}\n";
+/// assert_eq!(new_content, expected_content);
+///
+/// Ok(())
+/// # }
+/// ````
+pub fn patch_content_str(
+    diff_content: &str,
+    original_content: Option<&str>,
+    options: &ApplyOptions,
+) -> Result<String, OneShotError> {
+    let mut patches = parse_diffs(diff_content)?;
+    if patches.is_empty() {
+        return Err(OneShotError::NoPatchesFound);
+    }
+    if patches.len() > 1 {
+        return Err(OneShotError::MultiplePatchesFound(patches.len()));
+    }
+    let patch = patches.remove(0);
+    let result = try_apply_patch_to_content(&patch, original_content, options)?;
+    Ok(result.new_content)
 }
 
 /// Applies a single hunk to a mutable vector of lines in-place.

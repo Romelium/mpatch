@@ -1,10 +1,10 @@
 use indoc::indoc;
 use mpatch::{
-    apply_hunk_to_lines, try_apply_patch_to_content, apply_patch_to_file,
-    try_apply_patch_to_file, apply_patch_to_lines, try_apply_patch_to_lines, StrictApplyError,
-    apply_patches_to_dir, find_hunk_location, find_hunk_location_in_lines, parse_diffs, parse_patches,
-    parse_patches_from_lines, ApplyOptions, DefaultHunkFinder, HunkApplyError, HunkApplyStatus,
-    HunkFinder, HunkLocation, MatchType, ParseError, Patch, PatchError,
+    apply_hunk_to_lines, apply_patch_to_file, apply_patch_to_lines, apply_patches_to_dir,
+    find_hunk_location, find_hunk_location_in_lines, parse_diffs, parse_patches,
+    parse_patches_from_lines, try_apply_patch_to_content, try_apply_patch_to_file,
+    try_apply_patch_to_lines, ApplyOptions, DefaultHunkFinder, HunkApplyError, HunkApplyStatus,
+    HunkFinder, HunkLocation, MatchType, ParseError, Patch, PatchError, StrictApplyError,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -3083,10 +3083,122 @@ fn test_strict_apply_variants() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("file.txt");
     fs::write(&file_path, original_content).unwrap();
-    let failure_result_file =
-        try_apply_patch_to_file(failing_patch, dir.path(), failing_options);
+    let failure_result_file = try_apply_patch_to_file(failing_patch, dir.path(), failing_options);
     assert!(matches!(
         failure_result_file,
         Err(StrictApplyError::PartialApply { .. })
     ));
+}
+
+#[cfg(test)]
+mod patch_content_str_tests {
+    use super::*;
+    use indoc::indoc;
+    use mpatch::{patch_content_str, OneShotError, StrictApplyError};
+
+    const ORIGINAL: &str = "line 1\nline 2\nline 3\n";
+    const SUCCESS_DIFF: &str = indoc! {r#"
+        ```diff
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1,3 +1,3 @@
+         line 1
+        -line 2
+        +line two
+         line 3
+        ```
+    "#};
+    const EXPECTED: &str = "line 1\nline two\nline 3\n";
+
+    #[test]
+    fn test_success_case() {
+        let options = ApplyOptions::default();
+        let new_content = patch_content_str(SUCCESS_DIFF, Some(ORIGINAL), &options).unwrap();
+        assert_eq!(new_content, EXPECTED);
+    }
+
+    #[test]
+    fn test_file_creation_success() {
+        let creation_diff = indoc! {r#"
+            ```diff
+            --- a/new.txt
+            +++ b/new.txt
+            @@ -0,0 +1,2 @@
+            +Hello
+            +World
+            ```
+        "#};
+        let options = ApplyOptions::default();
+        let new_content = patch_content_str(creation_diff, None, &options).unwrap();
+        assert_eq!(new_content, "Hello\nWorld\n");
+    }
+
+    #[test]
+    fn test_err_no_patches_found() {
+        let diff = "Just some text, no diff block.";
+        let options = ApplyOptions::default();
+        let result = patch_content_str(diff, Some(ORIGINAL), &options);
+        assert!(matches!(result, Err(OneShotError::NoPatchesFound)));
+    }
+
+    #[test]
+    fn test_err_multiple_patches_found() {
+        let diff = indoc! {r#"
+            ```diff
+            --- a/file1.txt
+            +++ b/file1.txt
+            @@ -1 +1 @@
+            -a
+            +b
+            --- a/file2.txt
+            +++ b/file2.txt
+            @@ -1 +1 @@
+            -c
+            +d
+            ```
+        "#};
+        let options = ApplyOptions::default();
+        let result = patch_content_str(diff, Some(ORIGINAL), &options);
+        assert!(matches!(result, Err(OneShotError::MultiplePatchesFound(2))));
+    }
+
+    #[test]
+    fn test_err_parse_error() {
+        let diff = indoc! {r#"
+            ```diff
+            @@ -1 +1 @@
+            -a
+            +b
+            ```
+        "#}; // Missing --- header
+        let options = ApplyOptions::default();
+        let result = patch_content_str(diff, Some(ORIGINAL), &options);
+        assert!(matches!(result, Err(OneShotError::Parse(_))));
+    }
+
+    #[test]
+    fn test_err_apply_error() {
+        let diff = indoc! {r#"
+            ```diff
+            --- a/file.txt
+            +++ b/file.txt
+            @@ -1,3 +1,3 @@
+             line 1
+            -WRONG CONTEXT
+            +line two
+             line 3
+            ```
+        "#};
+        let options = ApplyOptions {
+            fuzz_factor: 0.0,
+            ..Default::default()
+        };
+        let result = patch_content_str(diff, Some(ORIGINAL), &options);
+        assert!(matches!(result, Err(OneShotError::Apply(_))));
+        if let Err(OneShotError::Apply(StrictApplyError::PartialApply { report })) = result {
+            assert!(!report.all_applied_cleanly());
+        } else {
+            panic!("Expected a PartialApply error");
+        }
+    }
 }

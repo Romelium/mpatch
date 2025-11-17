@@ -53,7 +53,7 @@ cargo add mpatch
 Here's a basic example of how to parse a diff and apply it to a string in memory:
 
 ````rust
-use mpatch::{parse_diffs, apply_patch_to_content, ApplyOptions};
+use mpatch::{patch_content_str, ApplyOptions};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Define the original content and the diff.
@@ -71,20 +71,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ```
     "#;
 
-    // 2. Parse the diff content to get a list of patches.
-    let patches = parse_diffs(diff_content)?;
-    let patch = &patches[0];
-
-    // 3. Apply the patch to the content in memory.
+    // 2. Call the one-shot function to parse and apply the patch.
     let options = ApplyOptions::default();
-    let result = apply_patch_to_content(patch, Some(original_content), &options);
+    let new_content = patch_content_str(diff_content, Some(original_content), &options)?;
 
-    // 4. The patch should apply cleanly.
-    assert!(result.report.all_applied_cleanly());
-
-    // 5. Verify the new content.
+    // 3. Verify the new content.
     let expected_content = "fn main() {\n    println!(\"Hello, mpatch!\");\n}\n";
-    assert_eq!(result.new_content, expected_content);
+    assert_eq!(new_content, expected_content);
 
     Ok(())
 }
