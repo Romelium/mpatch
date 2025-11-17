@@ -2320,7 +2320,11 @@ impl<'a> DefaultHunkFinder<'a> {
                         .collect();
                     trace!(
                         "        - Index {}, Len {}: Score {:.3} (Ratio {:.3}) | Content: {:?}",
-                        idx, len, score, ratio, window_content
+                        idx,
+                        len,
+                        score,
+                        ratio,
+                        window_content
                     );
                 }
             }
