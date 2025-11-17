@@ -1,7 +1,8 @@
 use indoc::indoc;
 use mpatch::{
-    apply_hunk_to_lines, apply_patch_to_file, apply_patch_to_lines, apply_patches_to_dir,
-    find_hunk_location, find_hunk_location_in_lines, parse_diffs, parse_patches,
+    apply_hunk_to_lines, try_apply_patch_to_content, apply_patch_to_file,
+    try_apply_patch_to_file, apply_patch_to_lines, try_apply_patch_to_lines, StrictApplyError,
+    apply_patches_to_dir, find_hunk_location, find_hunk_location_in_lines, parse_diffs, parse_patches,
     parse_patches_from_lines, ApplyOptions, DefaultHunkFinder, HunkApplyError, HunkApplyStatus,
     HunkFinder, HunkLocation, MatchType, ParseError, Patch, PatchError,
 };
@@ -2999,4 +3000,93 @@ mod fuzzy_finder_diagnostics {
             0.7,
         );
     }
+}
+
+#[test]
+fn test_strict_apply_variants() {
+    let original_content = "line 1\nline 2\nline 3\n\nline 5\nline 6\nline 7\n";
+    let successful_diff = indoc! {r#"
+        ```diff
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1,3 +1,3 @@
+         line 1
+        -line 2
+        +line two
+         line 3
+        ```
+    "#};
+    let partial_fail_diff = indoc! {r#"
+        ```diff
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1,3 +1,3 @@
+         line 1
+        -line 2
+        +line two
+         line 3
+        @@ -5,3 +5,3 @@
+         line 5
+        -line WRONG
+        +line six
+         line 7
+        ```
+    "#};
+
+    let successful_patch = &parse_diffs(successful_diff).unwrap()[0];
+    let failing_patch = &parse_diffs(partial_fail_diff).unwrap()[0];
+    let success_options = ApplyOptions::default();
+
+    // --- Test success cases ---
+    let success_result_content =
+        try_apply_patch_to_content(successful_patch, Some(original_content), &success_options)
+            .unwrap();
+    assert!(success_result_content.report.all_applied_cleanly());
+    assert_eq!(
+        success_result_content.new_content,
+        "line 1\nline two\nline 3\n\nline 5\nline 6\nline 7\n"
+    );
+
+    // --- Test failure cases ---
+    // Use options that will cause the hunk to fail, to test the `try_` function's error path.
+    let failing_options = ApplyOptions {
+        fuzz_factor: 0.0,
+        ..Default::default()
+    };
+
+    // Test try_apply_patch_to_content
+    let failure_result_content =
+        try_apply_patch_to_content(failing_patch, Some(original_content), &failing_options);
+
+    assert!(failure_result_content.is_err());
+    if let Err(StrictApplyError::PartialApply { report }) = failure_result_content {
+        assert!(!report.all_applied_cleanly());
+        assert_eq!(report.failures().len(), 1);
+        assert_eq!(report.failures()[0].hunk_index, 2);
+    } else {
+        panic!(
+            "Expected PartialApply error, got {:?}",
+            failure_result_content
+        );
+    }
+
+    // Test try_apply_patch_to_lines
+    let original_lines: Vec<_> = original_content.lines().collect();
+    let failure_result_lines =
+        try_apply_patch_to_lines(failing_patch, Some(&original_lines), &failing_options);
+    assert!(matches!(
+        failure_result_lines,
+        Err(StrictApplyError::PartialApply { .. })
+    ));
+
+    // Test try_apply_patch_to_file
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("file.txt");
+    fs::write(&file_path, original_content).unwrap();
+    let failure_result_file =
+        try_apply_patch_to_file(failing_patch, dir.path(), failing_options);
+    assert!(matches!(
+        failure_result_file,
+        Err(StrictApplyError::PartialApply { .. })
+    ));
 }

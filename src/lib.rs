@@ -281,6 +281,26 @@ pub enum PatchError {
     },
 }
 
+/// Represents errors that can occur during "strict" apply operations.
+///
+/// This enum is returned by functions like [`try_apply_patch_to_file`], which
+/// treat partial applications as an error.
+#[derive(Error, Debug)]
+#[non_exhaustive]
+pub enum StrictApplyError {
+    /// A hard error occurred during the patch operation (e.g., I/O error,
+    /// file not found).
+    #[error(transparent)]
+    Patch(#[from] PatchError),
+
+    /// The patch was only partially applied, with some hunks failing.
+    #[error("Patch applied partially. See report for details.")]
+    PartialApply {
+        /// The detailed report of the operation, including which hunks succeeded/failed.
+        report: ApplyResult,
+    },
+}
+
 /// The reason a hunk failed to apply.
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum HunkApplyError {
@@ -1574,6 +1594,91 @@ pub fn apply_patch_to_file(
     })
 }
 
+/// A strict variant of [`apply_patch_to_file`] that treats partial applications as an error.
+///
+/// This function provides a simpler error handling model for workflows where any
+/// failed hunk should be considered a failure for the entire operation.
+///
+/// # Returns
+///
+/// - `Ok(PatchResult)`: If all hunks were applied successfully.
+/// - `Err(PatchError::PartialApply)`: If some hunks failed to apply. The file may
+///   be in a partially patched state (unless in dry-run mode). The `report` within
+///   the error contains the detailed results.
+/// - `Err(PatchError)`: For "hard" errors like I/O problems or a missing target file.
+///
+/// # Example
+///
+/// ````rust
+/// use mpatch::{parse_diffs, try_apply_patch_to_file, ApplyOptions, StrictApplyError};
+/// use std::fs;
+/// use tempfile::tempdir;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // --- Success Case ---
+/// let dir = tempdir()?;
+/// let file_path = dir.path().join("hello.txt");
+/// fs::write(&file_path, "Hello, world!\n")?;
+///
+/// let success_diff = r#"
+/// ```diff
+/// --- a/hello.txt
+/// +++ b/hello.txt
+/// @@ -1 +1 @@
+/// -Hello, world!
+/// +Hello, mpatch!
+/// ```
+/// "#;
+/// let patches = parse_diffs(success_diff)?;
+/// let patch = &patches[0];
+///
+/// let options = ApplyOptions::default();
+/// let result = try_apply_patch_to_file(patch, dir.path(), options)?;
+/// assert!(result.report.all_applied_cleanly());
+///
+/// // --- Failure Case (Partial Apply) ---
+/// let dir_fail = tempdir()?;
+/// let file_path_fail = dir_fail.path().join("partial.txt");
+/// fs::write(&file_path_fail, "line 1\nline 2\n")?;
+///
+/// let failing_diff = r#"
+/// ```diff
+/// --- a/partial.txt
+/// +++ b/partial.txt
+/// @@ -1,2 +1,2 @@
+///  line 1
+/// -WRONG CONTEXT
+/// +line two
+/// ```
+/// "#;
+/// let patches_fail = parse_diffs(failing_diff)?;
+/// let patch_fail = &patches_fail[0];
+///
+/// let result = try_apply_patch_to_file(patch_fail, dir_fail.path(), options);
+/// assert!(matches!(result, Err(StrictApplyError::PartialApply { .. })));
+///
+/// if let Err(StrictApplyError::PartialApply { report }) = result {
+///     assert!(!report.all_applied_cleanly());
+///     assert_eq!(report.failures().len(), 1);
+/// }
+/// # Ok(())
+/// # }
+/// ````
+pub fn try_apply_patch_to_file(
+    patch: &Patch,
+    target_dir: &Path,
+    options: ApplyOptions,
+) -> Result<PatchResult, StrictApplyError> { // This line was already correct
+    let result = apply_patch_to_file(patch, target_dir, options)?;
+    if result.report.all_applied_cleanly() {
+        Ok(result)
+    } else {
+        Err(StrictApplyError::PartialApply {
+            report: result.report,
+        })
+    }
+}
+
 /// An iterator that applies hunks from a patch one by one.
 ///
 /// This struct provides fine-grained control over the patch application process.
@@ -1747,6 +1852,78 @@ pub fn apply_patch_to_lines<T: AsRef<str>>(
     }
 }
 
+/// A strict variant of [`apply_patch_to_lines`] that treats partial applications as an error.
+///
+/// This function provides a simpler error handling model for workflows where any
+/// failed hunk should be considered a failure for the entire operation.
+///
+/// # Returns
+///
+/// - `Ok(InMemoryResult)`: If all hunks were applied successfully.
+/// - `Err(PatchError::PartialApply)`: If some hunks failed to apply. The returned
+///   `report` within the error contains the detailed results.
+///
+/// # Example
+///
+/// ````rust
+/// use mpatch::{parse_diffs, try_apply_patch_to_lines, ApplyOptions, StrictApplyError};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let original_lines = vec!["line 1", "line 2"];
+///
+/// // --- Success Case ---
+/// let success_diff = r#"
+/// ```diff
+/// --- a/file.txt
+/// +++ b/file.txt
+/// @@ -1,2 +1,2 @@
+///  line 1
+/// -line 2
+/// +line two
+/// ```
+/// "#;
+/// let patch = &parse_diffs(success_diff)?[0];
+/// let options = ApplyOptions::default();
+/// let result = try_apply_patch_to_lines(patch, Some(&original_lines), &options)?;
+/// assert!(result.report.all_applied_cleanly());
+/// assert_eq!(result.new_content, "line 1\nline two\n");
+///
+/// // --- Failure Case ---
+/// let failing_diff = r#"
+/// ```diff
+/// --- a/file.txt
+/// +++ b/file.txt
+/// @@ -1,2 +1,2 @@
+///  line 1
+/// -WRONG CONTEXT
+/// +line two
+/// ```
+/// "#;
+/// let failing_patch = &parse_diffs(failing_diff)?[0];
+/// let result = try_apply_patch_to_lines(failing_patch, Some(&original_lines), &options);
+///
+/// assert!(matches!(result, Err(StrictApplyError::PartialApply { .. })));
+/// if let Err(StrictApplyError::PartialApply { report }) = result {
+///     assert!(!report.all_applied_cleanly());
+/// }
+/// # Ok(())
+/// # }
+/// ````
+pub fn try_apply_patch_to_lines<T: AsRef<str>>(
+    patch: &Patch,
+    original_lines: Option<&[T]>,
+    options: &ApplyOptions,
+) -> Result<InMemoryResult, StrictApplyError> { // This line was already correct
+    let result = apply_patch_to_lines(patch, original_lines, options);
+    if result.report.all_applied_cleanly() {
+        Ok(result)
+    } else {
+        Err(StrictApplyError::PartialApply {
+            report: result.report,
+        })
+    }
+}
+
 /// Applies the logic of a patch to a string content.
 ///
 /// This is a pure function that takes the patch definition and the original content
@@ -1808,6 +1985,78 @@ pub fn apply_patch_to_content(
     let original_lines: Option<Vec<String>> =
         original_content.map(|c| c.lines().map(String::from).collect());
     apply_patch_to_lines(patch, original_lines.as_deref(), options)
+}
+
+/// A strict variant of [`apply_patch_to_content`] that treats partial applications as an error.
+///
+/// This function provides a simpler error handling model for workflows where any
+/// failed hunk should be considered a failure for the entire operation.
+///
+/// # Returns
+///
+/// - `Ok(InMemoryResult)`: If all hunks were applied successfully.
+/// - `Err(PatchError::PartialApply)`: If some hunks failed to apply. The returned
+///   `report` within the error contains the detailed results.
+///
+/// # Example
+///
+/// ````rust
+/// use mpatch::{parse_diffs, try_apply_patch_to_content, ApplyOptions, StrictApplyError};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let original_content = "line 1\nline 2\n";
+///
+/// // --- Success Case ---
+/// let success_diff = r#"
+/// ```diff
+/// --- a/file.txt
+/// +++ b/file.txt
+/// @@ -1,2 +1,2 @@
+///  line 1
+/// -line 2
+/// +line two
+/// ```
+/// "#;
+/// let patch = &parse_diffs(success_diff)?[0];
+/// let options = ApplyOptions::default();
+/// let result = try_apply_patch_to_content(patch, Some(original_content), &options)?;
+/// assert!(result.report.all_applied_cleanly());
+/// assert_eq!(result.new_content, "line 1\nline two\n");
+///
+/// // --- Failure Case ---
+/// let failing_diff = r#"
+/// ```diff
+/// --- a/file.txt
+/// +++ b/file.txt
+/// @@ -1,2 +1,2 @@
+///  line 1
+/// -WRONG CONTEXT
+/// +line two
+/// ```
+/// "#;
+/// let failing_patch = &parse_diffs(failing_diff)?[0];
+/// let result = try_apply_patch_to_content(failing_patch, Some(original_content), &options);
+///
+/// assert!(matches!(result, Err(StrictApplyError::PartialApply { .. })));
+/// if let Err(StrictApplyError::PartialApply { report }) = result {
+///     assert!(!report.all_applied_cleanly());
+/// }
+/// # Ok(())
+/// # }
+/// ````
+pub fn try_apply_patch_to_content(
+    patch: &Patch,
+    original_content: Option<&str>,
+    options: &ApplyOptions,
+) -> Result<InMemoryResult, StrictApplyError> { // This line was already correct
+    let result = apply_patch_to_content(patch, original_content, options);
+    if result.report.all_applied_cleanly() {
+        Ok(result)
+    } else {
+        Err(StrictApplyError::PartialApply {
+            report: result.report,
+        })
+    }
 }
 
 /// Applies a single hunk to a mutable vector of lines in-place.
