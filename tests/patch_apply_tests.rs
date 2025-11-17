@@ -1,9 +1,9 @@
 use indoc::indoc;
 use mpatch::{
     apply_hunk_to_lines, apply_patch_to_file, apply_patch_to_lines, apply_patches_to_dir,
-    find_hunk_location, find_hunk_location_in_lines, parse_diffs, ApplyOptions, DefaultHunkFinder,
-    HunkApplyError, HunkApplyStatus, HunkFinder, HunkLocation, MatchType, ParseError, Patch,
-    PatchError,
+    find_hunk_location, find_hunk_location_in_lines, parse_diffs, parse_patches,
+    parse_patches_from_lines, ApplyOptions, DefaultHunkFinder, HunkApplyError, HunkApplyStatus,
+    HunkFinder, HunkLocation, MatchType, ParseError, Patch, PatchError,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -309,6 +309,199 @@ fn test_parse_error_on_missing_file_header() {
     assert!(matches!(
         result,
         Err(ParseError::MissingFileHeader { line: 2 })
+    ));
+}
+
+#[test]
+fn test_parse_patches_raw_diff() {
+    let raw_diff = indoc! {r#"
+        --- a/file1.txt
+        +++ b/file1.txt
+        @@ -1 +1 @@
+        -foo
+        +bar
+    "#};
+    let patches = parse_patches(raw_diff).unwrap();
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].file_path.to_str().unwrap(), "file1.txt");
+    assert_eq!(patches[0].hunks.len(), 1);
+    assert_eq!(patches[0].hunks[0].get_replace_block(), vec!["bar"]);
+}
+
+#[test]
+fn test_parse_patches_multi_file_raw_diff() {
+    let raw_diff = indoc! {r#"
+        --- a/file1.txt
+        +++ b/file1.txt
+        @@ -1 +1 @@
+        -foo
+        +bar
+        --- a/file2.txt
+        +++ b/file2.txt
+        @@ -1 +1 @@
+        -baz
+        +qux
+    "#};
+    let patches = parse_patches(raw_diff).unwrap();
+    assert_eq!(patches.len(), 2);
+    assert_eq!(patches[0].file_path.to_str().unwrap(), "file1.txt");
+    assert_eq!(patches[1].file_path.to_str().unwrap(), "file2.txt");
+}
+
+#[test]
+fn test_parse_patches_error_on_missing_header() {
+    let raw_diff = indoc! {r#"
+        @@ -1 +1 @@
+        -foo
+        +bar
+    "#};
+    assert!(matches!(
+        parse_patches(raw_diff),
+        Err(ParseError::MissingFileHeader { line: 1 })
+    ));
+}
+
+#[test]
+fn test_parse_patches_empty_input() {
+    let patches = parse_patches("").unwrap();
+    assert!(patches.is_empty());
+}
+
+#[test]
+fn test_parse_patches_whitespace_input() {
+    let patches = parse_patches("  \n\t\n  ").unwrap();
+    assert!(patches.is_empty());
+}
+
+#[test]
+fn test_parse_patches_file_creation() {
+    let raw_diff = indoc! {r#"
+        --- /dev/null
+        +++ b/new_file.txt
+        @@ -0,0 +1,2 @@
+        +Hello
+        +World
+    "#};
+    let patches = parse_patches(raw_diff).unwrap();
+    assert_eq!(patches.len(), 1);
+    let patch = &patches[0];
+    assert_eq!(patch.file_path.to_str().unwrap(), "new_file.txt");
+    assert!(patch.is_creation());
+    assert_eq!(patch.hunks[0].get_replace_block(), vec!["Hello", "World"]);
+}
+
+#[test]
+fn test_parse_patches_file_deletion() {
+    let raw_diff = indoc! {r#"
+        --- a/old_file.txt
+        +++ b/old_file.txt
+        @@ -1,2 +0,0 @@
+        -Hello
+        -World
+    "#};
+    let patches = parse_patches(raw_diff).unwrap();
+    assert_eq!(patches.len(), 1);
+    let patch = &patches[0];
+    assert_eq!(patch.file_path.to_str().unwrap(), "old_file.txt");
+    assert!(patch.is_deletion());
+    assert_eq!(patch.hunks[0].get_match_block(), vec!["Hello", "World"]);
+    assert!(patch.hunks[0].get_replace_block().is_empty());
+}
+
+#[test]
+fn test_parse_patches_no_newline() {
+    let raw_diff = indoc! {r#"
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1 +1 @@
+        -foo
+        +bar
+        \ No newline at end of file
+    "#};
+    let patches = parse_patches(raw_diff).unwrap();
+    assert_eq!(patches.len(), 1);
+    assert!(!patches[0].ends_with_newline);
+}
+
+#[test]
+fn test_parse_patches_with_git_headers() {
+    let raw_diff = indoc! {r#"
+        diff --git a/src/main.rs b/src/main.rs
+        index 1234567..abcdefg 100644
+        --- a/src/main.rs
+        +++ b/src/main.rs
+        @@ -1 +1 @@
+        -old
+        +new
+    "#};
+    let patches = parse_patches(raw_diff).unwrap();
+    assert_eq!(patches.len(), 1);
+    let patch = &patches[0];
+    assert_eq!(patch.file_path.to_str().unwrap(), "src/main.rs");
+    assert_eq!(patch.hunks.len(), 1);
+    assert_eq!(patch.hunks[0].get_replace_block(), vec!["new"]);
+}
+
+#[test]
+fn test_parse_patches_merges_sections_for_same_file() {
+    let raw_diff = indoc! {r#"
+        --- a/same_file.txt
+        +++ b/same_file.txt
+        @@ -1 +1 @@
+        -hunk1
+        +hunk one
+        --- a/same_file.txt
+        +++ b/same_file.txt
+        @@ -10 +10 @@
+        -hunk2
+        +hunk two
+    "#};
+    let patches = parse_patches(raw_diff).unwrap();
+    assert_eq!(
+        patches.len(),
+        1,
+        "Should merge sections into a single patch"
+    );
+    let patch = &patches[0];
+    assert_eq!(patch.file_path.to_str().unwrap(), "same_file.txt");
+    assert_eq!(patch.hunks.len(), 2, "Should contain two hunks");
+    assert_eq!(patch.hunks[0].get_replace_block(), vec!["hunk one"]);
+    assert_eq!(patch.hunks[1].get_replace_block(), vec!["hunk two"]);
+}
+
+#[test]
+fn test_parse_patches_from_lines() {
+    let raw_diff_lines = vec![
+        "--- a/src/main.rs",
+        "+++ b/src/main.rs",
+        "@@ -1,3 +1,3 @@",
+        " fn main() {",
+        "-    println!(\"Hello, world!\");",
+        "+    println!(\"Hello, mpatch!\");",
+        " }",
+    ];
+
+    let patches = parse_patches_from_lines(raw_diff_lines.into_iter()).unwrap();
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].file_path.to_str(), Some("src/main.rs"));
+    assert_eq!(patches[0].hunks.len(), 1);
+    assert_eq!(
+        patches[0].hunks[0].added_lines(),
+        vec!["    println!(\"Hello, mpatch!\");"]
+    );
+}
+
+#[test]
+fn test_parse_patches_from_lines_error() {
+    let raw_diff_lines = vec![
+        "@@ -1,3 +1,3 @@",
+        "-    println!(\"Hello, world!\");",
+        "+    println!(\"Hello, mpatch!\");",
+    ];
+    let result = parse_patches_from_lines(raw_diff_lines.into_iter());
+    assert!(matches!(
+        result,
+        Err(ParseError::MissingFileHeader { line: 1 })
     ));
 }
 

@@ -69,17 +69,28 @@
 //!
 //! ### The Patching Workflow
 //!
-//! Using the `mpatch` library typically involves a two-step process:
+//! Using the `mpatch` library typically involves a two-step process: parsing and applying.
 //!
-//! 1.  **Parsing:** Use [`parse_diffs`] to read a string and extract a `Vec<Patch>`.
-//!     This function is markdown-aware, searching for code blocks annotated with `diff`
-//!     or `patch` (e.g., ` ```diff`, ` ```rust, patch`) and parsing their contents.
-//!     This step is purely in-memory.
-//! 2.  **Applying:** Use one of the `apply` functions to apply the changes.
-//!     - [`apply_patch_to_file`]: The most convenient function for CLI tools. It
-//!       handles reading the original file and writing the new content back to disk.
-//!     - [`apply_patch_to_content`]: A pure function for in-memory operations. It
-//!       takes the original content as a string and returns the new content.
+//! #### 1. Parsing
+//!
+//! First, you convert diff text into a structured `Vec<Patch>`. `mpatch` provides
+//! several functions for this, depending on your input format:
+//!
+//! - [`parse_diffs`]: The most common entry point. It scans a string (like a markdown
+//!   file's content) for code blocks annotated with `diff` or `patch` and parses them.
+//! - [`parse_patches`]: A lower-level parser that processes a raw unified diff string
+//!   directly, without needing markdown fences.
+//! - [`parse_patches_from_lines`]: The lowest-level parser. It operates on an iterator
+//!   of lines, which is useful for streaming or avoiding large string allocations.
+//!
+//! #### 2. Applying
+//!
+//! Once you have a `Patch`, you can apply it using one of the `apply` functions:
+//!
+//! - [`apply_patch_to_file`]: The most convenient function for CLI tools. It handles
+//!   reading the original file and writing the new content back to disk.
+//! - [`apply_patch_to_content`]: A pure function for in-memory operations. It takes
+//!   the original content as a string and returns the new content.
 //!
 //! ### Core Data Structures
 //!
@@ -235,9 +246,7 @@ use thiserror::Error;
 pub enum ParseError {
     /// A ` ```diff` block was found, but it was missing the `--- a/path/to/file`
     /// header required to identify the target file.
-    #[error(
-        "Diff block starting on line {line} was found without a file path header (e.g., '--- a/path/to/file')"
-    )]
+    #[error("Diff block starting on line {line} was found without a file path header (e.g., '--- a/path/to/file')")]
     MissingFileHeader {
         /// The line number where the diff block started.
         line: usize,
@@ -1009,104 +1018,140 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
     }) {
         trace!(
             "Found potential diff block start on line {}: '{}'",
-            line_index + 1,
+            line_index,
             line_text
         );
-        let diff_block_start_line = line_index + 1; // Convert 0-based index to 1-based line number
+        let diff_block_start_line = line_index + 1;
         debug!(
-            "Found a diff block starting on line {}.",
+            // 1-based line number
+            "Found a diff block starting on line {}.", // This is now correct
             diff_block_start_line
         );
 
-        // This temporary vec will hold all patch sections found in this block,
-        // even if they are for the same file. They will be merged later.
-        let mut unmerged_block_patches: Vec<Patch> = Vec::new();
+        let block_lines: Vec<_> = lines
+            .by_ref()
+            .map(|(_, line)| line)
+            .take_while(|&line| line != "```")
+            .collect();
 
-        // State variables for the parser as it moves through the diff block.
-        let mut current_file: Option<PathBuf> = None;
-        let mut current_hunks: Vec<Hunk> = Vec::new();
-        let mut current_hunk_lines: Vec<String> = Vec::new();
-        let mut current_hunk_old_start_line: Option<usize> = None;
-        let mut current_hunk_new_start_line: Option<usize> = None;
-        let mut ends_with_newline_for_section = true;
-
-        // Consume lines within the ```diff block
-        for (inner_line_index, line) in lines.by_ref() {
-            trace!(
-                "  Parsing line {}: '{}'",
-                inner_line_index + 1,
-                line.trim_end()
-            );
-            if line == "```" {
-                trace!("  Found end of diff block.");
-                break; // End of block
+        let block_patches = match parse_patches_from_lines(block_lines.into_iter()) {
+            Ok(p) => p,
+            Err(ParseError::MissingFileHeader { .. }) => {
+                // The raw parser found a hunk without a file header. For the user,
+                // the most useful error points to the start of the markdown block.
+                return Err(ParseError::MissingFileHeader {
+                    line: diff_block_start_line,
+                });
             }
+        };
+        all_patches.extend(block_patches);
+    }
 
-            if let Some(stripped_line) = line.strip_prefix("--- ") {
-                trace!("  Found file header line: '{}'", line);
-                // A `---` line always signals a new file section.
-                // Finalize the previous file's patch section if it exists.
-                if let Some(existing_file) = &current_file {
-                    if !current_hunk_lines.is_empty() {
-                        trace!(
-                            "    Finalizing previous hunk with {} lines.",
-                            current_hunk_lines.len()
-                        );
-                        current_hunks.push(Hunk {
-                            lines: std::mem::take(&mut current_hunk_lines),
-                            old_start_line: current_hunk_old_start_line,
-                            new_start_line: current_hunk_new_start_line,
-                        });
-                    }
-                    if !current_hunks.is_empty() {
-                        debug!(
-                            "  Finalizing patch section for '{}' with {} hunk(s).",
-                            existing_file.display(),
-                            current_hunks.len()
-                        );
-                        unmerged_block_patches.push(Patch {
-                            file_path: existing_file.clone(),
-                            hunks: std::mem::take(&mut current_hunks),
-                            ends_with_newline: ends_with_newline_for_section,
-                        });
-                    }
-                }
+    debug!(
+        "Finished parsing. Found {} patch(es) in total.",
+        all_patches.len()
+    );
+    Ok(all_patches)
+}
 
-                // Reset for the new file section.
-                trace!("  Resetting parser state for new file section.");
-                // `current_file` is cleared and will be set by this `---` line or a subsequent `+++` line.
-                current_file = None;
-                current_hunk_lines.clear();
-                current_hunk_old_start_line = None;
-                current_hunk_new_start_line = None;
-                ends_with_newline_for_section = true;
+/// Parses a string containing raw unified diff content into a vector of [`Patch`] objects.
+///
+/// Unlike [`parse_diffs`], this function does not look for markdown code blocks.
+/// It assumes the entire input string is valid unified diff content. This is useful
+/// when you have a raw `.diff` or `.patch` file, or the output of a `git diff` command.
+///
+/// # Arguments
+///
+/// * `content` - A string slice containing the raw unified diff to parse.
+///
+/// # Errors
+///
+/// Returns `Err(ParseError::MissingFileHeader)` if the content contains patch
+/// hunks but no `--- a/path/to/file` header.
+///
+/// # Example
+///
+/// ```rust
+/// use mpatch::parse_patches;
+///
+/// let raw_diff = r#"
+/// --- a/src/main.rs
+/// +++ b/src/main.rs
+/// @@ -1,3 +1,3 @@
+///  fn main() {
+/// -    println!("Hello, world!");
+/// +    println!("Hello, mpatch!");
+///  }
+/// "#;
+///
+/// let patches = parse_patches(raw_diff).unwrap();
+/// assert_eq!(patches.len(), 1);
+/// assert_eq!(patches[0].file_path.to_str(), Some("src/main.rs"));
+/// ```
+pub fn parse_patches(content: &str) -> Result<Vec<Patch>, ParseError> {
+    debug!("Starting to parse raw diff content.");
+    parse_patches_from_lines(content.lines())
+}
 
-                let path_part = stripped_line.trim();
-                if path_part == "/dev/null" || path_part == "a/dev/null" {
-                    trace!("    Path is /dev/null, indicating file creation.");
-                    // This is a file creation patch. The path will be in the `+++` line.
-                    // `current_file` remains `None` for now.
-                } else {
-                    // The path could be `a/path/to/file` or just `path/to/file`.
-                    let path_str = path_part.strip_prefix("a/").unwrap_or(path_part);
-                    debug!("  Starting new patch section for file: '{}'", path_str);
-                    current_file = Some(PathBuf::from(path_str.trim()));
-                }
-            } else if let Some(stripped_line) = line.strip_prefix("+++ ") {
-                trace!("  Found '+++' line: '{}'", line);
-                // If `current_file` is `None`, it means we saw `--- /dev/null` (or an unrecognised ---)
-                // and are expecting the file path from this `+++` line.
-                if current_file.is_none() {
-                    let path_part = stripped_line.trim();
-                    // The path could be `b/path/to/file` or just `path/to/file`.
-                    let path_str = path_part.strip_prefix("b/").unwrap_or(path_part);
-                    debug!("  Set file path from '+++' line: '{}'", path_str);
-                    current_file = Some(PathBuf::from(path_str.trim()));
-                }
-                // Otherwise, we already have the path from the `---` line, so we ignore this `+++` line.
-            } else if line.starts_with("@@") {
-                trace!("  Found hunk header: '{}'", line);
-                // A hunk header line signals the end of the previous hunk.
+/// Parses an iterator of lines containing raw unified diff content into a vector of [`Patch`] objects.
+///
+/// This is a lower-level, more flexible alternative to [`parse_patches`]. It is useful
+/// when you already have the diff content as a sequence of lines (e.g., from reading a
+/// file line-by-line) and want to avoid allocating the entire content as a single string.
+///
+/// It assumes the entire sequence of lines is valid unified diff content and does not
+/// look for markdown code blocks.
+///
+/// # Arguments
+///
+/// * `lines` - An iterator that yields string slices, where each slice is a line of the diff.
+///
+/// # Errors
+///
+/// Returns `Err(ParseError::MissingFileHeader)` if the content contains patch
+/// hunks but no `--- a/path/to/file` header. The `line` number in the error will
+/// correspond to the first hunk header (`@@ ... @@`) found.
+///
+/// # Example
+///
+/// ```rust
+/// use mpatch::parse_patches_from_lines;
+///
+/// let raw_diff_lines = vec![
+///     "--- a/src/main.rs",
+///     "+++ b/src/main.rs",
+///     "@@ -1,3 +1,3 @@",
+///     " fn main() {",
+///     "-    println!(\"Hello, world!\");",
+///     "+    println!(\"Hello, mpatch!\");",
+///     " }",
+/// ];
+///
+/// let patches = parse_patches_from_lines(raw_diff_lines.into_iter()).unwrap();
+/// assert_eq!(patches.len(), 1);
+/// assert_eq!(patches[0].file_path.to_str(), Some("src/main.rs"));
+/// ```
+pub fn parse_patches_from_lines<'a, I>(lines: I) -> Result<Vec<Patch>, ParseError>
+where
+    I: Iterator<Item = &'a str>,
+{
+    let mut unmerged_patches: Vec<Patch> = Vec::new();
+
+    // State variables for the parser as it moves through the diff block.
+    let mut first_hunk_header_line: Option<usize> = None;
+    let mut current_file: Option<PathBuf> = None;
+    let mut current_hunks: Vec<Hunk> = Vec::new();
+    let mut current_hunk_lines: Vec<String> = Vec::new();
+    let mut current_hunk_old_start_line: Option<usize> = None;
+    let mut current_hunk_new_start_line: Option<usize> = None;
+    let mut ends_with_newline_for_section = true;
+
+    for (line_idx, line) in lines.enumerate() {
+        if let Some(stripped_line) = line.strip_prefix("--- ") {
+            trace!("  Found file header line: '{}'", line);
+            // A `---` line always signals a new file section.
+            // Finalize the previous file's patch section if it exists.
+            if let Some(existing_file) = &current_file {
                 if !current_hunk_lines.is_empty() {
                     trace!(
                         "    Finalizing previous hunk with {} lines.",
@@ -1118,114 +1163,154 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
                         new_start_line: current_hunk_new_start_line,
                     });
                 }
-                // Parse the line number hint for the new hunk.
-                let (old, new) = parse_hunk_header(line);
-                trace!("    Parsed old_start={:?}, new_start={:?}", old, new);
-                current_hunk_old_start_line = old;
-                current_hunk_new_start_line = new;
-            } else if line.starts_with(['+', '-', ' ']) {
-                // This is a line belonging to the current hunk.
-                trace!("    Adding line to current hunk: '{}'", line.trim_end());
-                current_hunk_lines.push(line.to_string());
-            } else if line.starts_with('\\') {
-                // This special line indicates the file does not end with a newline.
-                trace!("  Found '\\ No newline at end of file' marker.");
-                ends_with_newline_for_section = false;
-            } else if current_hunk_old_start_line.is_some() {
-                // If we are inside a hunk (we've seen `@@`), treat any unrecognized
-                // line as part of the hunk body. The unified diff format requires a
-                // prefix, but some LLM outputs or manual edits might produce lines
-                // (like empty lines) without one. Assume it's a context line.
-                trace!(
-                    "    Adding unrecognized line as context to current hunk: '{}'",
-                    line.trim_end()
-                );
-                current_hunk_lines.push(format!(" {}", line));
-            } else {
-                // Outside of a hunk, ignore lines that aren't headers.
-                trace!("  Ignoring unrecognized line outside of a hunk: '{}'", line);
+                if !current_hunks.is_empty() {
+                    debug!(
+                        "  Finalizing patch section for '{}' with {} hunk(s).",
+                        existing_file.display(),
+                        current_hunks.len()
+                    );
+                    unmerged_patches.push(Patch {
+                        file_path: existing_file.clone(),
+                        hunks: std::mem::take(&mut current_hunks),
+                        ends_with_newline: ends_with_newline_for_section,
+                    });
+                }
             }
-        }
 
-        // Finalize the last hunk and patch section for the block after the loop ends.
-        debug!("  End of diff block. Finalizing last hunk and patch section.");
-        if !current_hunk_lines.is_empty() {
-            trace!(
-                "    Finalizing final hunk with {} lines.",
-                current_hunk_lines.len()
-            );
-            current_hunks.push(Hunk {
-                lines: current_hunk_lines,
-                old_start_line: current_hunk_old_start_line,
-                new_start_line: current_hunk_new_start_line,
-            });
-        }
+            // Reset for the new file section.
+            trace!("  Resetting parser state for new file section.");
+            current_file = None;
+            current_hunk_lines.clear();
+            current_hunk_old_start_line = None;
+            current_hunk_new_start_line = None;
+            ends_with_newline_for_section = true;
 
-        if let Some(file_path) = current_file {
-            if !current_hunks.is_empty() {
-                debug!(
-                    "  Finalizing patch section for '{}' with {} hunk(s).",
-                    file_path.display(),
-                    current_hunks.len()
+            let path_part = stripped_line.trim();
+            if path_part == "/dev/null" || path_part == "a/dev/null" {
+                trace!("    Path is /dev/null, indicating file creation.");
+                // File creation, path will be in `+++` line.
+            } else {
+                let path_str = path_part.strip_prefix("a/").unwrap_or(path_part);
+                debug!("  Starting new patch section for file: '{}'", path_str);
+                current_file = Some(PathBuf::from(path_str.trim()));
+            }
+        } else if let Some(stripped_line) = line.strip_prefix("+++ ") {
+            trace!("  Found '+++' line: '{}'", line);
+            if current_file.is_none() {
+                let path_part = stripped_line.trim();
+                let path_str = path_part.strip_prefix("b/").unwrap_or(path_part);
+                debug!("  Set file path from '+++' line: '{}'", path_str);
+                current_file = Some(PathBuf::from(path_str.trim()));
+            }
+        } else if line.starts_with("@@") {
+            trace!("  Found hunk header: '{}'", line);
+            if !current_hunk_lines.is_empty() {
+                trace!(
+                    "    Finalizing previous hunk with {} lines.",
+                    current_hunk_lines.len()
                 );
-                unmerged_block_patches.push(Patch {
-                    file_path,
-                    hunks: current_hunks,
-                    ends_with_newline: ends_with_newline_for_section,
+                current_hunks.push(Hunk {
+                    lines: std::mem::take(&mut current_hunk_lines),
+                    old_start_line: current_hunk_old_start_line,
+                    new_start_line: current_hunk_new_start_line,
                 });
             }
-        } else if !current_hunks.is_empty() {
-            // If we have hunks but never determined a file path, it's an error.
-            warn!(
-                "Found hunks in diff block starting at line {} but no file path header ('--- a/path').",
-                diff_block_start_line
+            if first_hunk_header_line.is_none() {
+                first_hunk_header_line = Some(line_idx + 1);
+            }
+            let (old, new) = parse_hunk_header(line);
+            trace!("    Parsed old_start={:?}, new_start={:?}", old, new);
+            current_hunk_old_start_line = old;
+            current_hunk_new_start_line = new;
+        } else if line.starts_with(['+', '-', ' ']) {
+            // Only treat this as a hunk line if we're actually inside a hunk.
+            if current_hunk_old_start_line.is_some() {
+                trace!("    Adding line to current hunk: '{}'", line.trim_end());
+                current_hunk_lines.push(line.to_string());
+            }
+        } else if line.starts_with('\\') {
+            // This line only makes sense inside a hunk.
+            if current_hunk_old_start_line.is_some() {
+                trace!("  Found '\\ No newline at end of file' marker.");
+                ends_with_newline_for_section = false;
+            }
+        } else if current_hunk_old_start_line.is_some() {
+            trace!(
+                "    Adding unrecognized line as context to current hunk: '{}'",
+                line.trim_end()
             );
-            return Err(ParseError::MissingFileHeader {
-                line: diff_block_start_line,
+            current_hunk_lines.push(format!(" {}", line));
+        }
+    }
+
+    // Finalize the last hunk and patch section after the loop.
+    debug!("  End of diff block. Finalizing last hunk and patch section.");
+    if !current_hunk_lines.is_empty() {
+        trace!(
+            "    Finalizing final hunk with {} lines.",
+            current_hunk_lines.len()
+        );
+        current_hunks.push(Hunk {
+            lines: current_hunk_lines,
+            old_start_line: current_hunk_old_start_line,
+            new_start_line: current_hunk_new_start_line,
+        });
+    }
+
+    if let Some(file_path) = current_file {
+        if !current_hunks.is_empty() {
+            debug!(
+                "  Finalizing patch section for '{}' with {} hunk(s).",
+                file_path.display(),
+                current_hunks.len()
+            );
+            unmerged_patches.push(Patch {
+                file_path,
+                hunks: current_hunks,
+                ends_with_newline: ends_with_newline_for_section,
             });
         }
+    } else if !current_hunks.is_empty() {
+        let error_line = first_hunk_header_line.unwrap_or(1);
+        warn!(
+            "Found hunks starting near line {} but no file path header ('--- a/path').",
+            error_line
+        );
+        return Err(ParseError::MissingFileHeader { line: error_line });
+    }
 
-        // Merge the collected patch sections from this block. This handles cases
-        // where multiple `--- a/file` sections for the same file exist within
-        // one ```diff block.
-        if !unmerged_block_patches.is_empty() {
-            debug!(
-                "Merging {} patch section(s) found in the block.",
-                unmerged_block_patches.len()
-            );
-        }
-        let mut merged_block_patches: Vec<Patch> = Vec::new();
-        for patch_section in unmerged_block_patches {
-            if let Some(existing_patch) = merged_block_patches
-                .iter_mut()
-                .find(|p| p.file_path == patch_section.file_path)
-            {
-                // If a patch for this file already exists, just add the new hunks to it.
-                debug!(
-                    "  Merging {} hunk(s) for '{}' into existing patch.",
-                    patch_section.hunks.len(),
-                    patch_section.file_path.display()
-                );
-                existing_patch.hunks.extend(patch_section.hunks);
-                // The 'ends_with_newline' from the *last* section for a file wins.
-                existing_patch.ends_with_newline = patch_section.ends_with_newline;
-            } else {
-                // Otherwise, add it as a new patch.
-                debug!(
-                    "  Adding new patch for '{}'.",
-                    patch_section.file_path.display()
-                );
-                merged_block_patches.push(patch_section);
-            }
-        }
-        all_patches.extend(merged_block_patches);
+    // Merge patch sections for the same file.
+    if unmerged_patches.is_empty() {
+        return Ok(vec![]);
     }
 
     debug!(
-        "Finished parsing. Found {} patch(es) in total.",
-        all_patches.len()
+        "Merging {} patch section(s) found in the block.",
+        unmerged_patches.len()
     );
-    Ok(all_patches)
+    let mut merged_patches: Vec<Patch> = Vec::new();
+    for patch_section in unmerged_patches {
+        if let Some(existing_patch) = merged_patches
+            .iter_mut()
+            .find(|p| p.file_path == patch_section.file_path)
+        {
+            debug!(
+                "  Merging {} hunk(s) for '{}' into existing patch.",
+                patch_section.hunks.len(),
+                patch_section.file_path.display()
+            );
+            existing_patch.hunks.extend(patch_section.hunks);
+            existing_patch.ends_with_newline = patch_section.ends_with_newline;
+        } else {
+            debug!(
+                "  Adding new patch for '{}'.",
+                patch_section.file_path.display()
+            );
+            merged_patches.push(patch_section);
+        }
+    }
+
+    Ok(merged_patches)
 }
 
 /// Converts a `std::io::Error` into a more specific `PatchError`.
