@@ -11,14 +11,51 @@
 //!
 //! ## Getting Started
 //!
-//! The most common use case is to parse a diff from a string (e.g., a markdown
-//! file) and apply it to a file on disk. This example shows the end-to-end
+//! The simplest way to use `mpatch` is the one-shot [`patch_content_str`] function.
+//! It's perfect for the common workflow of taking a diff string (e.g., from an
+//! LLM in a markdown file) and applying it to some existing content in memory.
+//!
+//! ````rust
+//! use mpatch::{patch_content_str, ApplyOptions};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! // 1. Define the original content and the diff.
+//! let original_content = "fn main() {\n    println!(\"Hello, world!\");\n}\n";
+//! let diff_content = r#"
+//! A markdown file with a diff block.
+//! ```diff
+//! --- a/src/main.rs
+//! +++ b/src/main.rs
+//! @@ -1,3 +1,3 @@
+//!  fn main() {
+//! -    println!("Hello, world!");
+//! +    println!("Hello, mpatch!");
+//!  }
+//! ```
+//! "#;
+//!
+//! // 2. Call the one-shot function to parse and apply the patch.
+//! let options = ApplyOptions::default();
+//! let new_content = patch_content_str(diff_content, Some(original_content), &options)?;
+//!
+//! // 3. Verify the new content.
+//! let expected_content = "fn main() {\n    println!(\"Hello, mpatch!\");\n}\n";
+//! assert_eq!(new_content, expected_content);
+//!
+//! # Ok(())
+//! # }
+//! ````
+//!
+//! ## Applying Patches to Files
+//!
+//! For CLI tools or scripts that need to modify files on disk, the workflow involves
+//! parsing and then using [`apply_patch_to_file`]. This example shows the end-to-end
 //! process in a temporary directory.
 //!
 //! ````rust
 //! use mpatch::{parse_diffs, apply_patch_to_file, ApplyOptions};
 //! use std::fs;
-//! use tempfile::{tempdir, TempDir};
+//! use tempfile::tempdir;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // 1. Set up a temporary directory and a file to be patched.
@@ -49,7 +86,7 @@
 //! assert_eq!(patches.len(), 1);
 //! let patch = &patches[0];
 //!
-//! // 4. Apply the patch.
+//! // 4. Apply the patch to the directory.
 //! let options = ApplyOptions::default();
 //! let result = apply_patch_to_file(patch, dir.path(), options)?;
 //!
@@ -91,6 +128,10 @@
 //!   reading the original file and writing the new content back to disk.
 //! - [`apply_patch_to_content`]: A pure function for in-memory operations. It takes
 //!   the original content as a string and returns the new content.
+//!
+//! Each of these also has a "strict" `try_` variant (e.g., [`try_apply_patch_to_file`])
+//! that treats partial applications as an error, simplifying the common apply-or-fail
+//! workflow.
 //!
 //! ### Core Data Structures
 //!
@@ -165,6 +206,46 @@
 //! // 6. Verify that the content was still partially modified by the successful first hunk.
 //! let expected_content = "line 1\nline two\nline 3\n\nline 5\nline 6\nline 7\n";
 //! assert_eq!(result.new_content, expected_content);
+//! # Ok(())
+//! # }
+//! ````
+//!
+//! ### Strict Apply-or-Fail Workflow with `try_` functions
+//!
+//! The previous example showed how to manually check `result.report.all_applied_cleanly()`
+//! to detect partial failures. For workflows where any failed hunk should be treated as a
+//! hard error, `mpatch` provides "strict" variants of the apply functions.
+//!
+//! - [`try_apply_patch_to_file`]
+//! - [`try_apply_patch_to_content`]
+//! - [`try_apply_patch_to_lines`]
+//!
+//! These functions return a `Result` where a partial application is mapped to a
+//! `Err(StrictApplyError::PartialApply { .. })`. This simplifies the common
+//! apply-or-fail pattern.
+//!
+//! ````rust
+//! use mpatch::{parse_diffs, try_apply_patch_to_content, ApplyOptions, StrictApplyError};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let original_content = "line 1\nline 2\n";
+//! let failing_diff = r#"
+//! ```diff
+//! --- a/file.txt
+//! +++ b/file.txt
+//! @@ -1,2 +1,2 @@
+//!  line 1
+//! -WRONG CONTEXT
+//! +line two
+//! ```
+//! "#;
+//! let patch = &parse_diffs(failing_diff)?[0];
+//! let options = ApplyOptions { fuzz_factor: 0.0, ..Default::default() };
+//!
+//! // Using the try_ variant simplifies error handling.
+//! let result = try_apply_patch_to_content(patch, Some(original_content), &options);
+//!
+//! assert!(matches!(result, Err(StrictApplyError::PartialApply { .. })));
 //! # Ok(())
 //! # }
 //! ````
