@@ -12,9 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 -   **API:** Added `mpatch::parse_patches` to parse raw unified diff strings directly, without requiring them to be in a markdown code block.
 -   **API:** Added `mpatch::parse_patches_from_lines` to parse raw unified diffs from an iterator of lines, offering more granular control and avoiding large string allocations.
 
+-   **Diagnostics:** Significantly enhanced debug reports and error feedback.
+    -   The debug report (`-vvvv`) now includes a **"Final Target File(s)"** section (showing the "after" state) and a **"Discrepancy Check"** section to programmatically validate patch integrity.
+    -   When a hunk fails to apply, the CLI error output now includes the content of the failed hunk for easier debugging.
+
 ### Fixed
 
 -   **Error Handling:** Improved error reporting for markdown diff blocks. Errors for missing file headers (`--- a/path`) now correctly report the line number where the ` ```diff` block begins, instead of an internal line number.
+-   **Fuzzy Matching:** Fixed a critical bug where fuzzy matching would incorrectly overwrite the target file's context with the patch's (potentially stale) context. The new logic now correctly preserves the file's original context by applying only the specific additions and deletions from the hunk.
 
 ## [1.1.0] - 2025-11-11
 
