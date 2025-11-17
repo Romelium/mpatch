@@ -858,7 +858,7 @@ impl Patch {
         }
 
         // Wrap in markdown block for our parser
-        let full_diff = format!("```diff\n{}\n```", diff_text);
+        let full_diff = format!("```diff\n{}\n```", diff_text.trim());
 
         let patches = parse_diffs(&full_diff)?;
 
@@ -988,12 +988,13 @@ impl Patch {
 /// assert_eq!(patches[0].hunks.len(), 1);
 /// ````
 pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
+    debug!("Starting to parse diffs from content.");
     let mut all_patches = Vec::new();
     let mut lines = content.lines().enumerate().peekable();
 
     // The `find` call consumes the iterator until it finds the start of a diff block.
     // The loop continues searching for more blocks from where the last one ended.
-    while let Some((line_index, _)) = lines.by_ref().find(|(_, line)| {
+    while let Some((line_index, line_text)) = lines.by_ref().find(|(_, line)| {
         if !line.starts_with("```") {
             return false;
         }
@@ -1006,7 +1007,16 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
                 .any(|word| word == "diff" || word == "patch")
         })
     }) {
+        trace!(
+            "Found potential diff block start on line {}: '{}'",
+            line_index + 1,
+            line_text
+        );
         let diff_block_start_line = line_index + 1; // Convert 0-based index to 1-based line number
+        debug!(
+            "Found a diff block starting on line {}.",
+            diff_block_start_line
+        );
 
         // This temporary vec will hold all patch sections found in this block,
         // even if they are for the same file. They will be merged later.
@@ -1021,16 +1031,27 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
         let mut ends_with_newline_for_section = true;
 
         // Consume lines within the ```diff block
-        for (_, line) in lines.by_ref() {
+        for (inner_line_index, line) in lines.by_ref() {
+            trace!(
+                "  Parsing line {}: '{}'",
+                inner_line_index + 1,
+                line.trim_end()
+            );
             if line == "```" {
+                trace!("  Found end of diff block.");
                 break; // End of block
             }
 
             if let Some(stripped_line) = line.strip_prefix("--- ") {
+                trace!("  Found file header line: '{}'", line);
                 // A `---` line always signals a new file section.
                 // Finalize the previous file's patch section if it exists.
                 if let Some(existing_file) = &current_file {
                     if !current_hunk_lines.is_empty() {
+                        trace!(
+                            "    Finalizing previous hunk with {} lines.",
+                            current_hunk_lines.len()
+                        );
                         current_hunks.push(Hunk {
                             lines: std::mem::take(&mut current_hunk_lines),
                             old_start_line: current_hunk_old_start_line,
@@ -1038,6 +1059,11 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
                         });
                     }
                     if !current_hunks.is_empty() {
+                        debug!(
+                            "  Finalizing patch section for '{}' with {} hunk(s).",
+                            existing_file.display(),
+                            current_hunks.len()
+                        );
                         unmerged_block_patches.push(Patch {
                             file_path: existing_file.clone(),
                             hunks: std::mem::take(&mut current_hunks),
@@ -1047,6 +1073,7 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
                 }
 
                 // Reset for the new file section.
+                trace!("  Resetting parser state for new file section.");
                 // `current_file` is cleared and will be set by this `---` line or a subsequent `+++` line.
                 current_file = None;
                 current_hunk_lines.clear();
@@ -1056,26 +1083,35 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
 
                 let path_part = stripped_line.trim();
                 if path_part == "/dev/null" || path_part == "a/dev/null" {
+                    trace!("    Path is /dev/null, indicating file creation.");
                     // This is a file creation patch. The path will be in the `+++` line.
                     // `current_file` remains `None` for now.
                 } else {
                     // The path could be `a/path/to/file` or just `path/to/file`.
                     let path_str = path_part.strip_prefix("a/").unwrap_or(path_part);
+                    debug!("  Starting new patch section for file: '{}'", path_str);
                     current_file = Some(PathBuf::from(path_str.trim()));
                 }
             } else if let Some(stripped_line) = line.strip_prefix("+++ ") {
+                trace!("  Found '+++' line: '{}'", line);
                 // If `current_file` is `None`, it means we saw `--- /dev/null` (or an unrecognised ---)
                 // and are expecting the file path from this `+++` line.
                 if current_file.is_none() {
                     let path_part = stripped_line.trim();
                     // The path could be `b/path/to/file` or just `path/to/file`.
                     let path_str = path_part.strip_prefix("b/").unwrap_or(path_part);
+                    debug!("  Set file path from '+++' line: '{}'", path_str);
                     current_file = Some(PathBuf::from(path_str.trim()));
                 }
                 // Otherwise, we already have the path from the `---` line, so we ignore this `+++` line.
             } else if line.starts_with("@@") {
+                trace!("  Found hunk header: '{}'", line);
                 // A hunk header line signals the end of the previous hunk.
                 if !current_hunk_lines.is_empty() {
+                    trace!(
+                        "    Finalizing previous hunk with {} lines.",
+                        current_hunk_lines.len()
+                    );
                     current_hunks.push(Hunk {
                         lines: std::mem::take(&mut current_hunk_lines),
                         old_start_line: current_hunk_old_start_line,
@@ -1084,19 +1120,40 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
                 }
                 // Parse the line number hint for the new hunk.
                 let (old, new) = parse_hunk_header(line);
+                trace!("    Parsed old_start={:?}, new_start={:?}", old, new);
                 current_hunk_old_start_line = old;
                 current_hunk_new_start_line = new;
             } else if line.starts_with(['+', '-', ' ']) {
                 // This is a line belonging to the current hunk.
+                trace!("    Adding line to current hunk: '{}'", line.trim_end());
                 current_hunk_lines.push(line.to_string());
             } else if line.starts_with('\\') {
                 // This special line indicates the file does not end with a newline.
+                trace!("  Found '\\ No newline at end of file' marker.");
                 ends_with_newline_for_section = false;
+            } else if current_hunk_old_start_line.is_some() {
+                // If we are inside a hunk (we've seen `@@`), treat any unrecognized
+                // line as part of the hunk body. The unified diff format requires a
+                // prefix, but some LLM outputs or manual edits might produce lines
+                // (like empty lines) without one. Assume it's a context line.
+                trace!(
+                    "    Adding unrecognized line as context to current hunk: '{}'",
+                    line.trim_end()
+                );
+                current_hunk_lines.push(format!(" {}", line));
+            } else {
+                // Outside of a hunk, ignore lines that aren't headers.
+                trace!("  Ignoring unrecognized line outside of a hunk: '{}'", line);
             }
         }
 
         // Finalize the last hunk and patch section for the block after the loop ends.
+        debug!("  End of diff block. Finalizing last hunk and patch section.");
         if !current_hunk_lines.is_empty() {
+            trace!(
+                "    Finalizing final hunk with {} lines.",
+                current_hunk_lines.len()
+            );
             current_hunks.push(Hunk {
                 lines: current_hunk_lines,
                 old_start_line: current_hunk_old_start_line,
@@ -1106,6 +1163,11 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
 
         if let Some(file_path) = current_file {
             if !current_hunks.is_empty() {
+                debug!(
+                    "  Finalizing patch section for '{}' with {} hunk(s).",
+                    file_path.display(),
+                    current_hunks.len()
+                );
                 unmerged_block_patches.push(Patch {
                     file_path,
                     hunks: current_hunks,
@@ -1114,6 +1176,10 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
             }
         } else if !current_hunks.is_empty() {
             // If we have hunks but never determined a file path, it's an error.
+            warn!(
+                "Found hunks in diff block starting at line {} but no file path header ('--- a/path').",
+                diff_block_start_line
+            );
             return Err(ParseError::MissingFileHeader {
                 line: diff_block_start_line,
             });
@@ -1122,6 +1188,12 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
         // Merge the collected patch sections from this block. This handles cases
         // where multiple `--- a/file` sections for the same file exist within
         // one ```diff block.
+        if !unmerged_block_patches.is_empty() {
+            debug!(
+                "Merging {} patch section(s) found in the block.",
+                unmerged_block_patches.len()
+            );
+        }
         let mut merged_block_patches: Vec<Patch> = Vec::new();
         for patch_section in unmerged_block_patches {
             if let Some(existing_patch) = merged_block_patches
@@ -1129,17 +1201,30 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
                 .find(|p| p.file_path == patch_section.file_path)
             {
                 // If a patch for this file already exists, just add the new hunks to it.
+                debug!(
+                    "  Merging {} hunk(s) for '{}' into existing patch.",
+                    patch_section.hunks.len(),
+                    patch_section.file_path.display()
+                );
                 existing_patch.hunks.extend(patch_section.hunks);
                 // The 'ends_with_newline' from the *last* section for a file wins.
                 existing_patch.ends_with_newline = patch_section.ends_with_newline;
             } else {
                 // Otherwise, add it as a new patch.
+                debug!(
+                    "  Adding new patch for '{}'.",
+                    patch_section.file_path.display()
+                );
                 merged_block_patches.push(patch_section);
             }
         }
         all_patches.extend(merged_block_patches);
     }
 
+    debug!(
+        "Finished parsing. Found {} patch(es) in total.",
+        all_patches.len()
+    );
     Ok(all_patches)
 }
 
@@ -1309,7 +1394,10 @@ pub fn apply_patch_to_file(
     // This is a critical security measure. `ensure_path_is_safe` returns a
     // canonicalized, absolute path that is confirmed to be inside the target_dir.
     let safe_target_path = ensure_path_is_safe(target_dir, &patch.file_path)?;
-    trace!("    Path is safe.");
+    trace!(
+        "    Path is safe. Absolute target path: '{}'",
+        safe_target_path.display()
+    );
 
     // --- Read Original File ---
     // All subsequent operations use the verified `safe_target_path`.
@@ -1323,6 +1411,7 @@ pub fn apply_patch_to_file(
         trace!("  Reading target file '{}'", patch.file_path.display());
         let content = fs::read_to_string(&safe_target_path)
             .map_err(|e| map_io_error(safe_target_path.clone(), e))?;
+        trace!("    Read {} bytes from target file.", content.len());
         (content, false)
     } else {
         // File doesn't exist. This is only okay if it's a file creation patch.
@@ -1341,6 +1430,7 @@ pub fn apply_patch_to_file(
     );
 
     // --- Apply Patch to Content ---
+    trace!("  Calling apply_patch_to_content...");
     let result = apply_patch_to_content(
         patch,
         if is_new_file {
@@ -1360,6 +1450,7 @@ pub fn apply_patch_to_file(
             "  DRY RUN: Would write changes to '{}'",
             patch.file_path.display()
         );
+        trace!("  Generating diff for dry run...");
         let diff_text = unified_diff(
             similar::Algorithm::default(),
             &original_content,
@@ -1375,6 +1466,11 @@ pub fn apply_patch_to_file(
         if let Some(parent) = safe_target_path.parent() {
             fs::create_dir_all(parent).map_err(|e| map_io_error(parent.to_path_buf(), e))?;
         }
+        trace!(
+            "  Writing {} bytes to '{}'",
+            new_content.len(),
+            safe_target_path.display()
+        );
         fs::write(&safe_target_path, new_content)
             .map_err(|e| map_io_error(safe_target_path.clone(), e))?;
         if apply_result.all_applied_cleanly() {
@@ -1530,8 +1626,27 @@ pub fn apply_patch_to_lines<T: AsRef<str>>(
         .map(|(i, status)| {
             let hunk_index = i + 1;
             info!("  Applying Hunk {}/{}...", hunk_index, total_hunks);
-            if let HunkApplyStatus::Failed(error) = &status {
-                warn!("  Failed to apply Hunk {}. {}", hunk_index, error);
+            match &status {
+                HunkApplyStatus::Applied {
+                    location,
+                    match_type,
+                    replaced_lines,
+                } => {
+                    debug!(
+                        "    Successfully applied Hunk {} at {} via {:?}",
+                        hunk_index, location, match_type
+                    );
+                    trace!("    Replaced lines:");
+                    for line in replaced_lines {
+                        trace!("      - {}", line);
+                    }
+                }
+                HunkApplyStatus::SkippedNoChanges => {
+                    debug!("    Skipped Hunk {} (no changes).", hunk_index);
+                }
+                HunkApplyStatus::Failed(error) => {
+                    warn!("  Failed to apply Hunk {}. {}", hunk_index, error);
+                }
             }
             status
         })
@@ -1666,20 +1781,107 @@ pub fn apply_hunk_to_lines(
     target_lines: &mut Vec<String>,
     options: &ApplyOptions,
 ) -> HunkApplyStatus {
+    trace!("Applying hunk with {} lines.", hunk.lines.len());
+    trace!("  Match block: {:?}", hunk.get_match_block());
+    trace!("  Replace block: {:?}", hunk.get_replace_block());
     if !hunk.has_changes() {
-        debug!("  Skipping hunk (no changes).");
+        trace!("  Hunk has no changes, skipping.");
         return HunkApplyStatus::SkippedNoChanges;
     }
 
     match find_hunk_location_in_lines(hunk, target_lines, options) {
         Ok((location, match_type)) => {
-            let replace_block = hunk.get_replace_block();
+            trace!(
+                "  Found location {:?} with match type {:?}. Applying changes.",
+                location,
+                match_type
+            );
+            let final_replace_block: Vec<String> =
+                // If the match was fuzzy, we need to be more careful about applying it
+                // to preserve the file's actual context, which may differ slightly.
+                if let MatchType::Fuzzy { .. } = match_type {
+                    debug!("    Applying hunk via fuzzy logic, preserving file context.");
+                    trace!(
+                        "      Fuzzy match location: start={}, len={}",
+                        location.start_index,
+                        location.length
+                    );
+                    let file_matched_lines: Vec<_> = target_lines
+                        [location.start_index..location.start_index + location.length]
+                        .to_vec();
+                    trace!("      File content in matched range: {:?}", file_matched_lines);
+
+                    // Create a pure delta patch (no context) from the hunk's changes. This isolates
+                    // the exact lines to be removed and added.
+                    let removed_text = hunk.removed_lines().join("\n");
+                    let added_text = hunk.added_lines().join("\n");
+
+                    // Use a context of 0 to ensure we only match the delta.
+                    match Patch::from_texts("delta", &removed_text, &added_text, 0) {
+                        Ok(delta_patch) => {
+                            if delta_patch.hunks.is_empty() {
+                                // No effective changes in the delta, so return the original file block.
+                                trace!("      Delta patch has no changes. Preserving original file block.");
+                                file_matched_lines
+                            } else {
+                                let mut temp_lines = file_matched_lines.clone();
+                                let mut all_succeeded = true;
+                                // The inner search must be exact, as we are looking for the specific lines to remove
+                                // within the fuzzy-matched block.
+                                let inner_options =
+                                    ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+
+                                for delta_hunk in &delta_patch.hunks {
+                                    if !delta_hunk.has_changes() {
+                                        continue;
+                                    }
+                                    // Recursively call this function to apply the delta hunk.
+                                    // This is safe because the inner call will use an exact match.
+                                    let status =
+                                        apply_hunk_to_lines(delta_hunk, &mut temp_lines, &inner_options);
+                                    if let HunkApplyStatus::Failed(e) = status {
+                                        trace!("      Inner delta hunk application failed: {}", e);
+                                        all_succeeded = false;
+                                        break;
+                                    }
+                                }
+
+                                if all_succeeded {
+                                    trace!("      Inner delta patch application succeeded. Using transformed lines: {:?}", temp_lines);
+                                    temp_lines
+                                } else {
+                                    warn!("    Internal delta patch application failed. Overwriting block with patch content as a last resort.");
+                                    hunk.get_replace_block()
+                                        .iter()
+                                        .map(|s| s.to_string())
+                                        .collect()
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("    Internal error: Failed to create delta patch for fuzzy apply: {}. Falling back to simple replace.", e);
+                            hunk.get_replace_block()
+                                .iter()
+                                .map(|s| s.to_string())
+                                .collect()
+                        }
+                    }
+                } else {
+                    // For exact matches, the original behavior is correct and faster.
+                    trace!("    Applying hunk via exact logic.");
+                    hunk.get_replace_block().iter().map(|s| s.to_string()).collect()
+                };
+
             let replaced_lines: Vec<String> = target_lines
                 .splice(
                     location.start_index..location.start_index + location.length,
-                    replace_block.into_iter().map(String::from),
+                    final_replace_block,
                 )
                 .collect();
+            trace!(
+                "  Successfully spliced changes into target lines. Replaced {} lines.",
+                replaced_lines.len()
+            );
             HunkApplyStatus::Applied {
                 location,
                 match_type,
@@ -1963,6 +2165,11 @@ impl<'a> DefaultHunkFinder<'a> {
                 "    Exact matches failed. Attempting flexible fuzzy match (threshold={:.2})...",
                 self.options.fuzz_factor
             );
+            trace!(
+                "      Hunk match block ({} lines): {:?}",
+                match_block.len(),
+                match_block
+            );
 
             // Hoist invariants for performance
             let match_stripped_lines: Vec<_> = match_block.iter().map(|s| s.trim_end()).collect();
@@ -1993,7 +2200,7 @@ impl<'a> DefaultHunkFinder<'a> {
             // When the anchor heuristic fails, the search can be slow. We parallelize the
             // scoring of all possible windows using Rayon if the `parallel` feature is enabled.
             #[cfg(feature = "parallel")]
-            let all_scored_windows: Vec<(f64, f64, f64, f64, f64, usize, usize)> = search_ranges
+            let all_scored_windows: Vec<(f64, f64, f64, f64, usize, usize)> = search_ranges
                 .par_iter()
                 .flat_map(|&(range_start, range_end)| {
                     // By creating local references, we ensure that the inner `move` closures
@@ -2020,24 +2227,27 @@ impl<'a> DefaultHunkFinder<'a> {
                                         &window_stripped_lines,
                                         match_stripped_lines,
                                     );
-                                    let ratio_lines = diff_lines.ratio() as f64;
+                                    let ratio_lines = diff_lines.ratio();
                                     let window_content = window_stripped_lines.join("\n");
                                     let diff_words = similar::TextDiff::from_words(
                                         &window_content,
                                         match_content,
                                     );
-                                    let ratio_words = diff_words.ratio() as f64;
-                                    let ratio = 0.6 * ratio_lines + 0.4 * ratio_words;
-                                    let size_diff = window_len.abs_diff(len) as f64;
-                                    let penalty = (size_diff / len.max(window_len) as f64) * 0.2;
-                                    let score = ratio - penalty;
+                                    let ratio_words = diff_words.ratio();
+                                    // HYBRID SCORING: Give more weight to word-based ratio, as it's
+                                    // better at detecting small changes within a line. Line-based
+                                    // ratio is still important for overall structure, especially
+                                    // when lines are inserted or deleted.
+                                    let ratio = 0.3 * ratio_lines as f64 + 0.7 * ratio_words as f64;
+                                    // The ratio from the `similar` crate already implicitly includes a
+                                    // penalty for size differences. We use the raw ratio as the score.
+                                    let score = ratio;
 
                                     (
                                         score,
                                         ratio,
-                                        ratio_lines,
-                                        ratio_words,
-                                        penalty,
+                                        ratio_lines as f64,
+                                        ratio_words as f64,
                                         absolute_index,
                                         window_len,
                                     )
@@ -2047,7 +2257,7 @@ impl<'a> DefaultHunkFinder<'a> {
                 .collect();
 
             #[cfg(not(feature = "parallel"))]
-            let all_scored_windows: Vec<(f64, f64, f64, f64, f64, usize, usize)> = search_ranges
+            let all_scored_windows: Vec<(f64, f64, f64, f64, usize, usize)> = search_ranges
                 .iter()
                 .flat_map(|&(range_start, range_end)| {
                     // By creating local references, we ensure that the inner `move` closures
@@ -2071,22 +2281,25 @@ impl<'a> DefaultHunkFinder<'a> {
                                     &window_stripped_lines,
                                     match_stripped_lines,
                                 );
-                                let ratio_lines = diff_lines.ratio() as f64;
+                                let ratio_lines = diff_lines.ratio();
                                 let window_content = window_stripped_lines.join("\n");
                                 let diff_words =
                                     similar::TextDiff::from_words(&window_content, match_content);
-                                let ratio_words = diff_words.ratio() as f64;
-                                let ratio = 0.6 * ratio_lines + 0.4 * ratio_words;
-                                let size_diff = window_len.abs_diff(len) as f64;
-                                let penalty = (size_diff / len.max(window_len) as f64) * 0.2;
-                                let score = ratio - penalty;
+                                let ratio_words = diff_words.ratio();
+                                // HYBRID SCORING: Give more weight to word-based ratio, as it's
+                                // better at detecting small changes within a line. Line-based
+                                // ratio is still important for overall structure, especially
+                                // when lines are inserted or deleted.
+                                let ratio = 0.3 * ratio_lines as f64 + 0.7 * ratio_words as f64;
+                                // The ratio from the `similar` crate already implicitly includes a
+                                // penalty for size differences. We use the raw ratio as the score.
+                                let score = ratio;
 
                                 (
                                     score,
                                     ratio,
-                                    ratio_lines,
-                                    ratio_words,
-                                    penalty,
+                                    ratio_lines as f64,
+                                    ratio_words as f64,
                                     absolute_index,
                                     window_len,
                                 )
@@ -2095,53 +2308,66 @@ impl<'a> DefaultHunkFinder<'a> {
                 })
                 .collect();
 
+            if log::log_enabled!(log::Level::Trace) {
+                let mut sorted_windows = all_scored_windows.clone();
+                sorted_windows
+                    .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                trace!("      Top fuzzy match candidates:");
+                for (score, ratio, _, _, idx, len) in sorted_windows.iter().take(5) {
+                    let window_content: Vec<_> = target_lines[*idx..*idx + *len]
+                        .iter()
+                        .map(|s| s.as_ref())
+                        .collect();
+                    trace!(
+                        "        - Index {}, Len {}: Score {:.3} (Ratio {:.3}) | Content: {:?}",
+                        idx, len, score, ratio, window_content
+                    );
+                }
+            }
+
             // Process the collected results sequentially to find the best match and handle tie-breaking.
-            for (score, ratio, ratio_lines, ratio_words, penalty, absolute_index, window_len) in
+            for (score, ratio, ratio_lines, ratio_words, absolute_index, window_len) in
                 all_scored_windows
             {
                 // This is the same logic as in the original sequential loop.
                 if score > best_score {
                     trace!(
-                        "        New best score: {:.3} (ratio {:.3} [l:{:.3},w:{:.3}], penalty {:.3}) at index {} (window len {})",
+                        "        New best score: {:.3} (ratio {:.3} [l:{:.3},w:{:.3}]) at index {} (window len {})",
                         score,
                         ratio,
                         ratio_lines,
                         ratio_words,
-                        penalty,
-                        absolute_index,
-                        window_len
+                        absolute_index, window_len
                     );
                     best_score = score;
                     best_ratio_at_best_score = ratio;
                     potential_matches.clear();
                     potential_matches.push((absolute_index, window_len));
-                } else if (score - best_score).abs() < 1e-9 {
-                    // Tie in score. Prefer the window size closer to the match block size.
-                    // This is mostly redundant due to the penalty, but good for perfect ties.
+                } else if f64::abs(score - best_score) < 1e-9 {
+                    // Tie in score. Prefer the one with the higher raw similarity ratio,
+                    // as it indicates a better content match before size penalties.
                     if potential_matches.is_empty() {
                         potential_matches.push((absolute_index, window_len));
                         continue;
                     }
-                    let current_best_len = potential_matches[0].1;
-                    let dist_new = window_len.abs_diff(len);
-                    let dist_best = current_best_len.abs_diff(len);
 
-                    if dist_new < dist_best {
-                        // This window size is a better fit, so it's the new best.
+                    if ratio > best_ratio_at_best_score {
+                        // This is a better match despite the same score (e.g., less penalty, more similarity)
                         trace!(
-                            "        Tie in score ({:.3}), but window len {} is closer to hunk len {}. New best.",
+                            "        Tie in score ({:.3}), but new ratio {:.3} is better than old {:.3}. New best.",
                             score,
-                            window_len,
-                            len
+                            ratio,
+                            best_ratio_at_best_score
                         );
                         best_ratio_at_best_score = ratio;
                         potential_matches.clear();
                         potential_matches.push((absolute_index, window_len));
-                    } else if dist_new == dist_best {
-                        // Same distance, so it's also a potential match.
+                    } else if f64::abs(ratio - best_ratio_at_best_score) < 1e-9 {
+                        // Also a tie in ratio, so it's a true ambiguity
                         trace!(
-                            "        Tie in score ({:.3}) and window distance. Adding candidate: index {}, len {}",
+                            "        Tie in score ({:.3}) and ratio ({:.3}). Adding candidate: index {}, len {}",
                             score,
+                            ratio,
                             absolute_index,
                             window_len
                         );
@@ -2162,8 +2388,8 @@ impl<'a> DefaultHunkFinder<'a> {
                 if potential_matches.len() == 1 {
                     let (start, len) = potential_matches[0];
                     debug!(
-                        "    Found best fuzzy match at index {} (length {}, similarity: {:.3}).",
-                        start, len, best_ratio_at_best_score
+                        "    Found best fuzzy match at index {} (length {}, similarity: {:.3} >= threshold: {:.3}).",
+                        start, len, best_ratio_at_best_score, self.options.fuzz_factor
                     );
                     return Ok((
                         HunkLocation {
@@ -2206,8 +2432,8 @@ impl<'a> DefaultHunkFinder<'a> {
                     if !is_tie {
                         if let Some((start, len)) = closest_match {
                             debug!(
-                                    "    Tie-broke ambiguous fuzzy match using line number. Best match is at index {} (length {}, similarity: {:.3}).",
-                                    start, len, best_ratio_at_best_score
+                                    "    Tie-broke ambiguous fuzzy match using line number. Best match is at index {} (length {}, similarity: {:.3} >= threshold: {:.3}).",
+                                    start, len, best_ratio_at_best_score, self.options.fuzz_factor
                                 );
                             return Ok((
                                 HunkLocation {
@@ -2228,8 +2454,8 @@ impl<'a> DefaultHunkFinder<'a> {
             } else if best_ratio_at_best_score >= 0.0 {
                 // Did not meet threshold
                 let (start, len) = potential_matches.first().copied().unwrap_or((0, 0));
-                trace!(
-                    "    Fuzzy match: Best location (index {}, len {}, similarity {:.3}) did not meet threshold of {:.2}.",
+                debug!(
+                    "    Fuzzy match failed: Best location (index {}, len {}) had similarity {:.3}, which is below the threshold of {:.3}.",
                     start, len, best_ratio_at_best_score, self.options.fuzz_factor
                 );
                 return Err(HunkApplyError::FuzzyMatchBelowThreshold {

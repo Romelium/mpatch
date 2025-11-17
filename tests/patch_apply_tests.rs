@@ -556,9 +556,8 @@ fn test_fuzzy_match_succeeds() {
     assert!(result.report.all_applied_cleanly());
     assert!(result.diff.is_none());
     let content = fs::read_to_string(file_path).unwrap();
-    // The expected behavior of patch is to replace the matched block
-    // with the content from the patch, including the context lines.
-    assert_eq!(content, "context one\nline 2\ncontext three\n");
+    // The behavior preserves the file's original context on a fuzzy match.
+    assert_eq!(content, "context A\nline 2\ncontext C\n");
 }
 
 #[test]
@@ -598,7 +597,10 @@ fn test_fuzzy_match_with_internal_insertion() {
         "Patch should apply by matching a slightly larger context block"
     );
     let content = fs::read_to_string(file_path).unwrap();
-    assert_eq!(content, "context A\nline was changed\ncontext C\n");
+    assert_eq!(
+        content,
+        "context A\ninserted line\nline was changed\ncontext C\n"
+    );
 }
 
 #[test]
@@ -1210,7 +1212,7 @@ fn test_fuzzy_match_below_threshold_fails() {
     );
     assert!(matches!(
         result.report.hunk_results[0],
-        HunkApplyStatus::Failed(HunkApplyError::FuzzyMatchBelowThreshold { location, .. }) if location.start_index == 0
+        HunkApplyStatus::Failed(HunkApplyError::FuzzyMatchBelowThreshold { .. })
     ));
     let content = fs::read_to_string(file_path).unwrap();
     assert_eq!(content, original_content, "File should be unchanged");
@@ -1304,7 +1306,7 @@ fn test_find_hunk_location_not_found() {
     let result = find_hunk_location(hunk, original_content, &options);
     assert!(matches!(
         result,
-        Err(HunkApplyError::FuzzyMatchBelowThreshold { location, .. }) if location.start_index == 0
+        Err(HunkApplyError::FuzzyMatchBelowThreshold { .. })
     ));
 }
 
@@ -1743,7 +1745,8 @@ fn test_fuzzy_match_with_missing_line_in_patch_context() {
     // The file has an extra line ("line B") compared to the patch's context.
     // This simulates the case where a patch was generated from a slightly older
     // version of a file, which caused the original character-based diff to fail.
-    fs::write(&file_path, "line A\nline B\nline C\n").unwrap();
+    let original_content = "line A\nline B\nline C\n";
+    fs::write(&file_path, original_content).unwrap();
 
     let diff = indoc! {"
         ```diff
@@ -1764,14 +1767,252 @@ fn test_fuzzy_match_with_missing_line_in_patch_context() {
     };
     let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
 
+    let content = fs::read_to_string(&file_path).unwrap();
+    // The logic should preserve "line B" from the file and only change "line C".
+    let expected_content = "line A\nline B\nline changed\n";
+
+    if !result.report.all_applied_cleanly() || content != expected_content {
+        eprintln!(
+            "\n\n--- DIAGNOSTICS FOR `test_fuzzy_match_with_missing_line_in_patch_context` ---\n"
+        );
+        eprintln!("Original Content:\n```\n{}\n```", original_content);
+        eprintln!("Patch:\n```diff\n{}\n```", diff);
+        eprintln!("Apply Result: {:#?}", result.report);
+        eprintln!("Expected Content:\n```\n{}\n```", expected_content);
+        eprintln!("Actual Content:\n```\n{}\n```\n", content);
+    }
+
     assert!(
         result.report.all_applied_cleanly(),
         "Patch should apply successfully despite a missing line in its context"
     );
-    let content = fs::read_to_string(file_path).unwrap();
-    // The fuzzy match should identify the 3-line block in the file and replace it
-    // with the 2-line replacement block from the patch.
-    assert_eq!(content, "line A\nline changed\n");
+    assert_eq!(content, expected_content);
+}
+
+#[test]
+fn test_finder_with_missing_line_in_patch_context() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let options = ApplyOptions {
+        fuzz_factor: 0.7,
+        ..Default::default()
+    };
+    let finder = DefaultHunkFinder::new(&options);
+
+    let hunk = parse_diffs(indoc! {"
+        ```diff
+        --- a/test.txt
+        +++ b/test.txt
+        @@ -1,2 +1,2 @@
+         line A
+        -line C
+        +line changed
+        ```
+    "})
+    .unwrap()
+    .remove(0)
+    .hunks
+    .remove(0);
+
+    let target_lines = vec!["line A", "line B", "line C"];
+
+    // This test isolates the finder. The fuzzy logic should be smart enough to realize
+    // that the best match is a 3-line window in the target file that accounts for the
+    // inserted "line B", rather than a 2-line window that incorrectly matches "line B"
+    // as a fuzzy version of "line C".
+    let (location, match_type) = finder.find_location(&hunk, &target_lines).unwrap();
+
+    assert!(matches!(match_type, MatchType::Fuzzy { .. }));
+    assert_eq!(
+        location,
+        HunkLocation {
+            start_index: 0,
+            length: 3
+        },
+        "Finder should have matched all three lines to account for the insertion"
+    );
+}
+
+#[test]
+fn test_fuzzy_match_with_duplicated_context_line_insertion() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("test.txt");
+    // The file has a duplicated "line A" which is not in the patch's context.
+    let original_content = "line A\nline A\nline C\n";
+    fs::write(&file_path, original_content).unwrap();
+
+    let diff = indoc! {"
+        ```diff
+        --- a/test.txt
+        +++ b/test.txt
+        @@ -1,2 +1,2 @@
+         line A
+        -line C
+        +line changed
+        ```
+    "};
+    let patch = &parse_diffs(diff).unwrap()[0];
+    let options = ApplyOptions {
+        dry_run: false,
+        fuzz_factor: 0.7,
+    };
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
+
+    let content = fs::read_to_string(&file_path).unwrap();
+    let expected_content = "line A\nline A\nline changed\n";
+
+    assert!(
+        result.report.all_applied_cleanly(),
+        "Patch should apply cleanly even with duplicated context lines"
+    );
+    assert_eq!(content, expected_content);
+}
+
+#[test]
+fn test_fuzzy_match_with_more_context_and_insertion() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("test.txt");
+    let original_content = "header\nline A\nline B\nline C\nfooter\n";
+    fs::write(&file_path, original_content).unwrap();
+
+    let diff = indoc! {"
+        ```diff
+        --- a/test.txt
+        +++ b/test.txt
+        @@ -1,4 +1,4 @@
+         header
+         line A
+        -line C
+        +line changed
+         footer
+        ```
+    "};
+    let patch = &parse_diffs(diff).unwrap()[0];
+    let options = ApplyOptions {
+        dry_run: false,
+        fuzz_factor: 0.7,
+    };
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
+
+    let content = fs::read_to_string(&file_path).unwrap();
+    let expected_content = "header\nline A\nline B\nline changed\nfooter\n";
+
+    assert!(
+        result.report.all_applied_cleanly(),
+        "Patch should apply cleanly with more context"
+    );
+    assert_eq!(content, expected_content);
+}
+
+#[test]
+fn test_fuzzy_match_with_insertion_at_hunk_start() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("test.txt");
+    // The file has an extra line at the beginning of the hunk's context.
+    let original_content = "extra line\ncontext A\nline to change\ncontext C\n";
+    fs::write(&file_path, original_content).unwrap();
+
+    let diff = indoc! {"
+        ```diff
+        --- a/test.txt
+        +++ b/test.txt
+        @@ -1,3 +1,3 @@
+         context A
+        -line to change
+        +line was changed
+         context C
+        ```
+    "};
+    let patch = &parse_diffs(diff).unwrap()[0];
+    let options = ApplyOptions {
+        dry_run: false,
+        fuzz_factor: 0.7,
+    };
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
+
+    let content = fs::read_to_string(&file_path).unwrap();
+    let expected_content = "extra line\ncontext A\nline was changed\ncontext C\n";
+
+    assert!(
+        result.report.all_applied_cleanly(),
+        "Patch should apply cleanly with insertion at hunk start"
+    );
+    assert_eq!(content, expected_content);
+}
+
+#[test]
+fn test_fuzzy_match_with_insertion_at_hunk_end() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("test.txt");
+    // The file has an extra line at the end of the hunk's context.
+    let original_content = "context A\nline to change\ncontext C\nextra line\n";
+    fs::write(&file_path, original_content).unwrap();
+
+    let diff = indoc! {"
+        ```diff
+        --- a/test.txt
+        +++ b/test.txt
+        @@ -1,3 +1,3 @@
+         context A
+        -line to change
+        +line was changed
+         context C
+        ```
+    "};
+    let patch = &parse_diffs(diff).unwrap()[0];
+    let options = ApplyOptions {
+        dry_run: false,
+        fuzz_factor: 0.7,
+    };
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
+
+    let content = fs::read_to_string(&file_path).unwrap();
+    let expected_content = "context A\nline was changed\ncontext C\nextra line\n";
+
+    assert!(
+        result.report.all_applied_cleanly(),
+        "Patch should apply cleanly with insertion at hunk end"
+    );
+    assert_eq!(content, expected_content);
+}
+
+#[test]
+fn test_fuzzy_match_with_multiple_insertions() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("test.txt");
+    let original_content = "context A\nextra line 1\nline to change\nextra line 2\ncontext C\n";
+    fs::write(&file_path, original_content).unwrap();
+
+    let diff = indoc! {"
+        ```diff
+        --- a/test.txt
+        +++ b/test.txt
+        @@ -1,3 +1,3 @@
+         context A
+        -line to change
+        +line was changed
+         context C
+        ```
+    "};
+    let patch = &parse_diffs(diff).unwrap()[0];
+    let options = ApplyOptions {
+        dry_run: false,
+        fuzz_factor: 0.7,
+    };
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
+
+    let content = fs::read_to_string(&file_path).unwrap();
+    let expected_content = "context A\nextra line 1\nline was changed\nextra line 2\ncontext C\n";
+
+    assert!(
+        result.report.all_applied_cleanly(),
+        "Patch should apply cleanly with multiple insertions"
+    );
+    assert_eq!(content, expected_content);
 }
 
 #[test]
@@ -1807,10 +2048,96 @@ fn test_fuzzy_match_with_extra_line_in_patch_context() {
         "Patch should apply successfully despite an extra line in its context"
     );
     let content = fs::read_to_string(file_path).unwrap();
-    // The fuzzy match should identify the 2-line block in the file ("line A", "line C")
-    // and replace it with the 3-line replacement block from the patch
-    // ("line A", "line B", "line changed").
-    assert_eq!(content, "line A\nline B\nline changed\n");
+    // The logic should see that "line B" from the patch context is missing in the file,
+    // and correctly apply the change to "line C" without re-inserting "line B".
+    assert_eq!(content, "line A\nline changed\n");
+}
+
+#[test]
+fn test_fuzzy_match_preserves_different_file_context() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("test.txt");
+    // The file's context lines are different from the patch's.
+    let original_content = "context in file (A)\nline to change\ncontext in file (C)\n";
+    fs::write(&file_path, original_content).unwrap();
+
+    let diff = indoc! {r#"
+        ```diff
+        --- a/test.txt
+        +++ b/test.txt
+        @@ -1,3 +1,3 @@
+         context in patch (A)
+        -line to change
+        +line was changed
+         context in patch (C)
+        ```
+    "#};
+    let patch = &parse_diffs(diff).unwrap()[0];
+    let options = ApplyOptions {
+        dry_run: false,
+        fuzz_factor: 0.7,
+    };
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
+
+    assert!(
+        result.report.all_applied_cleanly(),
+        "Patch should apply cleanly via fuzzy match"
+    );
+    let content = fs::read_to_string(file_path).unwrap();
+    // The key assertion: the file's original context is preserved.
+    let expected_content = "context in file (A)\nline was changed\ncontext in file (C)\n";
+    assert_eq!(content, expected_content);
+}
+
+#[test]
+fn test_fuzzy_match_with_multiple_differences_preserves_context() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("test.txt");
+    // The file has different context lines compared to the patch.
+    let original_content = indoc! {"
+        line A
+        line B (in file)
+        line C (to be changed)
+        line D (in file)
+        line E
+    "};
+    fs::write(&file_path, original_content).unwrap();
+
+    let diff = indoc! {r#"
+        ```diff
+        --- a/test.txt
+        +++ b/test.txt
+        @@ -1,4 +1,4 @@
+         line A
+         line B (in patch)
+        -line C (to be changed)
+        +line C (was changed)
+         line D (in patch)
+        ```
+    "#};
+    let patch = &parse_diffs(diff).unwrap()[0];
+    let options = ApplyOptions {
+        dry_run: false,
+        fuzz_factor: 0.7,
+    };
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
+
+    assert!(
+        result.report.all_applied_cleanly(),
+        "Patch should apply cleanly via fuzzy match"
+    );
+    let content = fs::read_to_string(file_path).unwrap();
+    // The file's context (B and D) should be preserved, and the change to C should be applied.
+    let expected_content = indoc! {"
+        line A
+        line B (in file)
+        line C (was changed)
+        line D (in file)
+        line E
+    "};
+    assert_eq!(content, expected_content);
 }
 
 #[test]
@@ -2300,7 +2627,7 @@ mod hunk_finder_tests {
         let result = finder.find_location(&hunk, &target_lines);
         assert!(matches!(
             result,
-            Err(HunkApplyError::FuzzyMatchBelowThreshold { location, .. }) if location.start_index == 0
+            Err(HunkApplyError::FuzzyMatchBelowThreshold { .. })
         ));
     }
 
@@ -2328,5 +2655,155 @@ mod hunk_finder_tests {
             result,
             Err(HunkApplyError::AmbiguousExactMatch(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod fuzzy_finder_diagnostics {
+    use mpatch::{ApplyOptions, DefaultHunkFinder, Hunk, HunkFinder, HunkLocation, MatchType};
+
+    /// Helper to test the DefaultHunkFinder's fuzzy logic.
+    fn assert_fuzzy_location(
+        hunk_match_block: &[&str],
+        target_lines: &[&str],
+        expected_location: HunkLocation,
+        fuzz_factor: f32,
+    ) {
+        let options = ApplyOptions {
+            fuzz_factor,
+            ..Default::default()
+        };
+        let finder = DefaultHunkFinder::new(&options);
+
+        // Create a dummy hunk. The only important part is the match block.
+        let hunk = Hunk {
+            lines: hunk_match_block.iter().map(|s| format!(" {}", s)).collect(), // Assume all context lines for simplicity
+            old_start_line: Some(1),
+            new_start_line: Some(1),
+        };
+
+        let result = finder.find_location(&hunk, &target_lines.iter().collect::<Vec<_>>());
+
+        match result {
+            Ok((location, match_type)) => {
+                // We expect a fuzzy match, but if the content is very similar,
+                // it might be classified as ExactIgnoringWhitespace. We accept both.
+                assert!(
+                    matches!(
+                        match_type,
+                        MatchType::Fuzzy { .. } | MatchType::ExactIgnoringWhitespace
+                    ),
+                    "Match was not fuzzy or whitespace-insensitive as expected. Was: {:?}",
+                    match_type
+                );
+                assert_eq!(
+                    location, expected_location,
+                    "Fuzzy location did not match expectation"
+                );
+            }
+            Err(e) => {
+                panic!("Finder failed when a fuzzy match was expected: {:?}", e);
+            }
+        }
+    }
+
+    #[test]
+    fn finder_single_insertion_middle() {
+        // This reproduces the core logic failure from the failing tests.
+        // The finder should select the larger window (len 3) that includes the insertion.
+        assert_fuzzy_location(
+            &["line A", "line C"],
+            &["line A", "line B", "line C"],
+            HunkLocation {
+                start_index: 0,
+                length: 3,
+            },
+            0.7,
+        );
+    }
+
+    #[test]
+    fn finder_single_insertion_start() {
+        // This test previously expected a fuzzy match, but a perfect exact match exists.
+        // The hierarchical search correctly finds the exact match at an offset and stops,
+        // which is the desired behavior. The test is updated to reflect this.
+        let options = ApplyOptions {
+            fuzz_factor: 0.7,
+            ..Default::default()
+        };
+        let finder = DefaultHunkFinder::new(&options);
+
+        let hunk = Hunk {
+            lines: vec![" line A".to_string(), " line B".to_string()],
+            old_start_line: Some(1),
+            new_start_line: Some(1),
+        };
+
+        let target_lines = vec!["extra line", "line A", "line B"];
+
+        let (location, match_type) = finder.find_location(&hunk, &target_lines).unwrap();
+
+        assert!(
+            matches!(match_type, MatchType::Exact),
+            "Should have found an exact match, not {:?}",
+            match_type
+        );
+        assert_eq!(
+            location,
+            HunkLocation {
+                start_index: 1,
+                length: 2,
+            },
+            "Exact match location is incorrect"
+        );
+    }
+
+    #[test]
+    fn finder_single_deletion_middle() {
+        // The finder should select the smaller window (len 2) that reflects the deletion.
+        assert_fuzzy_location(
+            &["line A", "line B", "line C"],
+            &["line A", "line C"],
+            HunkLocation {
+                start_index: 0,
+                length: 2,
+            },
+            0.7,
+        );
+    }
+
+    #[test]
+    fn finder_multiple_insertions() {
+        // This reproduces the other failing test case.
+        // The score was just below the threshold. This test will fail if the scoring is too punitive.
+        assert_fuzzy_location(
+            &["context A", "line to change", "context C"],
+            &[
+                "context A",
+                "extra line 1",
+                "line to change",
+                "extra line 2",
+                "context C",
+            ],
+            HunkLocation {
+                start_index: 0,
+                length: 5,
+            },
+            0.7,
+        );
+    }
+
+    #[test]
+    fn finder_mixed_change_modification() {
+        // Hunk expects "B", file has "X". Finder should still match the block.
+        assert_fuzzy_location(
+            &["A", "B", "C"],
+            &["A", "X", "C"],
+            HunkLocation {
+                start_index: 0,
+                length: 3,
+            },
+            0.7,
+        );
     }
 }

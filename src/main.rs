@@ -99,7 +99,7 @@ fn run(args: Args) -> Result<()> {
     let num_ops = batch_result.results.len();
 
     // Iterate through the results to provide detailed CLI feedback.
-    for (i, (path, result)) in batch_result.results.iter().enumerate() {
+    for (i, ((path, result), patch)) in batch_result.results.iter().zip(&all_patches).enumerate() {
         info!(""); // Vertical spacing
         info!(">>> Operation {}/{}", i + 1, num_ops);
         match result {
@@ -114,7 +114,7 @@ fn run(args: Args) -> Result<()> {
                 } else {
                     fail_count += 1;
                     error!("--- FAILED to apply patch for: {}", path.display());
-                    log_failed_hunks(&patch_result.report);
+                    log_failed_hunks(&patch_result.report, patch);
                 }
             }
             Err(e) => {
@@ -160,9 +160,16 @@ fn run(args: Args) -> Result<()> {
 type ReportData = (Arc<Mutex<File>>, HashMap<PathBuf, String>);
 
 /// Logs the reasons why hunks failed to apply.
-fn log_failed_hunks(apply_result: &mpatch::ApplyResult) {
+fn log_failed_hunks(apply_result: &mpatch::ApplyResult, patch: &Patch) {
     for failure in apply_result.failures() {
         warn!("  - Hunk {} failed: {}", failure.hunk_index, failure.reason);
+        // hunk_index is 1-based, so we need to subtract 1 for indexing.
+        if let Some(hunk) = patch.hunks.get(failure.hunk_index - 1) {
+            warn!("    Failed Hunk Content:");
+            for line in &hunk.lines {
+                warn!("      {}", line);
+            }
+        }
     }
 }
 
@@ -263,11 +270,7 @@ fn setup_logging_and_reporting(
 }
 
 /// Creates the report file, writes the header, and returns a shared pointer to it.
-fn create_report_file(
-    args: &Args,
-    patch_content: &str,
-    patches: &[Patch],
-) -> Result<ReportData> {
+fn create_report_file(args: &Args, patch_content: &str, patches: &[Patch]) -> Result<ReportData> {
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let report_filename = format!("mpatch-debug-report-{}.md", timestamp);
     let mut file = File::create(&report_filename)
@@ -352,43 +355,6 @@ fn write_report_footer(
     log::logger().flush();
     let mut file = file_arc.lock().unwrap();
 
-    // Use `let _ = ...` to ignore potential write errors during cleanup.
-    let _ = writeln!(file, "````"); // Close the log block
-
-    // --- Final Target Files Section ---
-    let _ = writeln!(file, "\n## Final Target File(s)\n");
-    let _ = writeln!(file, "> This section shows the state of the target files *after* the patch operation was attempted.\n");
-
-    if args.dry_run {
-        let _ = writeln!(
-            file,
-            "*Final file state is the same as the original state because `--dry-run` was active.*"
-        );
-    } else {
-        for patch in all_patches {
-            let target_file_path = args.target_dir.join(&patch.file_path);
-            let _ = writeln!(file, "### File: `{}`\n", patch.file_path.display());
-            match fs::read_to_string(&target_file_path) {
-                Ok(file_content) => {
-                    if file_content.is_empty() {
-                        let _ = writeln!(file, "*File is empty.*");
-                    } else {
-                        let lang = target_file_path
-                            .extension()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("");
-                        let _ = writeln!(file, "````{}", lang);
-                        let _ = writeln!(file, "{}", file_content);
-                        let _ = writeln!(file, "````");
-                    }
-                }
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    let _ = writeln!(file, "*File does not exist.*");
-                }
-                Err(e) => _ = writeln!(file, "*Error reading file: {}*", e),
-            }
-        }
-    }
     // Use `let _ = ...` to ignore potential write errors during cleanup.
     let _ = writeln!(file, "````"); // Close the log block
 
