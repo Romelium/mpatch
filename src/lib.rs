@@ -323,6 +323,28 @@ use thiserror::Error;
 // --- Error Types ---
 
 /// Represents errors that can occur during the parsing of a diff file.
+///
+/// This error is returned by parsing functions like [`parse_diffs`] when the input
+/// content contains a ` ```diff` block that is syntactically invalid.
+///
+/// # Example
+///
+/// ````rust
+/// use mpatch::{parse_diffs, ParseError};
+///
+/// // This diff block is missing the required `--- a/path` header.
+/// let malformed_diff = r#"Some introductory text.
+/// ```diff
+/// @@ -1,2 +1,2 @@
+/// -foo
+/// +bar
+/// ```
+/// "#;
+///
+/// let result = parse_diffs(malformed_diff);
+///
+/// assert!(matches!(result, Err(ParseError::MissingFileHeader { line: 2 })));
+/// ````
 #[derive(Error, Debug, PartialEq)]
 pub enum ParseError {
     /// A ` ```diff` block was found, but it was missing the `--- a/path/to/file`
@@ -334,7 +356,41 @@ pub enum ParseError {
     },
 }
 
-/// Represents the possible errors that can occur during patch operations.
+/// Represents "hard" errors that can occur during patch operations.
+///
+/// This error type is returned by functions like [`apply_patch_to_file`] for
+/// unrecoverable issues such as I/O errors, permission problems, or security
+/// violations like path traversal. It is distinct from a partial apply, which
+/// is handled by the result structs.
+///
+/// # Example
+///
+/// ````rust
+/// # use mpatch::{parse_diffs, apply_patch_to_file, ApplyOptions, PatchError};
+/// # use tempfile::tempdir;
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let dir = tempdir()?;
+/// // Note: "missing.txt" does not exist in the directory.
+///
+/// let diff = r#"
+/// ```diff
+/// --- a/missing.txt
+/// +++ b/missing.txt
+/// @@ -1 +1 @@
+/// -foo
+/// +bar
+/// ```
+/// "#;
+/// let patch = &parse_diffs(diff)?[0];
+/// let options = ApplyOptions::new();
+///
+/// // This will fail because the target file doesn't exist and it's not a creation patch.
+/// let result = apply_patch_to_file(patch, dir.path(), options);
+///
+/// assert!(matches!(result, Err(PatchError::TargetNotFound(_))));
+/// # Ok(())
+/// # }
+/// ````
 #[derive(Error, Debug)]
 pub enum PatchError {
     /// The patch attempted to access a path outside the target directory.
@@ -364,8 +420,42 @@ pub enum PatchError {
 
 /// Represents errors that can occur during "strict" apply operations.
 ///
-/// This enum is returned by functions like [`try_apply_patch_to_file`], which
-/// treat partial applications as an error.
+/// This enum is returned by functions like [`try_apply_patch_to_file`] and
+/// [`try_apply_patch_to_content`], which treat partial applications as an error.
+/// It consolidates hard failures (`PatchError`) and soft failures (`PartialApply`)
+/// into a single error type for easier handling in apply-or-fail workflows.
+///
+/// # Example
+///
+/// ````rust
+/// use mpatch::{parse_diffs, try_apply_patch_to_content, ApplyOptions, StrictApplyError};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let original_content = "line 1\nline 2\n";
+/// // This patch will fail because the context "WRONG CONTEXT" is not in the original content.
+/// let failing_diff = r#"
+/// ```diff
+/// --- a/file.txt
+/// +++ b/file.txt
+/// @@ -1,2 +1,2 @@
+///  line 1
+/// -WRONG CONTEXT
+/// +line two
+/// ```
+/// "#;
+/// let patch = &parse_diffs(failing_diff)?[0];
+/// let options = ApplyOptions::exact();
+///
+/// // Using the try_ variant simplifies error handling for partial applications.
+/// let result = try_apply_patch_to_content(patch, Some(original_content), &options);
+///
+/// assert!(matches!(result, Err(StrictApplyError::PartialApply { .. })));
+/// if let Err(StrictApplyError::PartialApply { report }) = result {
+///     assert!(!report.all_applied_cleanly());
+/// }
+/// # Ok(())
+/// # }
+/// ````
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum StrictApplyError {
@@ -382,7 +472,38 @@ pub enum StrictApplyError {
     },
 }
 
-/// Represents errors that can occur during the high-level `patch_content_str` operation.
+/// Represents errors that can occur during the high-level [`patch_content_str`] operation.
+///
+/// This enum consolidates all possible failures from the one-shot workflow,
+/// including parsing errors, finding the wrong number of patches, or failures
+/// during the strict application process.
+///
+/// # Example
+///
+/// ````rust
+/// use mpatch::{patch_content_str, ApplyOptions, OneShotError};
+///
+/// // This diff content contains two patches, which is not allowed by `patch_content_str`.
+/// let multi_patch_diff = r#"
+/// ```diff
+/// --- a/file1.txt
+/// +++ b/file1.txt
+/// @@ -1 +1 @@
+/// -a
+/// +b
+/// --- a/file2.txt
+/// +++ b/file2.txt
+/// @@ -1 +1 @@
+/// -c
+/// +d
+/// ```
+/// "#;
+///
+/// let options = ApplyOptions::new();
+/// let result = patch_content_str(multi_patch_diff, Some("a\n"), &options);
+///
+/// assert!(matches!(result, Err(OneShotError::MultiplePatchesFound(2))));
+/// ````
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum OneShotError {
@@ -408,6 +529,40 @@ pub enum OneShotError {
 }
 
 /// The reason a hunk failed to apply.
+///
+/// This enum provides specific details about why a hunk could not be applied to the
+/// target content. It is found within the [`HunkApplyStatus::Failed`] variant.
+///
+/// # Example
+///
+/// ````rust
+/// use mpatch::{apply_patch_to_content, parse_diffs, ApplyOptions, HunkApplyStatus, HunkApplyError};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let original_content = "line 1\nline 2\n";
+/// // This patch will fail because the context is wrong.
+/// let diff = r#"
+/// ```diff
+/// --- a/file.txt
+/// +++ b/file.txt
+/// @@ -1,2 +1,2 @@
+///  line 1
+/// -WRONG CONTEXT
+/// +line two
+/// ```
+/// "#;
+/// let patch = &parse_diffs(diff)?[0];
+/// let options = ApplyOptions::exact();
+///
+/// let result = apply_patch_to_content(patch, Some(original_content), &options);
+///
+/// // We can inspect the status of the first hunk.
+/// let hunk_status = &result.report.hunk_results[0];
+///
+/// assert!(matches!(hunk_status, HunkApplyStatus::Failed(HunkApplyError::ContextNotFound)));
+/// # Ok(())
+/// # }
+/// ````
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum HunkApplyError {
     /// The context lines for the hunk could not be found in the target file.
@@ -432,6 +587,39 @@ pub enum HunkApplyError {
 }
 
 /// Describes the method used to successfully locate and apply a hunk.
+///
+/// This enum is included in the [`HunkApplyStatus::Applied`] variant and provides
+/// insight into how `mpatch` found the location for a hunk, which is useful for
+/// logging and diagnostics.
+///
+/// # Example
+///
+/// ````rust
+/// use mpatch::{apply_patch_to_content, parse_diffs, ApplyOptions, HunkApplyStatus, MatchType};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // The file content has an extra space, which will prevent an `Exact` match.
+/// let original_content = "line 1  \nline 2\n";
+/// let diff = r#"
+/// ```diff
+/// --- a/file.txt
+/// +++ b/file.txt
+/// @@ -1,2 +1,2 @@
+///  line 1
+/// -line 2
+/// +line two
+/// ```
+/// "#;
+/// let patch = &parse_diffs(diff)?[0];
+/// let options = ApplyOptions::new();
+///
+/// let result = apply_patch_to_content(patch, Some(original_content), &options);
+/// let hunk_status = &result.report.hunk_results[0];
+///
+/// assert!(matches!(hunk_status, HunkApplyStatus::Applied { match_type: MatchType::ExactIgnoringWhitespace, .. }));
+/// # Ok(())
+/// # }
+/// ````
 #[derive(Debug, Clone, PartialEq)]
 pub enum MatchType {
     /// An exact, character-for-character match of the context/deletion lines.
@@ -446,6 +634,44 @@ pub enum MatchType {
 }
 
 /// The result of applying a single hunk.
+///
+/// This enum is returned by [`apply_hunk_to_lines`] and is the item type for the
+/// [`HunkApplier`] iterator. It provides a detailed outcome for each individual
+/// hunk within a patch.
+///
+/// # Example
+///
+/// ````rust
+/// use mpatch::{apply_hunk_to_lines, parse_diffs, ApplyOptions, HunkApplyStatus, HunkApplyError};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let diff = r#"
+/// ```diff
+/// --- a/file.txt
+/// +++ b/file.txt
+/// @@ -1,2 +1,2 @@
+///  line 1
+/// -line 2
+/// +line two
+/// ```
+/// "#;
+/// let hunk = &parse_diffs(diff)?[0].hunks[0];
+/// let options = ApplyOptions::new();
+///
+/// // --- Success Case ---
+/// let mut lines_success = vec!["line 1".to_string(), "line 2".to_string()];
+/// let status_success = apply_hunk_to_lines(hunk, &mut lines_success, &options);
+/// assert!(matches!(status_success, HunkApplyStatus::Applied { .. }));
+/// assert_eq!(lines_success, vec!["line 1", "line two"]);
+///
+/// // --- Failure Case ---
+/// let mut lines_fail = vec!["wrong".to_string(), "content".to_string()];
+/// let fail_status = apply_hunk_to_lines(hunk, &mut lines_fail, &options);
+/// assert!(matches!(fail_status, HunkApplyStatus::Failed(HunkApplyError::FuzzyMatchBelowThreshold { .. })));
+/// assert_eq!(lines_fail, vec!["wrong", "content"]); // Content is unchanged
+/// # Ok(())
+/// # }
+/// ````
 #[derive(Debug, Clone, PartialEq)]
 pub enum HunkApplyStatus {
     /// The hunk was applied successfully.
