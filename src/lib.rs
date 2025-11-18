@@ -35,7 +35,7 @@
 //! "#;
 //!
 //! // 2. Call the one-shot function to parse and apply the patch.
-//! let options = ApplyOptions::default();
+//! let options = ApplyOptions::new();
 //! let new_content = patch_content_str(diff_content, Some(original_content), &options)?;
 //!
 //! // 3. Verify the new content.
@@ -87,7 +87,7 @@
 //! let patch = &patches[0];
 //!
 //! // 4. Apply the patch to the directory.
-//! let options = ApplyOptions::default();
+//! let options = ApplyOptions::new();
 //! let result = apply_patch_to_file(patch, dir.path(), options)?;
 //!
 //! // The patch should apply cleanly.
@@ -191,7 +191,7 @@
 //! let patch = &patches[0];
 //!
 //! // 3. Apply the patch to the content in memory.
-//! let options = mpatch::ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+//! let options = mpatch::ApplyOptions::exact();
 //! let result = apply_patch_to_content(patch, Some(original_content), &options);
 //!
 //! // 4. Verify that the patch did not apply cleanly.
@@ -240,7 +240,7 @@
 //! ```
 //! "#;
 //! let patch = &parse_diffs(failing_diff)?[0];
-//! let options = ApplyOptions { fuzz_factor: 0.0, ..Default::default() };
+//! let options = ApplyOptions::exact();
 //!
 //! // Using the try_ variant simplifies error handling.
 //! let result = try_apply_patch_to_content(patch, Some(original_content), &options);
@@ -271,7 +271,7 @@
 //! ```
 //! "#;
 //! let patch = &parse_diffs(diff_content)?[0];
-//! let options = ApplyOptions::default();
+//! let options = ApplyOptions::new();
 //!
 //! // 2. Create the applier.
 //! let mut applier = HunkApplier::new(patch, Some(&original_lines), &options);
@@ -484,6 +484,51 @@ impl Default for ApplyOptions {
 }
 
 impl ApplyOptions {
+    /// Creates a new `ApplyOptions` instance with default values.
+    ///
+    /// This is an alias for `ApplyOptions::default()`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use mpatch::ApplyOptions;
+    /// let options = ApplyOptions::new();
+    /// assert_eq!(options.dry_run, false);
+    /// assert_eq!(options.fuzz_factor, 0.7);
+    /// ```
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Creates a new `ApplyOptions` instance configured for a dry run.
+    ///
+    /// All other options are set to their default values.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use mpatch::ApplyOptions;
+    /// let options = ApplyOptions::dry_run();
+    /// assert_eq!(options.dry_run, true);
+    /// assert_eq!(options.fuzz_factor, 0.7);
+    /// ```
+    pub fn dry_run() -> Self {
+        Self {
+            dry_run: true,
+            ..Self::default()
+        }
+    }
+
+    /// Creates a new `ApplyOptions` instance configured for an exact match (fuzz factor 0.0).
+    ///
+    /// All other options are set to their default values.
+    pub fn exact() -> Self {
+        Self {
+            fuzz_factor: 0.0,
+            ..Self::default()
+        }
+    }
+
     /// Creates a new builder for `ApplyOptions`.
     ///
     /// # Example
@@ -1584,7 +1629,7 @@ pub fn apply_patches_to_dir(
 /// let patch = &patches[0];
 ///
 /// // 3. Apply the patch to the directory.
-/// let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+/// let options = ApplyOptions::exact();
 /// let result = apply_patch_to_file(patch, dir.path(), options)?;
 ///
 /// // 4. Verify the results.
@@ -1738,7 +1783,7 @@ pub fn apply_patch_to_file(
 /// let patches = parse_diffs(success_diff)?;
 /// let patch = &patches[0];
 ///
-/// let options = ApplyOptions::default();
+/// let options = ApplyOptions::new();
 /// let result = try_apply_patch_to_file(patch, dir.path(), options)?;
 /// assert!(result.report.all_applied_cleanly());
 ///
@@ -1894,7 +1939,7 @@ impl<'a> Iterator for HunkApplier<'a> {
 /// let patch = &patches[0];
 ///
 /// // 3. Apply the patch to the lines in memory.
-/// let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+/// let options = ApplyOptions::exact();
 /// let result = apply_patch_to_lines(patch, Some(&original_lines), &options);
 ///
 /// // 4. Check the results.
@@ -1990,7 +2035,7 @@ pub fn apply_patch_to_lines<T: AsRef<str>>(
 /// ```
 /// "#;
 /// let patch = &parse_diffs(success_diff)?[0];
-/// let options = ApplyOptions::default();
+/// let options = ApplyOptions::new();
 /// let result = try_apply_patch_to_lines(patch, Some(&original_lines), &options)?;
 /// assert!(result.report.all_applied_cleanly());
 /// assert_eq!(result.new_content, "line 1\nline two\n");
@@ -2076,7 +2121,7 @@ pub fn try_apply_patch_to_lines<T: AsRef<str>>(
 /// let patch = &patches[0];
 ///
 /// // 3. Apply the patch to the content in memory.
-/// let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+/// let options = ApplyOptions::exact();
 /// let result = apply_patch_to_content(patch, Some(original_content), &options);
 ///
 /// // 4. Check the results.
@@ -2126,7 +2171,7 @@ pub fn apply_patch_to_content(
 /// ```
 /// "#;
 /// let patch = &parse_diffs(success_diff)?[0];
-/// let options = ApplyOptions::default();
+/// let options = ApplyOptions::new();
 /// let result = try_apply_patch_to_content(patch, Some(original_content), &options)?;
 /// assert!(result.report.all_applied_cleanly());
 /// assert_eq!(result.new_content, "line 1\nline two\n");
@@ -2216,7 +2261,7 @@ pub fn try_apply_patch_to_content(
 /// "#;
 ///
 /// // 2. Call the one-shot function.
-/// let options = ApplyOptions::default();
+/// let options = ApplyOptions::new();
 /// let new_content = patch_content_str(diff_content, Some(original_content), &options)?;
 ///
 /// // 3. Verify the new content.
@@ -2285,7 +2330,7 @@ pub fn patch_content_str(
 /// let hunk = &patches[0].hunks[0];
 ///
 /// // 3. Apply the hunk to the lines in memory.
-/// let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+/// let options = ApplyOptions::exact();
 /// let status = apply_hunk_to_lines(hunk, &mut original_lines, &options);
 ///
 /// // 4. Check the results.
@@ -2347,7 +2392,7 @@ pub fn apply_hunk_to_lines(
                                 // The inner search must be exact, as we are looking for the specific lines to remove
                                 // within the fuzzy-matched block.
                                 let inner_options =
-                                    ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+                                    ApplyOptions::exact();
 
                                 for delta_hunk in &delta_patch.hunks {
                                     if !delta_hunk.has_changes() {
@@ -3203,7 +3248,7 @@ impl<'a> HunkFinder for DefaultHunkFinder<'a> {
 /// let patches = parse_diffs(diff_content)?;
 /// let hunk = &patches[0].hunks[0];
 ///
-/// let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+/// let options = ApplyOptions::exact();
 /// let (location, match_type) = find_hunk_location(hunk, original_content, &options)?;
 ///
 /// assert_eq!(location, HunkLocation { start_index: 0, length: 3 });
@@ -3261,7 +3306,7 @@ pub fn find_hunk_location(
 /// let patches = parse_diffs(diff_content)?;
 /// let hunk = &patches[0].hunks[0];
 ///
-/// let options = ApplyOptions { dry_run: false, fuzz_factor: 0.0 };
+/// let options = ApplyOptions::exact();
 /// let (location, match_type) = find_hunk_location_in_lines(hunk, &original_lines, &options)?;
 ///
 /// assert_eq!(location, HunkLocation { start_index: 0, length: 3 });

@@ -82,14 +82,8 @@ struct ApplyBenchSetup {
 fn applying_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Applying");
 
-    let options_exact = ApplyOptions {
-        fuzz_factor: 0.0,
-        ..Default::default()
-    };
-    let options_fuzzy = ApplyOptions {
-        fuzz_factor: 0.7,
-        ..Default::default()
-    };
+    let options_exact = ApplyOptions::exact();
+    let options_fuzzy = ApplyOptions::new();
 
     // --- Benchmark 1: File Creation ---
     let creation_setup = ApplyBenchSetup {

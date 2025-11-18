@@ -72,7 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     "#;
 
     // 2. Call the one-shot function to parse and apply the patch.
-    let options = ApplyOptions::default();
+    let options = ApplyOptions::new();
     let new_content = patch_content_str(diff_content, Some(original_content), &options)?;
 
     // 3. Verify the new content.

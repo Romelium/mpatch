@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+-   **API:** Added `ApplyOptions::new()`, `ApplyOptions::dry_run()`, and `ApplyOptions::exact()` as convenience constructors to simplify common configuration setups.
 -   **API:** Added a high-level `mpatch::patch_content_str` function for the common one-shot workflow of parsing a diff string and applying it to a content string. It handles parsing, validates that exactly one patch is present, and performs a strict application, returning the new content or a comprehensive error.
 -   **API:** Added "strict" variants of the core apply functions: `try_apply_patch_to_file`, `try_apply_patch_to_content`, and `try_apply_patch_to_lines`. These functions return a `Result` and treat partial applications (where some hunks fail) as an `Err`, simplifying the common apply-or-fail workflow.
 
