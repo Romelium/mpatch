@@ -944,6 +944,48 @@ impl Hunk {
     }
 }
 
+impl std::fmt::Display for Hunk {
+    /// Formats the hunk into a valid unified diff hunk block.
+    ///
+    /// This includes the `@@ ... @@` header and all the context, addition,
+    /// and deletion lines, ending with a newline. This provides a canonical
+    /// string representation of the hunk's content.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use mpatch::Hunk;
+    /// let hunk = Hunk {
+    ///     lines: vec![
+    ///         " context".to_string(),
+    ///         "-deleted".to_string(),
+    ///         "+added".to_string(),
+    ///     ],
+    ///     old_start_line: Some(10),
+    ///     new_start_line: Some(12),
+    /// };
+    /// let expected_str = "@@ -10,2 +12,2 @@\n context\n-deleted\n+added\n";
+    /// assert_eq!(hunk.to_string(), expected_str);
+    /// ```
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let old_len = self.lines.iter().filter(|l| !l.starts_with('+')).count();
+        let new_len = self.lines.iter().filter(|l| !l.starts_with('-')).count();
+        let old_start = self.old_start_line.unwrap_or(1);
+        let new_start = self.new_start_line.unwrap_or(1);
+
+        writeln!(
+            f,
+            "@@ -{},{} +{},{} @@",
+            old_start, old_len, new_start, new_len
+        )?;
+
+        for line in &self.lines {
+            writeln!(f, "{}", line)?;
+        }
+        Ok(())
+    }
+}
+
 /// Represents the location where a hunk should be applied.
 ///
 /// This is returned by [`find_hunk_location`] and provides the necessary
@@ -1124,6 +1166,61 @@ impl Patch {
     /// ````
     pub fn is_deletion(&self) -> bool {
         !self.hunks.is_empty() && self.hunks.iter().all(|h| h.get_replace_block().is_empty())
+    }
+}
+
+impl std::fmt::Display for Patch {
+    /// Formats the patch into a valid unified diff string for a single file.
+    ///
+    /// This provides a canonical string representation of the entire patch,
+    /// including the `---` and `+++` file headers, followed by the
+    /// formatted content of all its hunks. It also correctly handles the
+    /// `\ No newline at end of file` marker when necessary.
+    ///
+    /// This is useful for logging, debugging, or serializing a `Patch` object
+    /// back to its original text format.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use mpatch::{Patch, Hunk};
+    /// let patch = Patch {
+    ///     file_path: "src/main.rs".into(),
+    ///     hunks: vec![Hunk {
+    ///         lines: vec![
+    ///             "-old".to_string(),
+    ///             "+new".to_string(),
+    ///         ],
+    ///         old_start_line: Some(1),
+    ///         new_start_line: Some(1),
+    ///     }],
+    ///     ends_with_newline: false, // To test the marker
+    /// };
+    ///
+    /// let expected_output = concat!(
+    ///     "--- a/src/main.rs\n",
+    ///     "+++ b/src/main.rs\n",
+    ///     "@@ -1,1 +1,1 @@\n",
+    ///     "-old\n",
+    ///     "+new\n",
+    ///     "\\ No newline at end of file"
+    /// );
+    ///
+    /// assert_eq!(patch.to_string(), expected_output);
+    /// ```
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "--- a/{}", self.file_path.display())?;
+        writeln!(f, "+++ b/{}", self.file_path.display())?;
+
+        for hunk in &self.hunks {
+            write!(f, "{}", hunk)?;
+        }
+
+        if !self.ends_with_newline && !self.hunks.is_empty() {
+            write!(f, "\\ No newline at end of file")?;
+        }
+
+        Ok(())
     }
 }
 

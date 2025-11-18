@@ -3,8 +3,9 @@ use mpatch::{
     apply_hunk_to_lines, apply_patch_to_file, apply_patch_to_lines, apply_patches_to_dir,
     find_hunk_location, find_hunk_location_in_lines, parse_diffs, parse_patches,
     parse_patches_from_lines, try_apply_patch_to_content, try_apply_patch_to_file,
-    try_apply_patch_to_lines, ApplyOptions, DefaultHunkFinder, HunkApplyError, HunkApplyStatus,
-    HunkFinder, HunkLocation, MatchType, ParseError, Patch, PatchError, StrictApplyError,
+    try_apply_patch_to_lines, ApplyOptions, DefaultHunkFinder, Hunk, HunkApplyError,
+    HunkApplyStatus, HunkFinder, HunkLocation, MatchType, ParseError, Patch, PatchError,
+    StrictApplyError,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -3074,4 +3075,134 @@ mod patch_content_str_tests {
             panic!("Expected a PartialApply error");
         }
     }
+}
+
+#[test]
+fn test_patch_and_hunk_display_format() {
+    // Test Case 1: Standard patch with multiple hunks
+    let patch = Patch {
+        file_path: "src/main.rs".into(),
+        hunks: vec![
+            Hunk {
+                lines: vec![
+                    " fn main() {".to_string(),
+                    "-    println!(\"old\");".to_string(),
+                    "+    println!(\"new\");".to_string(),
+                    " }".to_string(),
+                ],
+                old_start_line: Some(1),
+                new_start_line: Some(1),
+            },
+            Hunk {
+                lines: vec![
+                    " // some comment".to_string(),
+                    "-// old comment".to_string(),
+                    "+// new comment".to_string(),
+                ],
+                old_start_line: Some(10),
+                new_start_line: Some(10),
+            },
+        ],
+        ends_with_newline: true,
+    };
+
+    let expected_output = concat!(
+        "--- a/src/main.rs\n",
+        "+++ b/src/main.rs\n",
+        "@@ -1,3 +1,3 @@\n",
+        " fn main() {\n",
+        "-    println!(\"old\");\n",
+        "+    println!(\"new\");\n",
+        " }\n",
+        "@@ -10,2 +10,2 @@\n",
+        " // some comment\n",
+        "-// old comment\n",
+        "+// new comment\n",
+    );
+
+    assert_eq!(
+        patch.to_string(),
+        expected_output,
+        "Test for standard patch failed"
+    );
+
+    // Test Case 2: Patch with no newline at end
+    let mut patch_no_newline = patch.clone();
+    patch_no_newline.ends_with_newline = false;
+
+    // The marker is appended after the final newline of the last hunk.
+    let expected_output_no_newline =
+        format!("{}{}", expected_output, "\\ No newline at end of file");
+
+    assert_eq!(
+        patch_no_newline.to_string(),
+        expected_output_no_newline,
+        "Test for patch with no newline failed"
+    );
+
+    // Test Case 3: Empty patch (no hunks)
+    let empty_patch = Patch {
+        file_path: "empty.txt".into(),
+        hunks: vec![],
+        ends_with_newline: true,
+    };
+    let expected_empty = "--- a/empty.txt\n+++ b/empty.txt\n";
+    assert_eq!(
+        empty_patch.to_string(),
+        expected_empty,
+        "Test for empty patch failed"
+    );
+
+    // Test Case 4: Empty patch with no newline at end
+    let empty_patch_no_newline = Patch {
+        file_path: "empty.txt".into(),
+        hunks: vec![],
+        ends_with_newline: false,
+    };
+    // The "No newline" marker should only appear if there are hunks.
+    assert_eq!(
+        empty_patch_no_newline.to_string(),
+        expected_empty,
+        "Test for empty patch with no newline failed"
+    );
+
+    // Test Case 5: Patch for file creation (addition-only hunk)
+    let creation_patch = Patch {
+        file_path: "new_file.txt".into(),
+        hunks: vec![Hunk {
+            lines: vec!["+line 1".to_string(), "+line 2".to_string()],
+            old_start_line: Some(0),
+            new_start_line: Some(1),
+        }],
+        ends_with_newline: true,
+    };
+    let expected_creation = concat!(
+        "--- a/new_file.txt\n",
+        "+++ b/new_file.txt\n",
+        "@@ -0,0 +1,2 @@\n",
+        "+line 1\n",
+        "+line 2\n",
+    );
+    assert_eq!(
+        creation_patch.to_string(),
+        expected_creation,
+        "Test for creation patch failed"
+    );
+
+    // Test Case 6: Direct Hunk Display
+    let single_hunk = Hunk {
+        lines: vec![
+            " context".to_string(),
+            "-deleted".to_string(),
+            "+added".to_string(),
+        ],
+        old_start_line: Some(5),
+        new_start_line: Some(5),
+    };
+    let expected_hunk_str = "@@ -5,2 +5,2 @@\n context\n-deleted\n+added\n";
+    assert_eq!(
+        single_hunk.to_string(),
+        expected_hunk_str,
+        "Test for direct hunk display failed"
+    );
 }
