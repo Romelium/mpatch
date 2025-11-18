@@ -160,6 +160,36 @@
 //!
 //! ## Advanced Usage
 //!
+//! ### Configuring `ApplyOptions`
+//!
+//! The behavior of the `apply` functions is controlled by the [`ApplyOptions`] struct.
+//! `mpatch` provides several convenient ways to construct it:
+//!
+//! ````rust
+//! use mpatch::ApplyOptions;
+//!
+//! // For default behavior (fuzzy matching enabled, not a dry run)
+//! let default_options = ApplyOptions::new();
+//!
+//! // For common presets
+//! let dry_run_options = ApplyOptions::dry_run();
+//! let exact_options = ApplyOptions::exact();
+//!
+//! // For custom configurations using the new fluent methods
+//! let custom_fluent = ApplyOptions::new()
+//!     .with_dry_run(true)
+//!     .with_fuzz_factor(0.9);
+//!
+//! // For complex configurations using the builder pattern
+//! let custom_builder = ApplyOptions::builder()
+//!     .dry_run(true)
+//!     .fuzz_factor(0.9)
+//!     .build();
+//!
+//! assert_eq!(custom_fluent.dry_run, custom_builder.dry_run);
+//! assert_eq!(custom_fluent.fuzz_factor, custom_builder.fuzz_factor);
+//! ````
+//!
 //! ### In-Memory Operations and Error Handling
 //!
 //! This example demonstrates how to use `apply_patch_to_content` for in-memory
@@ -778,6 +808,44 @@ impl ApplyOptions {
             fuzz_factor: 0.0,
             ..Self::default()
         }
+    }
+
+    /// Returns a new `ApplyOptions` instance with the `dry_run` flag set.
+    ///
+    /// This is a fluent method that allows for chaining.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use mpatch::ApplyOptions;
+    /// let options = ApplyOptions::new().with_dry_run(true);
+    /// assert_eq!(options.dry_run, true);
+    ///
+    /// let options2 = options.with_dry_run(false);
+    /// assert_eq!(options2.dry_run, false);
+    /// ```
+    pub fn with_dry_run(mut self, dry_run: bool) -> Self {
+        self.dry_run = dry_run;
+        self
+    }
+
+    /// Returns a new `ApplyOptions` instance with the `fuzz_factor` set.
+    ///
+    /// This is a fluent method that allows for chaining.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use mpatch::ApplyOptions;
+    /// let options = ApplyOptions::new().with_fuzz_factor(0.9);
+    /// assert_eq!(options.fuzz_factor, 0.9);
+    ///
+    /// let options2 = options.with_fuzz_factor(0.5);
+    /// assert_eq!(options2.fuzz_factor, 0.5);
+    /// ```
+    pub fn with_fuzz_factor(mut self, fuzz_factor: f32) -> Self {
+        self.fuzz_factor = fuzz_factor;
+        self
     }
 
     /// Creates a new builder for `ApplyOptions`.

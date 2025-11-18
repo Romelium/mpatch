@@ -2432,6 +2432,37 @@ fn test_apply_options_convenience_constructors() {
 }
 
 #[test]
+fn test_apply_options_fluent_methods() {
+    let options = ApplyOptions::new().with_dry_run(true).with_fuzz_factor(0.9);
+
+    assert!(options.dry_run);
+    assert_eq!(options.fuzz_factor, 0.9);
+
+    // Test that it returns a modified copy
+    let options2 = options.with_dry_run(false);
+    assert!(options.dry_run, "Original options should be unchanged");
+    assert!(
+        !options2.dry_run,
+        "New options should have dry_run set to false"
+    );
+    assert_eq!(
+        options2.fuzz_factor, 0.9,
+        "Other fields should be preserved"
+    );
+
+    let options3 = options2.with_fuzz_factor(0.1);
+    assert_eq!(
+        options2.fuzz_factor, 0.9,
+        "Original options should be unchanged"
+    );
+    assert_eq!(
+        options3.fuzz_factor, 0.1,
+        "New options should have new fuzz factor"
+    );
+    assert!(!options3.dry_run, "Other fields should be preserved");
+}
+
+#[test]
 fn test_patch_from_texts() {
     let old_text = "hello\nworld\n";
     let new_text = "hello\nrust\n";
