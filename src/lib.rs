@@ -114,7 +114,10 @@
 //! several functions for this, depending on your input format:
 //!
 //! - [`parse_diffs`]: The most common entry point. It scans a string (like a markdown
-//!   file's content) for code blocks annotated with `diff` or `patch` and parses them.
+//!   file's content) for code blocks annotated with `diff` or `patch` and parses them,
+//!   returning a `Vec<Patch>`.
+//! - [`parse_single_patch`]: A convenient wrapper around `parse_diffs` that ensures
+//!   the input contains exactly one patch, returning a `Result<Patch, _>`.
 //! - [`parse_patches`]: A lower-level parser that processes a raw unified diff string
 //!   directly, without needing markdown fences.
 //! - [`parse_patches_from_lines`]: The lowest-level parser. It operates on an iterator
@@ -354,6 +357,28 @@ pub enum ParseError {
         /// The line number where the diff block started.
         line: usize,
     },
+}
+
+/// Represents errors that can occur when parsing a diff expected to contain exactly one patch.
+///
+/// This enum is returned by [`parse_single_patch`].
+#[derive(Error, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum SingleParseError {
+    /// An error occurred during the underlying diff parsing.
+    #[error("Failed to parse diff content")]
+    Parse(#[from] ParseError),
+
+    /// The provided diff content did not contain any valid ` ```diff` blocks.
+    #[error("No patches were found in the provided diff content")]
+    NoPatchesFound,
+
+    /// The provided diff content contained patches for more than one file, which is not
+    /// supported by this function. Use [`parse_diffs`] for multi-file operations.
+    #[error(
+        "Found patches for multiple files ({0} patches), but this function only supports single-file diffs"
+    )]
+    MultiplePatchesFound(usize),
 }
 
 /// Represents "hard" errors that can occur during patch operations.
@@ -1548,6 +1573,73 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
     Ok(all_patches)
 }
 
+/// Parses a string containing a diff and returns a single [`Patch`] object.
+///
+/// This is a convenience function that wraps [`parse_diffs`] but enforces that the
+/// input `content` results in exactly one `Patch`. It is useful when you expect
+/// a diff for a single file and want to handle the "zero or many" cases as an error.
+///
+/// # Arguments
+///
+/// * `content` - A string slice containing the text to parse, which can be a raw
+///   unified diff or markdown containing a ` ```diff` block.
+///
+/// # Errors
+///
+/// Returns a [`SingleParseError`] if:
+/// - The underlying parsing fails (e.g., a diff block is missing a file header).
+/// - No patches are found in the content.
+/// - More than one patch is found in the content.
+///
+/// # Example
+///
+/// ````rust
+/// # use mpatch::{parse_single_patch, SingleParseError};
+/// // --- Success Case ---
+/// let diff_content = r#"
+/// ```diff
+/// --- a/src/main.rs
+/// +++ b/src/main.rs
+/// @@ -1,3 +1,3 @@
+///  fn main() {
+/// -    println!("Hello, world!");
+/// +    println!("Hello, mpatch!");
+///  }
+/// ```
+/// "#;
+/// let patch = parse_single_patch(diff_content).unwrap();
+/// assert_eq!(patch.file_path.to_str(), Some("src/main.rs"));
+///
+/// // --- Error Case (Multiple Patches) ---
+/// let multi_file_diff = r#"
+/// ```diff
+/// --- a/file1.txt
+/// +++ b/file1.txt
+/// @@ -1 +1 @@
+/// -a
+/// +b
+/// --- a/file2.txt
+/// +++ b/file2.txt
+/// @@ -1 +1 @@
+/// -c
+/// +d
+/// ```
+/// "#;
+/// let result = parse_single_patch(multi_file_diff);
+/// assert!(matches!(result, Err(SingleParseError::MultiplePatchesFound(2))));
+/// ````
+pub fn parse_single_patch(content: &str) -> Result<Patch, SingleParseError> {
+    let mut patches = parse_diffs(content)?;
+
+    if patches.len() > 1 {
+        Err(SingleParseError::MultiplePatchesFound(patches.len()))
+    } else if patches.is_empty() {
+        Err(SingleParseError::NoPatchesFound)
+    } else {
+        // .remove(0) is safe here because we've confirmed the length is 1.
+        Ok(patches.remove(0))
+    }
+}
 /// Parses a string containing raw unified diff content into a vector of [`Patch`] objects.
 ///
 /// Unlike [`parse_diffs`], this function does not look for markdown code blocks.

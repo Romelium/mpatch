@@ -2882,6 +2882,105 @@ mod fuzzy_finder_diagnostics {
     }
 }
 
+#[cfg(test)]
+mod parse_single_patch_tests {
+    use indoc::indoc;
+    use mpatch::{parse_single_patch, ParseError, SingleParseError};
+
+    const SUCCESS_DIFF: &str = indoc! {r#"
+        ```diff
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1,3 +1,3 @@
+         line 1
+        -line 2
+        +line two
+         line 3
+        ```
+    "#};
+
+    #[test]
+    fn test_success_case() {
+        let patch = parse_single_patch(SUCCESS_DIFF).unwrap();
+        assert_eq!(patch.file_path.to_str(), Some("file.txt"));
+        assert_eq!(patch.hunks.len(), 1);
+    }
+
+    #[test]
+    fn test_err_no_patches_found() {
+        let diff = "Just some text, no diff block.";
+        let result = parse_single_patch(diff);
+        assert!(matches!(result, Err(SingleParseError::NoPatchesFound)));
+    }
+
+    #[test]
+    fn test_err_multiple_patches_in_one_block() {
+        let diff = indoc! {r#"
+            ```diff
+            --- a/file1.txt
+            +++ b/file1.txt
+            @@ -1 +1 @@
+            -a
+            +b
+            --- a/file2.txt
+            +++ b/file2.txt
+            @@ -1 +1 @@
+            -c
+            +d
+            ```
+        "#};
+        let result = parse_single_patch(diff);
+        assert!(matches!(
+            result,
+            Err(SingleParseError::MultiplePatchesFound(2))
+        ));
+    }
+
+    #[test]
+    fn test_err_multiple_patches_in_separate_blocks() {
+        let diff = indoc! {r#"
+            ```diff
+            --- a/file1.txt
+            +++ b/file1.txt
+            @@ -1 +1 @@
+            -a
+            +b
+            ```
+
+            ```diff
+            --- a/file2.txt
+            +++ b/file2.txt
+            @@ -1 +1 @@
+            -c
+            +d
+            ```
+        "#};
+        let result = parse_single_patch(diff);
+        assert!(matches!(
+            result,
+            Err(SingleParseError::MultiplePatchesFound(2))
+        ));
+    }
+
+    #[test]
+    fn test_err_parse_error_propagates() {
+        let diff = indoc! {r#"
+            ```diff
+            @@ -1 +1 @@
+            -a
+            +b
+            ```
+        "#}; // Missing --- header
+        let result = parse_single_patch(diff);
+        assert!(matches!(
+            result,
+            Err(SingleParseError::Parse(ParseError::MissingFileHeader {
+                line: 1
+            }))
+        ));
+    }
+}
+
 #[test]
 fn test_strict_apply_variants() {
     let original_content = "line 1\nline 2\nline 3\n\nline 5\nline 6\nline 7\n";
