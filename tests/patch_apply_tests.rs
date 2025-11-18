@@ -3336,3 +3336,69 @@ fn test_patch_and_hunk_display_format() {
         "Test for direct hunk display failed"
     );
 }
+
+#[test]
+fn test_apply_result_helpers() {
+    use mpatch::{ApplyResult, HunkApplyError, HunkApplyStatus, HunkLocation, MatchType};
+
+    // Case 1: All successful
+    let all_success = ApplyResult {
+        hunk_results: vec![
+            HunkApplyStatus::Applied {
+                location: HunkLocation {
+                    start_index: 0,
+                    length: 1,
+                },
+                match_type: MatchType::Exact,
+                replaced_lines: vec![],
+            },
+            HunkApplyStatus::SkippedNoChanges,
+        ],
+    };
+    assert!(all_success.all_applied_cleanly());
+    assert!(!all_success.has_failures());
+    assert_eq!(all_success.success_count(), 2);
+    assert_eq!(all_success.failure_count(), 0);
+
+    // Case 2: Mixed success and failure
+    let mixed_result = ApplyResult {
+        hunk_results: vec![
+            HunkApplyStatus::Applied {
+                location: HunkLocation {
+                    start_index: 0,
+                    length: 1,
+                },
+                match_type: MatchType::Exact,
+                replaced_lines: vec![],
+            },
+            HunkApplyStatus::Failed(HunkApplyError::ContextNotFound),
+            HunkApplyStatus::SkippedNoChanges,
+            HunkApplyStatus::Failed(HunkApplyError::AmbiguousExactMatch(vec![])),
+        ],
+    };
+    assert!(!mixed_result.all_applied_cleanly());
+    assert!(mixed_result.has_failures());
+    assert_eq!(mixed_result.success_count(), 2);
+    assert_eq!(mixed_result.failure_count(), 2);
+
+    // Case 3: All failures
+    let all_failures = ApplyResult {
+        hunk_results: vec![
+            HunkApplyStatus::Failed(HunkApplyError::ContextNotFound),
+            HunkApplyStatus::Failed(HunkApplyError::ContextNotFound),
+        ],
+    };
+    assert!(!all_failures.all_applied_cleanly());
+    assert!(all_failures.has_failures());
+    assert_eq!(all_failures.success_count(), 0);
+    assert_eq!(all_failures.failure_count(), 2);
+
+    // Case 4: Empty result
+    let empty_result = ApplyResult {
+        hunk_results: vec![],
+    };
+    assert!(empty_result.all_applied_cleanly());
+    assert!(!empty_result.has_failures());
+    assert_eq!(empty_result.success_count(), 0);
+    assert_eq!(empty_result.failure_count(), 0);
+}

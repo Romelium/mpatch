@@ -1030,6 +1030,72 @@ impl BatchResult {
             .collect()
     }
 }
+
+impl ApplyResult {
+    /// Checks if any hunk in the patch failed to apply.
+    ///
+    /// This is the logical opposite of [`all_applied_cleanly`](Self::all_applied_cleanly).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use mpatch::{ApplyResult, HunkApplyStatus, HunkApplyError, HunkLocation, MatchType};
+    /// let failed_result = ApplyResult {
+    ///     hunk_results: vec![
+    ///         HunkApplyStatus::Applied { location: HunkLocation { start_index: 0, length: 1 }, match_type: MatchType::Exact, replaced_lines: vec!["old".to_string()] },
+    ///         HunkApplyStatus::Failed(HunkApplyError::ContextNotFound),
+    ///     ],
+    /// };
+    /// assert!(failed_result.has_failures());
+    ///
+    /// let successful_result = ApplyResult {
+    ///     hunk_results: vec![ HunkApplyStatus::SkippedNoChanges ],
+    /// };
+    /// assert!(!successful_result.has_failures());
+    /// ```
+    pub fn has_failures(&self) -> bool {
+        !self.all_applied_cleanly()
+    }
+
+    /// Returns the number of hunks that failed to apply.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use mpatch::{ApplyResult, HunkApplyStatus, HunkApplyError, HunkLocation, MatchType};
+    /// let result = ApplyResult {
+    ///     hunk_results: vec![
+    ///         HunkApplyStatus::Applied { location: HunkLocation { start_index: 0, length: 1 }, match_type: MatchType::Exact, replaced_lines: vec!["old".to_string()] },
+    ///         HunkApplyStatus::Failed(HunkApplyError::ContextNotFound),
+    ///         HunkApplyStatus::Failed(HunkApplyError::AmbiguousExactMatch(vec![])),
+    ///     ],
+    /// };
+    /// assert_eq!(result.failure_count(), 2);
+    /// ```
+    pub fn failure_count(&self) -> usize {
+        self.failures().len()
+    }
+
+    /// Returns the number of hunks that were applied successfully or skipped.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use mpatch::{ApplyResult, HunkApplyStatus, HunkApplyError, HunkLocation, MatchType};
+    /// let result = ApplyResult {
+    ///     hunk_results: vec![
+    ///         HunkApplyStatus::Applied { location: HunkLocation { start_index: 0, length: 1 }, match_type: MatchType::Exact, replaced_lines: vec!["old".to_string()] },
+    ///         HunkApplyStatus::SkippedNoChanges,
+    ///         HunkApplyStatus::Failed(HunkApplyError::ContextNotFound),
+    ///     ],
+    /// };
+    /// assert_eq!(result.success_count(), 2);
+    /// ```
+    pub fn success_count(&self) -> usize {
+        self.hunk_results.len() - self.failure_count()
+    }
+}
+
 // --- Data Structures ---
 
 /// Represents a single hunk of changes within a patch.
