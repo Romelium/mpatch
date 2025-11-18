@@ -458,7 +458,7 @@ fn write_report_footer(
     }
 }
 
-/// Formats a `Patch` struct back into a human-readable diff string for reporting.
+/// Formats a [`Patch`] struct back into a human-readable diff string for reporting.
 fn format_patch_for_report(patch: &Patch) -> String {
     let mut output = String::new();
     let _ = writeln!(output, "--- a/{}", patch.file_path.display());
