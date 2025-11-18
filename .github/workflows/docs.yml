@@ -68,7 +68,9 @@ jobs:
             --no-progress
             --cache
             --max-cache-age 1d
-            './target/doc/**/*.html'
+            --exclude 'docs.rs'
+            --exclude 'adobe.com'
+            './target/doc/mpatch/**/*.html'
             './**/*.md'
         env:
           # Use GitHub token to avoid API rate-limiting when checking github.com links.
