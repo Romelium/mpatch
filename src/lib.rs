@@ -112,7 +112,7 @@
 //!
 //! First, you convert diff text into a structured `Vec<Patch>`. `mpatch` provides
 //! several functions for this, depending on your input format:
-//! 
+//!
 //! - [`parse_diffs()`]: The most common entry point. It scans a string (like a markdown
 //!   file's content) for code blocks annotated with `diff` or `patch` and parses them,
 //!   returning a `Vec<Patch>`.
@@ -611,7 +611,7 @@ pub enum OneShotError {
 
 /// The reason a hunk failed to apply.
 ///
-/// This enum provides specific details about why a hunk could not be applied to the 
+/// This enum provides specific details about why a hunk could not be applied to the
 /// target content. It is found within the [`HunkApplyStatus::Failed`] variant.
 ///
 /// # Example
@@ -2041,7 +2041,7 @@ impl Patch {
         // Wrap in markdown block for our parser
         let full_diff = format!("```diff\n{}\n```", diff_text.trim());
 
-        let patches = parse_diffs(&full_diff)?; 
+        let patches = parse_diffs(&full_diff)?;
 
         if let Some(patch) = patches.into_iter().next() {
             Ok(patch)
@@ -2212,7 +2212,7 @@ impl std::fmt::Display for Patch {
 
 /// Parses a string containing one or more markdown diff blocks into a vector of [`Patch`] objects.
 ///
-/// This function scans the input `content` for markdown-style code blocks annotated 
+/// This function scans the input `content` for markdown-style code blocks annotated
 /// with `diff` or `patch` (e.g., ` ````diff ... ``` `, ` ````rust, patch ... ``` `).
 /// It can handle multiple blocks in one string, and multiple file patches within a
 /// single block.
@@ -2223,7 +2223,7 @@ impl std::fmt::Display for Patch {
 ///
 /// # Errors
 ///
-/// Returns `Err(ParseError::MissingFileHeader)` if a diff block contains patch 
+/// Returns `Err(ParseError::MissingFileHeader)` if a diff block contains patch
 /// hunks but no `--- a/path/to/file` header.
 ///
 /// # Example
@@ -2647,7 +2647,7 @@ fn map_io_error(path: PathBuf, e: std::io::Error) -> PatchError {
 /// This is a critical security function to prevent path traversal attacks (e.g.,
 /// a malicious patch trying to modify `../../etc/passwd`). It works by canonicalizing
 /// both the base directory and the final target path to their absolute, symlink-resolved
-/// forms and then checking if the target path is a child of the base directory. 
+/// forms and then checking if the target path is a child of the base directory.
 ///
 /// # Arguments
 ///
@@ -3249,7 +3249,7 @@ impl<'a> Iterator for HunkApplier<'a> {
 ///
 /// This is a high-level convenience function that drives a [`HunkApplier`] iterator
 /// to completion and returns the final result. For more granular control, create
-/// and use a `HunkApplier` directly. 
+/// and use a `HunkApplier` directly.
 ///
 /// # Arguments
 ///
@@ -3566,11 +3566,11 @@ pub fn try_apply_patch_to_content(
 /// taking a diff (e.g., from a markdown file) and applying it to some existing
 /// content in memory. It combines parsing and strict application into a single call.
 ///
-/// It performs the following steps: 
+/// It performs the following steps:
 /// 1.  Parses the `diff_content` using [`parse_diffs()`].
 /// 2.  Ensures that exactly one `Patch` is found. If zero or more than one are
 ///     found, it returns an error.
-/// 3.  Applies the single patch to `original_content` using the strict logic of 
+/// 3.  Applies the single patch to `original_content` using the strict logic of
 ///     [`try_apply_patch_to_content()`].
 ///
 /// # Arguments
@@ -4670,7 +4670,7 @@ impl<'a> HunkFinder for DefaultHunkFinder<'a> {
 ///
 /// This is useful for tools that want to analyze where a patch would apply without
 /// actually performing the patch, or for building custom patch application logic.
-/// 
+///
 /// # Arguments
 ///
 /// **Note:** For improved performance when content is already available as a slice
