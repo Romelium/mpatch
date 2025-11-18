@@ -41,6 +41,16 @@ jobs:
           toolchain: stable
           cache: 'cargo'
 
+      - name: Setup sccache
+        if: steps.changed_files.outputs.docs_relevant_any_changed == 'true'
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Configure Rust to use sccache
+        if: steps.changed_files.outputs.docs_relevant_any_changed == 'true'
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> $GITHUB_ENV
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+
       - name: Check Intra-Doc Links
         if: steps.changed_files.outputs.docs_relevant_any_changed == 'true'
         env:
@@ -75,6 +85,11 @@ jobs:
         env:
           # Use GitHub token to avoid API rate-limiting when checking github.com links.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Show sccache stats
+        if: always() && steps.changed_files.outputs.docs_relevant_any_changed == 'true'
+        shell: bash
+        run: ${SCCACHE_PATH} --show-stats
 
       - name: Indicate checks skipped
         if: steps.changed_files.outputs.docs_relevant_any_changed == 'false'

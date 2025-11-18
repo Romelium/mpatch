@@ -58,9 +58,20 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
+          # The 'cargo' cache is for dependencies, sccache will cache compilation results
           cache: 'cargo'
           components: clippy, rustfmt
         # This step always runs, as caching makes it fast, and subsequent steps might need it.
+
+      - name: Setup sccache
+        if: steps.changed_files.outputs.code_any_changed == 'true'
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Configure Rust to use sccache
+        if: steps.changed_files.outputs.code_any_changed == 'true'
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> $GITHUB_ENV
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
 
       - name: Install cargo-hack
         uses: taiki-e/install-action@v2
@@ -87,6 +98,11 @@ jobs:
       - name: Build (Release) for each feature
         if: steps.changed_files.outputs.code_any_changed == 'true'
         run: cargo hack --each-feature build --release --verbose
+
+      - name: Show sccache stats
+        if: always() && steps.changed_files.outputs.code_any_changed == 'true'
+        shell: bash
+        run: ${SCCACHE_PATH} --show-stats
 
       - name: Indicate checks skipped (if applicable)
         if: steps.changed_files.outputs.code_any_changed == 'false'
