@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 -   **API:** Added `mpatch::parse_conflict_markers` to parse patches in the "Conflict Marker" format (`<<<<`, `====`, `>>>>`), commonly used in Git merge conflicts and AI suggestions.
+-   **API:** Added `mpatch::PatchFormat` enum and `mpatch::detect_patch` function to programmatically identify if content is a Unified Diff, Markdown block, or Conflict Marker.
+-   **API:** Added `mpatch::parse_auto` as a robust, unified entry point that automatically detects the format and parses the content accordingly.
 -   **Parser:** `parse_diffs` now automatically detects and parses conflict marker blocks if standard unified diff parsing fails.
 -   **API:** Added `mpatch::parse_single_patch` to simplify the common workflow of parsing a diff that is expected to contain exactly one patch. It returns a `Result<Patch, SingleParseError>`, handling the "zero or many" cases as an error.
 -   **API:** Added `ApplyOptions::new()`, `ApplyOptions::dry_run()`, and `ApplyOptions::exact()` as convenience constructors to simplify common configuration setups.
@@ -18,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 -   **API:** Implemented `std::fmt::Display` for `Patch` and `Hunk` to format them as a valid unified diff string. This provides a canonical representation useful for logging, debugging, and serialization.
 -   **API:** Added fluent, chainable methods `ApplyOptions::with_dry_run(bool)` and `ApplyOptions::with_fuzz_factor(f32)` to simplify creating custom configurations.
 -   **API:** Added convenience methods `ApplyResult::has_failures()`, `ApplyResult::failure_count()`, and `ApplyResult::success_count()` to simplify inspecting the outcome of a patch operation.
+
+### Changed
+
+-   **API:** `patch_content_str` and `parse_single_patch` now use `parse_auto` internally. This means they now accept raw unified diff strings and conflict markers directly, in addition to the previously supported Markdown blocks.
 
 ## [1.2.0] - 2025-11-17
 

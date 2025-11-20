@@ -2210,6 +2210,191 @@ impl std::fmt::Display for Patch {
 
 // --- Core Logic ---
 
+/// Identifies the syntactic format of a patch content string.
+///
+/// This enum is returned by [`detect_patch`](crate::detect_patch) and used internally by
+/// [`parse_auto`](crate::parse_auto) to determine which parsing strategy to apply.
+///
+/// It distinguishes between raw diffs (commonly output by `git diff`), diffs wrapped
+/// in Markdown code blocks (commonly output by LLMs), and conflict marker blocks
+/// (used in merge conflicts or specific AI suggestions).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PatchFormat {
+    /// A standard Unified Diff format.
+    ///
+    /// This format is characterized by file headers starting with `---` and `+++`,
+    /// or hunk headers starting with `@@`.
+    ///
+    /// # Example
+    /// ```text
+    /// --- a/file.rs
+    /// +++ b/file.rs
+    /// @@ -1,3 +1,3 @@
+    ///  fn main() {
+    /// -    println!("Old");
+    /// +    println!("New");
+    ///  }
+    /// ```
+    Unified,
+
+    /// A Markdown file containing diff code blocks.
+    ///
+    /// This format is characterized by the presence of code fences annotated with
+    /// `diff` or `patch` (e.g., ` ```diff `). `mpatch` will extract and parse
+    /// the content inside these blocks.
+    ///
+    /// # Example
+    /// ````text
+    /// Here is the fix for your issue:
+    ///
+    /// ```diff
+    /// --- a/src/main.rs
+    /// +++ b/src/main.rs
+    /// @@ -1 +1 @@
+    /// -old_function();
+    /// +new_function();
+    /// ```
+    /// ````
+    Markdown,
+
+    /// A file containing Conflict Markers.
+    ///
+    /// This format is characterized by the specific markers `<<<<`, `====`, and `>>>>`.
+    /// It is commonly found in Git merge conflicts or AI code suggestions that use
+    /// this format to denote "before" and "after" states without full diff headers.
+    ///
+    /// # Example
+    /// ```text
+    /// fn calculate() {
+    /// <<<<
+    ///     return x + y;
+    /// ====
+    ///     return x * y;
+    /// >>>>
+    /// }
+    /// ```
+    Conflict,
+
+    /// The format could not be determined.
+    ///
+    /// The content did not contain any recognizable signatures (such as diff headers,
+    /// markdown fences, or conflict markers).
+    Unknown,
+}
+
+/// Automatically detects the patch format of the provided content.
+///
+/// This function scans the content efficiently (without parsing the full structure)
+/// to determine if it contains Markdown code blocks, standard unified diff headers,
+/// or conflict markers.
+///
+/// # Priority
+/// 1. **Markdown**: If ` ```diff` or ` ```patch` fences are found, it is treated as Markdown.
+/// 2. **Unified**: If `--- a/` or `diff --git` headers are found, it is treated as a Unified Diff.
+/// 3. **Conflict**: If `<<<<` markers are found, it is treated as Conflict Markers.
+///
+/// # Example
+///
+/// ```rust
+/// use mpatch::{detect_patch, PatchFormat};
+///
+/// let md = "```diff\n--- a/f\n+++ b/f\n```";
+/// assert_eq!(detect_patch(md), PatchFormat::Markdown);
+///
+/// let raw = "--- a/f\n+++ b/f\n@@ -1 +1 @@";
+/// assert_eq!(detect_patch(raw), PatchFormat::Unified);
+/// ```
+pub fn detect_patch(content: &str) -> PatchFormat {
+    let mut lines = content.lines().peekable();
+    let mut has_conflict_start = false;
+    let mut has_conflict_middle = false;
+    let mut has_conflict_end = false;
+
+    while let Some(line) = lines.next() {
+        // Check for Markdown code blocks
+        if line.starts_with("```") {
+            let info = &line[3..];
+            if info.contains("diff") || info.contains("patch") {
+                return PatchFormat::Markdown;
+            }
+        }
+
+        // Check for Unified Diff headers
+        if line.starts_with("diff --git") {
+            return PatchFormat::Unified;
+        }
+
+        // Check for `--- ` followed by `+++ `
+        if line.starts_with("--- ") {
+            if let Some(next_line) = lines.peek() {
+                if next_line.starts_with("+++ ") {
+                    return PatchFormat::Unified;
+                }
+            }
+        }
+
+        // Check for Hunk Header
+        if line.starts_with("@@ -") {
+            if line.contains(" @@") {
+                return PatchFormat::Unified;
+            }
+        }
+
+        // Check for Conflict Markers
+        if line.starts_with("<<<<") {
+            has_conflict_start = true;
+        } else if line.starts_with("====") {
+            has_conflict_middle = true;
+        } else if line.starts_with(">>>>") {
+            has_conflict_end = true;
+        }
+    }
+
+    if has_conflict_start && (has_conflict_middle || has_conflict_end) {
+        PatchFormat::Conflict
+    } else {
+        PatchFormat::Unknown
+    }
+}
+
+/// Automatically detects the format and parses the content into patches.
+///
+/// This is the most robust entry point for parsing. It handles Markdown files,
+/// raw diff files, and conflict markers automatically.
+///
+/// # Example
+///
+/// ```rust
+/// use mpatch::parse_auto;
+///
+/// // Works with Markdown
+/// let patches = parse_auto("```diff\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n```").unwrap();
+/// assert_eq!(patches.len(), 1);
+///
+/// // Works with Raw Diffs
+/// let patches = parse_auto("--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b").unwrap();
+/// assert_eq!(patches.len(), 1);
+/// ```
+pub fn parse_auto(content: &str) -> Result<Vec<Patch>, ParseError> {
+    match detect_patch(content) {
+        PatchFormat::Markdown => parse_diffs(content),
+        PatchFormat::Unified => parse_patches(content),
+        PatchFormat::Conflict => Ok(parse_conflict_markers(content)),
+        PatchFormat::Unknown => {
+            // If unknown, we try parsing as raw patches as a fallback,
+            // as it might be a fragment without headers.
+            let patches = parse_patches(content)?;
+            if !patches.is_empty() {
+                Ok(patches)
+            } else {
+                // If that yields nothing, return empty.
+                Ok(Vec::new())
+            }
+        }
+    }
+}
+
 /// Parses a string containing one or more markdown diff blocks into a vector of [`Patch`] objects.
 ///
 /// This function scans the input `content` for markdown-style code blocks annotated
@@ -2254,7 +2439,7 @@ impl std::fmt::Display for Patch {
 /// assert_eq!(patches[0].hunks.len(), 1);
 /// ````
 pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
-    debug!("Starting to parse diffs from content.");
+    debug!("Starting to parse diffs from content (Markdown mode).");
     let mut all_patches = Vec::new();
     let mut lines = content.lines().enumerate().peekable();
 
@@ -2291,38 +2476,8 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
             .take_while(|&line| line != "```")
             .collect();
 
-        let standard_result = parse_patches_from_lines(block_lines.clone().into_iter());
-
-        let block_patches = match standard_result {
-            Ok(patches) => {
-                if !patches.is_empty() {
-                    patches
-                } else {
-                    // Standard parsing found nothing. Try conflict markers.
-
-                    // If conflict markers found, return them. Otherwise return the empty list.
-                    parse_conflict_markers_from_lines(block_lines.into_iter())
-                }
-            }
-            Err(e) => {
-                // Standard parsing failed (likely MissingFileHeader).
-                // Check if it's actually a conflict marker block.
-                let conflict_patches = parse_conflict_markers_from_lines(block_lines.into_iter());
-                if !conflict_patches.is_empty() {
-                    conflict_patches
-                } else {
-                    // It wasn't a conflict marker block, so return the original error.
-                    // If the error was MissingFileHeader, map it to the block start for better UX.
-                    match e {
-                        ParseError::MissingFileHeader { .. } => {
-                            return Err(ParseError::MissingFileHeader {
-                                line: diff_block_start_line,
-                            });
-                        }
-                    }
-                }
-            }
-        };
+        // Optimization: Use the shared internal logic for block parsing
+        let block_patches = parse_generic_block_lines(block_lines, diff_block_start_line)?;
         all_patches.extend(block_patches);
     }
 
@@ -2331,6 +2486,41 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
         all_patches.len()
     );
     Ok(all_patches)
+}
+
+/// Helper function to parse a block of lines that could be Unified or Conflict.
+/// This consolidates the fallback logic previously inside `parse_diffs`.
+fn parse_generic_block_lines(
+    lines: Vec<&str>,
+    start_line: usize,
+) -> Result<Vec<Patch>, ParseError> {
+    // 1. Try parsing as standard unified diff
+    let standard_result = parse_patches_from_lines(lines.clone().into_iter());
+
+    match standard_result {
+        Ok(patches) => {
+            if !patches.is_empty() {
+                Ok(patches)
+            } else {
+                // 2. If standard parsing found nothing, try conflict markers
+                Ok(parse_conflict_markers_from_lines(lines.into_iter()))
+            }
+        }
+        Err(e) => {
+            // 3. If standard parsing failed (e.g. missing header), check for conflict markers
+            let conflict_patches = parse_conflict_markers_from_lines(lines.into_iter());
+            if !conflict_patches.is_empty() {
+                Ok(conflict_patches)
+            } else {
+                // 4. Return original error if both failed
+                match e {
+                    ParseError::MissingFileHeader { .. } => {
+                        Err(ParseError::MissingFileHeader { line: start_line })
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Parses a string containing a diff and returns a single [`Patch`] object.
@@ -2389,7 +2579,8 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
 /// assert!(matches!(result, Err(SingleParseError::MultiplePatchesFound(2))));
 /// ````
 pub fn parse_single_patch(content: &str) -> Result<Patch, SingleParseError> {
-    let mut patches = parse_diffs(content)?;
+    // Changed from parse_diffs to parse_auto to support raw diffs too
+    let mut patches = parse_auto(content)?;
 
     if patches.len() > 1 {
         Err(SingleParseError::MultiplePatchesFound(patches.len()))
@@ -3744,7 +3935,8 @@ pub fn patch_content_str(
     original_content: Option<&str>,
     options: &ApplyOptions,
 ) -> Result<String, OneShotError> {
-    let mut patches = parse_diffs(diff_content)?;
+    // Changed from parse_diffs to parse_auto
+    let mut patches = parse_auto(diff_content)?;
     if patches.is_empty() {
         return Err(OneShotError::NoPatchesFound);
     }

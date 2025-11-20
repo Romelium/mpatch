@@ -5,7 +5,7 @@ use mpatch::{
     parse_patches_from_lines, patch_content_str, try_apply_patch_to_content,
     try_apply_patch_to_file, try_apply_patch_to_lines, ApplyOptions, DefaultHunkFinder, Hunk,
     HunkApplyError, HunkApplyStatus, HunkFinder, HunkLocation, MatchType, ParseError, Patch,
-    PatchError, StrictApplyError,
+    PatchError, StrictApplyError, detect_patch, parse_auto, PatchFormat
 };
 use std::fs;
 use tempfile::tempdir;
@@ -3770,4 +3770,300 @@ fn test_malformed_diff_returns_error_not_ignored() {
 
     let result = parse_diffs(diff);
     assert!(matches!(result, Err(ParseError::MissingFileHeader { .. })));
+}
+
+// --- Detection Tests ---
+
+#[test]
+fn test_detect_markdown_standard() {
+    let content = indoc! {r#"
+        Here is a change:
+        ```diff
+        --- a/file.rs
+        +++ b/file.rs
+        @@ -1 +1 @@
+        -old
+        +new
+        ```
+    "#};
+    assert_eq!(detect_patch(content), PatchFormat::Markdown);
+}
+
+#[test]
+fn test_detect_markdown_patch_keyword() {
+    let content = indoc! {r#"
+        ```patch
+        --- a/file
+        +++ b/file
+        ```
+    "#};
+    assert_eq!(detect_patch(content), PatchFormat::Markdown);
+}
+
+#[test]
+fn test_detect_markdown_with_language_hint() {
+    let content = indoc! {r#"
+        ```rust, diff
+        --- a/file
+        +++ b/file
+        ```
+    "#};
+    assert_eq!(detect_patch(content), PatchFormat::Markdown);
+}
+
+#[test]
+fn test_detect_unified_git_header() {
+    let content = indoc! {r#"
+        diff --git a/src/main.rs b/src/main.rs
+        index 88d9554..e0c99b6 100644
+        --- a/src/main.rs
+        +++ b/src/main.rs
+        @@ -1,3 +1,3 @@
+    "#};
+    assert_eq!(detect_patch(content), PatchFormat::Unified);
+}
+
+#[test]
+fn test_detect_unified_standard_headers() {
+    let content = indoc! {r#"
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1 +1 @@
+        -foo
+        +bar
+    "#};
+    assert_eq!(detect_patch(content), PatchFormat::Unified);
+}
+
+#[test]
+fn test_detect_unified_hunk_only() {
+    // Sometimes users paste just the hunk without file headers
+    let content = indoc! {r#"
+        @@ -10,4 +10,4 @@
+         ctx
+        -old
+        +new
+         ctx
+    "#};
+    assert_eq!(detect_patch(content), PatchFormat::Unified);
+}
+
+#[test]
+fn test_detect_conflict_markers_standard() {
+    let content = indoc! {r#"
+        <<<<
+        old code
+        ====
+        new code
+        >>>>
+    "#};
+    assert_eq!(detect_patch(content), PatchFormat::Conflict);
+}
+
+#[test]
+fn test_detect_conflict_markers_git_style() {
+    let content = indoc! {r#"
+        <<<<<<< HEAD
+        current change
+        =======
+        incoming change
+        >>>>>>> feature-branch
+    "#};
+    assert_eq!(detect_patch(content), PatchFormat::Conflict);
+}
+
+#[test]
+fn test_detect_conflict_markers_missing_middle() {
+    // Pure deletion case in conflict markers
+    let content = indoc! {r#"
+        <<<<
+        delete me
+        >>>>
+    "#};
+    assert_eq!(detect_patch(content), PatchFormat::Conflict);
+}
+
+#[test]
+fn test_detect_conflict_markers_missing_end() {
+    // EOF case
+    let content = indoc! {r#"
+        <<<<
+        old
+        ====
+        new
+    "#};
+    // The logic requires start && (middle || end)
+    assert_eq!(detect_patch(content), PatchFormat::Conflict);
+}
+
+// --- False Positive Tests ---
+
+#[test]
+fn test_detect_false_positive_bitwise_shift() {
+    // Should not be detected as Conflict
+    let content = "let x = 1 << 2;";
+    assert_eq!(detect_patch(content), PatchFormat::Unknown);
+}
+
+#[test]
+fn test_detect_false_positive_comparison() {
+    // Should not be detected as Conflict
+    let content = "if x <= y && a >= b {}";
+    assert_eq!(detect_patch(content), PatchFormat::Unknown);
+}
+
+#[test]
+fn test_detect_false_positive_list_item() {
+    // Should not be detected as Unified
+    let content = "--- this is just a list item";
+    assert_eq!(detect_patch(content), PatchFormat::Unknown);
+}
+
+#[test]
+fn test_detect_false_positive_hr() {
+    // Horizontal rule in markdown
+    let content = "---\n\n# Title";
+    assert_eq!(detect_patch(content), PatchFormat::Unknown);
+}
+
+#[test]
+fn test_detect_false_positive_plus_list() {
+    // Should not be detected as Unified
+    let content = "+++ Just a list item";
+    assert_eq!(detect_patch(content), PatchFormat::Unknown);
+}
+
+#[test]
+fn test_detect_unified_requires_plus_after_minus() {
+    // "--- " must be followed by "+++ " on the next line to be detected as Unified via headers
+    let content = "--- a/file\nnot a plus line";
+    assert_eq!(detect_patch(content), PatchFormat::Unknown);
+}
+
+// --- Auto-Parsing Tests ---
+
+#[test]
+fn test_parse_auto_markdown() {
+    let content = indoc! {r#"
+        ```diff
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1 +1 @@
+        -old
+        +new
+        ```
+    "#};
+    let patches = parse_auto(content).unwrap();
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].file_path.to_str().unwrap(), "file.txt");
+    assert_eq!(patches[0].hunks[0].added_lines(), vec!["new"]);
+}
+
+#[test]
+fn test_parse_auto_raw_diff() {
+    let content = indoc! {r#"
+        --- a/raw.txt
+        +++ b/raw.txt
+        @@ -1 +1 @@
+        -old
+        +new
+    "#};
+    let patches = parse_auto(content).unwrap();
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].file_path.to_str().unwrap(), "raw.txt");
+    assert_eq!(patches[0].hunks[0].added_lines(), vec!["new"]);
+}
+
+#[test]
+fn test_parse_auto_conflict_markers() {
+    let content = indoc! {r#"
+        <<<<
+        old
+        ====
+        new
+        >>>>
+    "#};
+    let patches = parse_auto(content).unwrap();
+    assert_eq!(patches.len(), 1);
+    // Conflict markers default to "patch_target"
+    assert_eq!(patches[0].file_path.to_str().unwrap(), "patch_target");
+    assert_eq!(patches[0].hunks[0].removed_lines(), vec!["old"]);
+    assert_eq!(patches[0].hunks[0].added_lines(), vec!["new"]);
+}
+
+#[test]
+fn test_parse_auto_fallback_to_raw() {
+    // If detect_patch returns Unknown, parse_auto should try parsing as raw diff.
+    // This is useful for fragments that might be missed by strict detection but accepted by the parser.
+    // For example, a hunk without headers might be detected as Unified by `detect_patch` now,
+    // but let's try a case that might slip through or relies on the fallback.
+    
+    // A diff that is just a header without hunks (technically valid parse result = empty)
+    let content = "--- a/file\n+++ b/file";
+    // detect_patch sees this as Unified.
+    assert_eq!(detect_patch(content), PatchFormat::Unified);
+    
+    // Let's try something that `detect_patch` misses but `parse_patches` might handle?
+    // Actually, `detect_patch` is designed to cover the requirements of `parse_patches`.
+    // The fallback is mostly for safety.
+    
+    // Case: Unknown format that is NOT a patch
+    let content = "Just random text";
+    let result = parse_auto(content).unwrap();
+    assert!(result.is_empty());
+}
+
+#[test]
+fn test_patch_content_str_accepts_raw_diff() {
+    // This verifies that the high-level helper now accepts raw diffs due to the refactor
+    let diff = indoc! {r#"
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1 +1 @@
+        -old
+        +new
+    "#};
+    let original = "old\n";
+    let options = ApplyOptions::new();
+    
+    let result = patch_content_str(diff, Some(original), &options).unwrap();
+    assert_eq!(result, "new\n");
+}
+
+#[test]
+fn test_patch_content_str_accepts_markdown() {
+    let diff = indoc! {r#"
+        ```diff
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1 +1 @@
+        -old
+        +new
+        ```
+    "#};
+    let original = "old\n";
+    let options = ApplyOptions::new();
+    
+    let result = patch_content_str(diff, Some(original), &options).unwrap();
+    assert_eq!(result, "new\n");
+}
+
+#[test]
+fn test_parse_auto_multiple_raw_patches() {
+    let content = indoc! {r#"
+        --- a/file1.txt
+        +++ b/file1.txt
+        @@ -1 +1 @@
+        -a
+        +b
+        --- a/file2.txt
+        +++ b/file2.txt
+        @@ -1 +1 @@
+        -c
+        +d
+    "#};
+    let patches = parse_auto(content).unwrap();
+    assert_eq!(patches.len(), 2);
+    assert_eq!(patches[0].file_path.to_str().unwrap(), "file1.txt");
+    assert_eq!(patches[1].file_path.to_str().unwrap(), "file2.txt");
 }
