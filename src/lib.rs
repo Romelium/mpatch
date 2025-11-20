@@ -114,8 +114,8 @@
 //! several functions for this, depending on your input format:
 //!
 //! - [`parse_diffs()`]: The most common entry point. It scans a string (like a markdown
-//!   file's content) for code blocks annotated with `diff` or `patch` and parses them,
-//!   returning a `Vec<Patch>`.
+//!   file's content) for any code blocks containing diffs (regardless of the language
+//!   annotation) and parses them, returning a `Vec<Patch>`.
 //! - [`parse_single_patch()`]: A convenient wrapper around `parse_diffs()` that ensures
 //!   the input contains exactly one patch, returning a `Result<Patch, _>`.
 //! - [`parse_patches()`]: A lower-level parser that processes a raw unified diff string
@@ -357,26 +357,26 @@ use thiserror::Error;
 
 /// Represents errors that can occur during the parsing of a diff file.
 ///
-/// This error is returned by parsing functions like [`parse_diffs()`] when the input
-/// content contains a ` ```diff` block that is syntactically invalid.
+/// This error is returned by parsing functions like [`parse_patches()`] when the input
+/// content is syntactically invalid. Note that [`parse_diffs()`] is lenient and
+/// will typically skip blocks that do not look like valid patches rather than returning
+/// this error.
 ///
 /// # Example
 ///
 /// ````rust
-/// use mpatch::{parse_diffs, ParseError};
+/// use mpatch::{parse_patches, ParseError};
 ///
-/// // This diff block is missing the required `--- a/path` header.
-/// let malformed_diff = r#"Some introductory text.
-/// ```diff
+/// // This raw diff is missing the required `--- a/path` header.
+/// let malformed_diff = r#"
 /// @@ -1,2 +1,2 @@
 /// -foo
 /// +bar
-/// ```
 /// "#;
 ///
-/// let result = parse_diffs(malformed_diff);
+/// let result = parse_patches(malformed_diff);
 ///
-/// assert!(matches!(result, Err(ParseError::MissingFileHeader { line: 2 })));
+/// assert!(matches!(result, Err(ParseError::MissingFileHeader { .. })));
 /// ````
 #[derive(Error, Debug, PartialEq)]
 pub enum ParseError {
@@ -2290,7 +2290,7 @@ pub enum PatchFormat {
 /// or conflict markers.
 ///
 /// # Priority
-/// 1. **Markdown**: If ` ```diff` or ` ```patch` fences are found, it is treated as Markdown.
+/// 1. **Markdown**: If ` ``` ` fences are found containing diff signatures, it is treated as Markdown.
 /// 2. **Unified**: If `--- a/` or `diff --git` headers are found, it is treated as a Unified Diff.
 /// 3. **Conflict**: If `<<<<` markers are found, it is treated as Conflict Markers.
 ///
@@ -2307,51 +2307,51 @@ pub enum PatchFormat {
 /// ```
 pub fn detect_patch(content: &str) -> PatchFormat {
     let mut lines = content.lines().peekable();
-    let mut has_conflict_start = false;
-    let mut has_conflict_middle = false;
-    let mut has_conflict_end = false;
+    let mut in_code_block = false;
+    let mut has_unified_headers = false;
+    let mut has_conflict_markers = false;
 
     while let Some(line) = lines.next() {
         // Check for Markdown code blocks
-        if line.starts_with("```") {
-            let info = &line[3..];
-            if info.contains("diff") || info.contains("patch") {
+        if let Some(info) = line.strip_prefix("```") {
+            in_code_block = !in_code_block;
+            // Optimization: explicit language hint
+            if in_code_block && (info.contains("diff") || info.contains("patch")) {
                 return PatchFormat::Markdown;
             }
+            continue;
         }
 
         // Check for Unified Diff headers
-        if line.starts_with("diff --git") {
-            return PatchFormat::Unified;
-        }
+        let is_diff_git = line.starts_with("diff --git");
+        let is_unified_header =
+            line.starts_with("--- ") && lines.peek().is_some_and(|l| l.starts_with("+++ "));
+        let is_hunk_header = line.starts_with("@@ -") && line.contains(" @@");
 
-        // Check for `--- ` followed by `+++ `
-        if line.starts_with("--- ") {
-            if let Some(next_line) = lines.peek() {
-                if next_line.starts_with("+++ ") {
-                    return PatchFormat::Unified;
-                }
+        if is_diff_git || is_unified_header || is_hunk_header {
+            if in_code_block {
+                return PatchFormat::Markdown;
             }
-        }
-
-        // Check for Hunk Header
-        if line.starts_with("@@ -") {
-            if line.contains(" @@") {
-                return PatchFormat::Unified;
-            }
+            has_unified_headers = true;
         }
 
         // Check for Conflict Markers
-        if line.starts_with("<<<<") {
-            has_conflict_start = true;
-        } else if line.starts_with("====") {
-            has_conflict_middle = true;
-        } else if line.starts_with(">>>>") {
-            has_conflict_end = true;
+        let trimmed = line.trim_start();
+        let is_conflict = trimmed.starts_with("<<<<")
+            || trimmed.starts_with("====")
+            || trimmed.starts_with(">>>>");
+
+        if is_conflict {
+            if in_code_block {
+                return PatchFormat::Markdown;
+            }
+            has_conflict_markers = true;
         }
     }
 
-    if has_conflict_start && (has_conflict_middle || has_conflict_end) {
+    if has_unified_headers {
+        PatchFormat::Unified
+    } else if has_conflict_markers {
         PatchFormat::Conflict
     } else {
         PatchFormat::Unknown
@@ -2397,10 +2397,9 @@ pub fn parse_auto(content: &str) -> Result<Vec<Patch>, ParseError> {
 
 /// Parses a string containing one or more markdown diff blocks into a vector of [`Patch`] objects.
 ///
-/// This function scans the input `content` for markdown-style code blocks annotated
-/// with `diff` or `patch` (e.g., ` ````diff ... ``` `, ` ````rust, patch ... ``` `).
-/// It can handle multiple blocks in one string, and multiple file patches within a
-/// single block.
+/// This function scans the input `content` for markdown-style code blocks (e.g., ` ``` ... ``` `).
+/// It checks every block to see if it contains valid diff content (Unified Diff or Conflict Markers).
+/// Blocks that do not contain recognizable patch signatures (like `--- a/file` or `<<<<`) are skipped efficiently.
 ///
 /// It supports two formats within the blocks:
 /// 1. **Unified Diff:** Standard `--- a/file`, `+++ b/file`, `@@ ... @@` format.
@@ -2413,8 +2412,8 @@ pub fn parse_auto(content: &str) -> Result<Vec<Patch>, ParseError> {
 ///
 /// # Errors
 ///
-/// Returns `Err(ParseError::MissingFileHeader)` if a diff block contains patch
-/// hunks but no `--- a/path/to/file` header.
+/// Returns `Err(ParseError)` if a block looks like a patch (e.g. has `--- a/file`) but fails
+/// to parse correctly. Blocks that simply lack headers are ignored.
 ///
 /// # Example
 ///
@@ -2422,7 +2421,8 @@ pub fn parse_auto(content: &str) -> Result<Vec<Patch>, ParseError> {
 /// use mpatch::parse_diffs;
 ///
 /// let diff_content = r#"
-/// ```diff
+/// ```rust
+/// // This block will be checked, and if it contains a diff, it will be parsed.
 /// --- a/src/main.rs
 /// +++ b/src/main.rs
 /// @@ -1,3 +1,3 @@
@@ -2445,40 +2445,52 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
 
     // The `find` call consumes the iterator until it finds the start of a diff block.
     // The loop continues searching for more blocks from where the last one ended.
-    while let Some((line_index, line_text)) = lines.by_ref().find(|(_, line)| {
-        if !line.starts_with("```") {
-            return false;
-        }
-        // Take the info string part after the backticks.
-        let info_string = &line[3..];
-        // Check if any "word" in the info string is "diff" or "patch".
-        // We treat it as a comma-separated list of tags, where each tag can have multiple words.
-        info_string.split(',').any(|part| {
-            part.split_whitespace()
-                .any(|word| word == "diff" || word == "patch")
-        })
-    }) {
+    while let Some((line_index, line_text)) =
+        lines.by_ref().find(|(_, line)| line.starts_with("```"))
+    {
         trace!(
             "Found potential diff block start on line {}: '{}'",
             line_index,
             line_text
         );
         let diff_block_start_line = line_index + 1;
-        debug!(
-            // 1-based line number
-            "Found a diff block starting on line {}.", // This is now correct
-            diff_block_start_line
-        );
 
-        let block_lines: Vec<_> = lines
-            .by_ref()
-            .map(|(_, line)| line)
-            .take_while(|&line| line != "```")
-            .collect();
+        let mut block_lines = Vec::new();
+        let mut looks_like_patch = false;
 
-        // Optimization: Use the shared internal logic for block parsing
-        let block_patches = parse_generic_block_lines(block_lines, diff_block_start_line)?;
-        all_patches.extend(block_patches);
+        // Consume lines until end of block
+        for (_, line) in lines.by_ref() {
+            if line.starts_with("```") {
+                break;
+            }
+
+            // Optimization: Check for markers while collecting.
+            // We only run the full parser if we see something that looks like a patch start.
+            if !looks_like_patch
+                && (line.starts_with("--- ")
+                    || line.starts_with("diff --git")
+                    || line.trim_start().starts_with("<<<<")
+                    || line.trim_start().starts_with("====")
+                    || line.trim_start().starts_with(">>>>"))
+            {
+                looks_like_patch = true;
+            }
+            block_lines.push(line);
+        }
+
+        if looks_like_patch {
+            debug!(
+                "Parsing diff block starting on line {}.",
+                diff_block_start_line
+            );
+            let block_patches = parse_generic_block_lines(block_lines, diff_block_start_line)?;
+            all_patches.extend(block_patches);
+        } else {
+            trace!(
+                "Skipping code block starting on line {} (no patch markers found).",
+                diff_block_start_line
+            );
+        }
     }
 
     debug!(

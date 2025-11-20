@@ -1,11 +1,11 @@
 use indoc::indoc;
 use mpatch::{
     apply_hunk_to_lines, apply_patch_to_file, apply_patch_to_lines, apply_patches_to_dir,
-    find_hunk_location, find_hunk_location_in_lines, parse_diffs, parse_patches,
-    parse_patches_from_lines, patch_content_str, try_apply_patch_to_content,
+    detect_patch, find_hunk_location, find_hunk_location_in_lines, parse_auto, parse_diffs,
+    parse_patches, parse_patches_from_lines, patch_content_str, try_apply_patch_to_content,
     try_apply_patch_to_file, try_apply_patch_to_lines, ApplyOptions, DefaultHunkFinder, Hunk,
     HunkApplyError, HunkApplyStatus, HunkFinder, HunkLocation, MatchType, ParseError, Patch,
-    PatchError, StrictApplyError, detect_patch, parse_auto, PatchFormat
+    PatchError, PatchFormat, StrictApplyError,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -101,7 +101,7 @@ fn test_parse_flexible_diff_block_headers() {
 }
 
 #[test]
-fn test_parse_ignores_non_diff_blocks() {
+fn test_parse_accepts_all_code_blocks() {
     let test_cases = vec![
         "```rust",
         "```",
@@ -119,7 +119,13 @@ fn test_parse_ignores_non_diff_blocks() {
             header
         );
         let patches = parse_diffs(&diff).unwrap();
-        assert!(patches.is_empty(), "Should have ignored header: {}", header);
+        assert_eq!(
+            patches.len(),
+            1,
+            "Should have parsed block with header: {}",
+            header
+        );
+        assert_eq!(patches[0].file_path.to_str().unwrap(), "file.txt");
     }
 }
 
@@ -307,11 +313,9 @@ fn test_parse_error_on_missing_file_header() {
         +bar
         ```
     "};
-    let result = parse_diffs(diff);
-    assert!(matches!(
-        result,
-        Err(ParseError::MissingFileHeader { line: 2 })
-    ));
+    let patches = parse_diffs(diff).unwrap();
+    // With scan-all logic, blocks without headers are skipped/ignored to avoid false positives
+    assert!(patches.is_empty());
 }
 
 #[test]
@@ -348,6 +352,310 @@ fn test_parse_patches_multi_file_raw_diff() {
     assert_eq!(patches.len(), 2);
     assert_eq!(patches[0].file_path.to_str().unwrap(), "file1.txt");
     assert_eq!(patches[1].file_path.to_str().unwrap(), "file2.txt");
+}
+
+#[test]
+fn test_parse_ignores_irrelevant_code_blocks() {
+    let content = indoc! {r#"
+        Here is some rust code that is not a patch:
+        ```rust
+        fn main() {
+            println!("Not a patch");
+        }
+        ```
+
+        Here is a list:
+        ```text
+        - item 1
+        - item 2
+        ```
+    "#};
+    let patches = parse_diffs(content).unwrap();
+    assert!(
+        patches.is_empty(),
+        "Should not find patches in standard code blocks that lack diff signatures"
+    );
+}
+
+#[test]
+fn test_parse_finds_patch_in_unlabeled_block() {
+    let content = indoc! {r#"
+        Here is a patch in a generic block:
+        ```
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1 +1 @@
+        -old
+        +new
+        ```
+    "#};
+    let patches = parse_diffs(content).unwrap();
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].file_path.to_str().unwrap(), "file.txt");
+    assert_eq!(patches[0].hunks[0].added_lines(), vec!["new"]);
+}
+
+#[test]
+fn test_parse_finds_patch_in_misleading_language_block() {
+    // Scenario: User mistakenly labeled the block as python, or it's a diff of python code
+    // but they used the language tag 'python' instead of 'diff'.
+    let content = indoc! {r#"
+        ```python
+        --- a/script.py
+        +++ b/script.py
+        @@ -1 +1 @@
+        -print("old")
+        +print("new")
+        ```
+    "#};
+    let patches = parse_diffs(content).unwrap();
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].file_path.to_str().unwrap(), "script.py");
+}
+
+#[test]
+fn test_parse_mixed_content_robustness() {
+    // A complex file with TOML, a Patch, and Bash commands.
+    let content = indoc! {r#"
+        Step 1: Update config
+        ```toml
+        [package]
+        name = "demo"
+        ```
+
+        Step 2: Apply this patch
+        ```
+        --- a/src/main.rs
+        +++ b/src/main.rs
+        @@ -1 +1 @@
+        -fn main() {}
+        +fn main() { println!("hi"); }
+        ```
+
+        Step 3: Run it
+        ```bash
+        cargo run
+        ```
+    "#};
+    let patches = parse_diffs(content).unwrap();
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].file_path.to_str().unwrap(), "src/main.rs");
+}
+
+#[test]
+fn test_heuristic_skips_yaml_separators() {
+    // YAML uses '---' which triggers the `starts_with("--- ")` check if followed by a space,
+    // or just `---` (newline).
+    // The parser should be robust enough to see `---` but no `+++` and return 0 patches.
+    let content = indoc! {r#"
+        ```yaml
+        --- 
+        title: Not a diff
+        ---
+        key: value
+        ```
+    "#};
+    let patches = parse_diffs(content).unwrap();
+    assert!(patches.is_empty());
+}
+
+#[test]
+fn test_conflict_markers_in_rust_block() {
+    // AI often outputs conflict markers inside a language-specific block.
+    let content = indoc! {r#"
+        ```rust
+        fn main() {
+        <<<<
+            old();
+        ====
+            new();
+        >>>>
+        }
+        ```
+    "#};
+    let patches = parse_diffs(content).unwrap();
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].hunks[0].removed_lines(), vec!["    old();"]);
+    assert_eq!(patches[0].hunks[0].added_lines(), vec!["    new();"]);
+}
+
+#[test]
+fn test_heuristic_trigger_but_invalid_diff_is_ignored() {
+    // A block that triggers the "looks like patch" heuristic (has "--- ")
+    // but isn't actually a valid diff (no "+++", no hunks).
+    // It should return Ok(empty) rather than an error.
+    let content = indoc! {r#"
+        ```
+        --- This looks like a header but isn't
+        Just some text
+        ```
+    "#};
+    let patches = parse_diffs(content).unwrap();
+    assert!(patches.is_empty());
+}
+
+#[test]
+fn test_block_with_only_hunk_no_header_is_skipped() {
+    // If a block has `@@ ... @@` but no `---` or `diff --git` or `<<<<`,
+    // the optimization heuristic `looks_like_patch` returns false.
+    // This effectively skips blocks that are just fragments without file context,
+    // which prevents "MissingFileHeader" errors for random code snippets that might look like hunks.
+    let content = indoc! {r#"
+        ```
+        @@ -1 +1 @@
+        -foo
+        +bar
+        ```
+    "#};
+    let patches = parse_diffs(content).unwrap();
+    assert!(patches.is_empty());
+}
+
+#[test]
+fn test_git_diff_header_triggers_parsing() {
+    // Ensure `diff --git` triggers the parser even if `---` is further down.
+    let content = indoc! {r#"
+        ```
+        diff --git a/file b/file
+        index 0000000..1111111
+        --- a/file
+        +++ b/file
+        @@ -1 +1 @@
+        -a
+        +b
+        ```
+    "#};
+    let patches = parse_diffs(content).unwrap();
+    assert_eq!(patches.len(), 1);
+}
+
+#[test]
+fn test_yaml_block_with_header_like_content_is_ignored() {
+    // YAML often uses "---" separators.
+    // If a line is just "---", the heuristic `starts_with("--- ")` (note space) is false.
+    // But "--- title" matches.
+    // The parser should run, find no "+++", find no hunks, and safely return empty.
+    let content = indoc! {r#"
+        ```yaml
+        --- title: Some YAML
+        key: value
+        ---
+        other: value
+        ```
+    "#};
+    let patches = parse_diffs(content).unwrap();
+    assert!(patches.is_empty(), "YAML block should not produce patches");
+}
+
+#[test]
+fn test_crlf_line_endings() {
+    // Ensure the parser and heuristic handle Windows-style line endings.
+    let content =
+        "```diff\r\n--- a/file.txt\r\n+++ b/file.txt\r\n@@ -1 +1 @@\r\n-old\r\n+new\r\n```";
+    let patches = parse_diffs(content).unwrap();
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].file_path.to_str().unwrap(), "file.txt");
+    assert_eq!(patches[0].hunks[0].added_lines(), vec!["new"]);
+}
+
+#[test]
+fn test_heuristic_skips_indented_unified_headers() {
+    // Standard unified diffs require headers to be at the start of the line.
+    // Indented headers inside a block are usually invalid or part of a quote/list.
+    // The heuristic `starts_with("--- ")` enforces this strictness.
+    let content = indoc! {r#"
+        ```diff
+          --- a/file.txt
+          +++ b/file.txt
+          @@ -1 +1 @@
+          -old
+          +new
+        ```
+    "#};
+    let patches = parse_diffs(content).unwrap();
+    assert!(
+        patches.is_empty(),
+        "Indented headers should be skipped by heuristic/parser"
+    );
+}
+
+#[test]
+fn test_multiple_blocks_with_noise() {
+    // A stress test with a mix of valid patches, false positives, and noise.
+    let content = indoc! {r#"
+        # Documentation
+
+        Here is a config example (should be ignored):
+        ```yaml
+        --- config
+        setting: true
+        ```
+
+        Here is the actual fix (should be parsed):
+        ```
+        --- a/src/lib.rs
+        +++ b/src/lib.rs
+        @@ -1 +1 @@
+        -bug
+        +fix
+        ```
+
+        Here is a comment about bitwise operators (should be ignored):
+        ```rust
+        // We use << for shifting
+        let x = 1 << 4;
+        ```
+
+        Here is a conflict marker block (should be parsed):
+        ```
+        <<<<
+        old
+        ====
+        new
+        >>>>
+        ```
+    "#};
+
+    let patches = parse_diffs(content).unwrap();
+    assert_eq!(patches.len(), 2);
+
+    // First patch (Unified)
+    assert_eq!(patches[0].file_path.to_str().unwrap(), "src/lib.rs");
+    assert_eq!(patches[0].hunks[0].added_lines(), vec!["fix"]);
+
+    // Second patch (Conflict)
+    assert_eq!(patches[1].file_path.to_str().unwrap(), "patch_target");
+    assert_eq!(patches[1].hunks[0].added_lines(), vec!["new"]);
+}
+
+#[test]
+fn test_horizontal_rule_in_markdown_code_block() {
+    // Markdown-in-markdown might contain `---` horizontal rules.
+    // These should not trigger the parser unless they look exactly like `--- path`.
+    let content = indoc! {r#"
+        ```markdown
+        Title
+        ---
+        Content
+        ```
+    "#};
+    let patches = parse_diffs(content).unwrap();
+    assert!(patches.is_empty());
+}
+
+#[test]
+fn test_diff_git_header_only_is_ignored() {
+    // If a block has `diff --git ...` but no hunks or unified headers following it,
+    // it triggers the heuristic but the parser should return empty (no hunks found).
+    let content = indoc! {r#"
+        ```
+        diff --git a/file b/file
+        index 123..456
+        (end of block, no changes)
+        ```
+    "#};
+    let patches = parse_diffs(content).unwrap();
+    assert!(patches.is_empty());
 }
 
 #[test]
@@ -3003,12 +3311,8 @@ mod parse_single_patch_tests {
             ```
         "#}; // Missing --- header
         let result = parse_single_patch(diff);
-        assert!(matches!(
-            result,
-            Err(SingleParseError::Parse(ParseError::MissingFileHeader {
-                line: 1
-            }))
-        ));
+        // parse_diffs skips the block because it lacks a header, so we get NoPatchesFound
+        assert!(matches!(result, Err(SingleParseError::NoPatchesFound)));
     }
 }
 
@@ -3180,7 +3484,8 @@ mod patch_content_str_tests {
         "#}; // Missing --- header
         let options = ApplyOptions::new();
         let result = patch_content_str(diff, Some(ORIGINAL), &options);
-        assert!(matches!(result, Err(OneShotError::Parse(_))));
+        // parse_diffs skips the block, so we get NoPatchesFound
+        assert!(matches!(result, Err(OneShotError::NoPatchesFound)));
     }
 
     #[test]
@@ -3768,8 +4073,9 @@ fn test_malformed_diff_returns_error_not_ignored() {
         ```
     "#};
 
-    let result = parse_diffs(diff);
-    assert!(matches!(result, Err(ParseError::MissingFileHeader { .. })));
+    let patches = parse_diffs(diff).unwrap();
+    // With scan-all logic, blocks without headers are skipped/ignored
+    assert!(patches.is_empty());
 }
 
 // --- Detection Tests ---
@@ -3997,16 +4303,16 @@ fn test_parse_auto_fallback_to_raw() {
     // This is useful for fragments that might be missed by strict detection but accepted by the parser.
     // For example, a hunk without headers might be detected as Unified by `detect_patch` now,
     // but let's try a case that might slip through or relies on the fallback.
-    
+
     // A diff that is just a header without hunks (technically valid parse result = empty)
     let content = "--- a/file\n+++ b/file";
     // detect_patch sees this as Unified.
     assert_eq!(detect_patch(content), PatchFormat::Unified);
-    
+
     // Let's try something that `detect_patch` misses but `parse_patches` might handle?
     // Actually, `detect_patch` is designed to cover the requirements of `parse_patches`.
     // The fallback is mostly for safety.
-    
+
     // Case: Unknown format that is NOT a patch
     let content = "Just random text";
     let result = parse_auto(content).unwrap();
@@ -4025,7 +4331,7 @@ fn test_patch_content_str_accepts_raw_diff() {
     "#};
     let original = "old\n";
     let options = ApplyOptions::new();
-    
+
     let result = patch_content_str(diff, Some(original), &options).unwrap();
     assert_eq!(result, "new\n");
 }
@@ -4043,7 +4349,7 @@ fn test_patch_content_str_accepts_markdown() {
     "#};
     let original = "old\n";
     let options = ApplyOptions::new();
-    
+
     let result = patch_content_str(diff, Some(original), &options).unwrap();
     assert_eq!(result, "new\n");
 }

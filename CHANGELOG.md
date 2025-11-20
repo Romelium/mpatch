@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 -   **API:** Implemented `std::fmt::Display` for `Patch` and `Hunk` to format them as a valid unified diff string. This provides a canonical representation useful for logging, debugging, and serialization.
 -   **API:** Added fluent, chainable methods `ApplyOptions::with_dry_run(bool)` and `ApplyOptions::with_fuzz_factor(f32)` to simplify creating custom configurations.
 -   **API:** Added convenience methods `ApplyResult::has_failures()`, `ApplyResult::failure_count()`, and `ApplyResult::success_count()` to simplify inspecting the outcome of a patch operation.
+-   **Parser:** `parse_diffs` now scans **all** markdown code blocks for diffs, not just those explicitly tagged with `diff` or `patch`. This allows extracting patches from blocks labeled with other languages (e.g., ` ```rust `) often output by LLMs.
+-   **Parser:** `parse_diffs` is now lenient. Blocks that look like diffs but are syntactically invalid (e.g., missing file headers) are silently ignored instead of returning a `ParseError`. This prevents the parser from choking on random code snippets that coincidentally resemble diff syntax.
 
 ### Changed
 

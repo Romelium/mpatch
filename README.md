@@ -17,7 +17,7 @@
 
 The primary motivation for `mpatch` comes from working with Large Language Models (LLMs).
 
-When you ask an AI like ChatGPT, Claude, or Copilot to refactor code, it often provides the changes in a convenient markdown format with ` ```diff` or ` ```patch` blocks. **However, you can't trust that the line numbers are correct.** Sometimes, even the surrounding context lines aren't a perfect, character-for-character match to your current code. A standard `patch` command will often fail in these situations.
+When you ask an AI like ChatGPT, Claude, or Copilot to refactor code, it often provides the changes in a convenient markdown format inside code blocks. **However, you can't trust that the line numbers are correct.** Sometimes, even the surrounding context lines aren't a perfect, character-for-character match to your current code. A standard `patch` command will often fail in these situations.
 
 **This is the core problem `mpatch` was built to solve.**
 
@@ -31,7 +31,7 @@ This same logic makes it perfect for other common developer scenarios where patc
 
 ## Core Features
 
-*   **Markdown-Aware:** Directly parses unified diffs from within markdown code blocks annotated with `diff` or `patch` (e.g., ` ```diff`, ` ```rust, patch`).
+*   **Markdown-Aware:** Directly parses unified diffs from within *any* markdown code block. Whether it's annotated as ` ```diff `, ` ```rust `, or just ` ``` `, if it contains a valid diff, `mpatch` will find it.
 *   **Conflict Marker Support:** Supports parsing patches in the `<<<<`, `====`, `>>>>` format often used in merge conflicts or AI code suggestions.
 *   **Context-Driven:** Primarily finds patch locations by matching context lines, making it resilient to preceding file changes. It intelligently uses the `@@ ... @@` line numbers as a hint to resolve ambiguity when the same context appears in multiple places.
 *   **Fuzzy Matching:** If an exact context match isn't found, `mpatch` uses a sophisticated similarity algorithm to find the *best* fuzzy match. This logic can handle cases where lines have been added or removed near the patch location, allowing patches to apply even when the surrounding context has moderately diverged.

@@ -179,10 +179,10 @@ fn log_failed_hunks(apply_result: &mpatch::ApplyResult, patch: &Patch) {
     author,
     version,
     about = "Apply diff hunks from a file to a target directory based on context, ignoring line numbers.",
-    long_about = "Uses fuzzy matching if exact context fails. Parses unified diffs inside ```diff or ```patch markdown blocks."
+    long_about = "Uses fuzzy matching if exact context fails. Parses unified diffs inside any markdown code blocks."
 )]
 struct Args {
-    /// Path to the input file containing ```diff blocks.
+    /// Path to the input file containing markdown code blocks with diffs.
     input_file: PathBuf,
     /// Path to the target directory to apply patches.
     target_dir: PathBuf,
