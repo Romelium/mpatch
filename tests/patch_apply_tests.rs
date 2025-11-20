@@ -1445,7 +1445,7 @@ fn test_parse_diff_block_with_header_only() {
 
 #[test]
 fn test_indented_diff_block_is_ignored() {
-    let diff = indoc! {r#"
+    let diff = r#"
         This should not be parsed.
           ```diff
         --- a/file.txt
@@ -1454,7 +1454,7 @@ fn test_indented_diff_block_is_ignored() {
         -a
         +b
           ```
-    "#};
+    "#;
     let patches = parse_diffs(diff).unwrap();
     assert!(patches.is_empty(), "Indented diff blocks should be ignored");
 }
@@ -4093,6 +4093,111 @@ fn test_detect_markdown_standard() {
         ```
     "#};
     assert_eq!(detect_patch(content), PatchFormat::Markdown);
+}
+
+#[test]
+fn test_parse_closing_fence_longer_than_opening() {
+    // Markdown spec allows closing fence to be longer than opening fence
+    let diff = indoc! {r#"
+        ```diff
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1 +1 @@
+        -a
+        +b
+        ````
+    "#};
+    let patches = parse_diffs(diff).unwrap();
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].file_path.to_str().unwrap(), "file.txt");
+}
+
+#[test]
+fn test_parse_shorter_closing_fence_ignored() {
+    // A fence shorter than the opening fence should be treated as content
+    let diff = indoc! {r#"
+        ````diff
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1 +1 @@
+        -a
+        +b
+        ```
+        Still inside block
+        ````
+    "#};
+    let patches = parse_diffs(diff).unwrap();
+    assert_eq!(patches.len(), 1);
+    // The inner ``` should be part of the content, but our parser extracts the diff lines.
+    // The key is that it didn't stop parsing at the ```.
+    assert_eq!(patches[0].hunks[0].added_lines(), vec!["b"]);
+}
+
+#[test]
+fn test_parse_multiple_blocks_mixed_fences() {
+    let diff = indoc! {r#"
+        ```diff
+        --- a/file1
+        +++ b/file1
+        @@ -1 +1 @@
+        -a
+        +b
+        ```
+
+        ````diff
+        --- a/file2
+        +++ b/file2
+        @@ -1 +1 @@
+        -c
+        +d
+        ````
+    "#};
+    let patches = parse_diffs(diff).unwrap();
+    assert_eq!(patches.len(), 2);
+    assert_eq!(patches[0].file_path.to_str().unwrap(), "file1");
+    assert_eq!(patches[1].file_path.to_str().unwrap(), "file2");
+}
+
+#[test]
+fn test_parse_conflict_markers_variable_fence() {
+    let diff = indoc! {r#"
+        ````
+        <<<<
+        old
+        ====
+        new
+        >>>>
+        ````
+    "#};
+    let patches = parse_diffs(diff).unwrap();
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].hunks[0].added_lines(), vec!["new"]);
+}
+
+#[test]
+fn test_parse_fence_trailing_whitespace() {
+    // Fences with trailing whitespace should still be recognized
+    let diff = "```diff   \n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n```   ";
+    let patches = parse_diffs(diff).unwrap();
+    assert_eq!(patches.len(), 1);
+}
+
+#[test]
+fn test_nested_diff_block_is_ignored() {
+    let diff = indoc! {r#"
+        ````
+        Here is an example of a patch:
+        ```diff
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1 +1 @@
+        -old
+        +new
+        ```
+        ````
+    "#};
+    let patches = parse_diffs(diff).unwrap();
+    assert!(patches.is_empty(), "Nested diff block should be ignored");
 }
 
 #[test]

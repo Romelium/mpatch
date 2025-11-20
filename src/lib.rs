@@ -2290,7 +2290,7 @@ pub enum PatchFormat {
 /// or conflict markers.
 ///
 /// # Priority
-/// 1. **Markdown**: If ` ``` ` fences are found containing diff signatures, it is treated as Markdown.
+/// 1. **Markdown**: If code fences (3+ backticks) are found containing diff signatures, it is treated as Markdown.
 /// 2. **Unified**: If `--- a/` or `diff --git` headers are found, it is treated as a Unified Diff.
 /// 3. **Conflict**: If `<<<<` markers are found, it is treated as Conflict Markers.
 ///
@@ -2308,18 +2308,29 @@ pub enum PatchFormat {
 pub fn detect_patch(content: &str) -> PatchFormat {
     let mut lines = content.lines().peekable();
     let mut in_code_block = false;
+    let mut current_fence_len = 0;
     let mut has_unified_headers = false;
     let mut has_conflict_markers = false;
 
     while let Some(line) = lines.next() {
         // Check for Markdown code blocks
-        if let Some(info) = line.strip_prefix("```") {
-            in_code_block = !in_code_block;
-            // Optimization: explicit language hint
-            if in_code_block && (info.contains("diff") || info.contains("patch")) {
-                return PatchFormat::Markdown;
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            let fence_len = trimmed.chars().take_while(|&c| c == '`').count();
+            if fence_len >= 3 {
+                if !in_code_block {
+                    in_code_block = true;
+                    current_fence_len = fence_len;
+                    let info = &trimmed[fence_len..];
+                    if info.contains("diff") || info.contains("patch") {
+                        return PatchFormat::Markdown;
+                    }
+                } else if fence_len >= current_fence_len {
+                    in_code_block = false;
+                    current_fence_len = 0;
+                }
+                continue;
             }
-            continue;
         }
 
         // Check for Unified Diff headers
@@ -2397,9 +2408,13 @@ pub fn parse_auto(content: &str) -> Result<Vec<Patch>, ParseError> {
 
 /// Parses a string containing one or more markdown diff blocks into a vector of [`Patch`] objects.
 ///
-/// This function scans the input `content` for markdown-style code blocks (e.g., ` ``` ... ``` `).
-/// It checks every block to see if it contains valid diff content (Unified Diff or Conflict Markers).
-/// Blocks that do not contain recognizable patch signatures (like `--- a/file` or `<<<<`) are skipped efficiently.
+/// This function scans the input `content` for markdown-style code blocks. It supports
+/// variable-length code fences (e.g., ` ``` ` or ` ```` `) and correctly handles nested
+/// code blocks.
+///
+/// It checks every block to see if it contains valid diff content (Unified Diff or Conflict Markers)
+/// at the top level of the block. Diffs inside nested code blocks (e.g., examples within documentation)
+/// are ignored. Blocks that do not contain recognizable patch signatures are skipped efficiently.
 ///
 /// It supports two formats within the blocks:
 /// 1. **Unified Diff:** Standard `--- a/file`, `+++ b/file`, `@@ ... @@` format.
@@ -2445,9 +2460,13 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
 
     // The `find` call consumes the iterator until it finds the start of a diff block.
     // The loop continues searching for more blocks from where the last one ended.
-    while let Some((line_index, line_text)) =
-        lines.by_ref().find(|(_, line)| line.starts_with("```"))
-    {
+    while let Some((line_index, line_text)) = lines.by_ref().find(|(_, line)| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("```") && trimmed.chars().take_while(|&c| c == '`').count() >= 3
+    }) {
+        let trimmed = line_text.trim_start();
+        let fence_len = trimmed.chars().take_while(|&c| c == '`').count();
+
         trace!(
             "Found potential diff block start on line {}: '{}'",
             line_index,
@@ -2456,29 +2475,21 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
         let diff_block_start_line = line_index + 1;
 
         let mut block_lines = Vec::new();
-        let mut looks_like_patch = false;
 
         // Consume lines until end of block
-        for (_, line) in lines.by_ref() {
-            if line.starts_with("```") {
+        while let Some((_, line)) = lines.peek() {
+            let inner_trimmed = line.trim_start();
+            if inner_trimmed.starts_with("```")
+                && inner_trimmed.chars().take_while(|&c| c == '`').count() >= fence_len
+            {
+                lines.next(); // Consume the closing fence
                 break;
             }
-
-            // Optimization: Check for markers while collecting.
-            // We only run the full parser if we see something that looks like a patch start.
-            if !looks_like_patch
-                && (line.starts_with("--- ")
-                    || line.starts_with("diff --git")
-                    || line.trim_start().starts_with("<<<<")
-                    || line.trim_start().starts_with("====")
-                    || line.trim_start().starts_with(">>>>"))
-            {
-                looks_like_patch = true;
-            }
+            let (_, line) = lines.next().unwrap();
             block_lines.push(line);
         }
 
-        if looks_like_patch {
+        if has_patch_signature_at_level_1(&block_lines) {
             debug!(
                 "Parsing diff block starting on line {}.",
                 diff_block_start_line
@@ -2498,6 +2509,47 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
         all_patches.len()
     );
     Ok(all_patches)
+}
+
+/// Checks if the provided lines contain a patch signature at the first level of nesting.
+///
+/// This ensures that we don't parse diffs that are inside nested code blocks (e.g.,
+/// a diff example inside a markdown block).
+fn has_patch_signature_at_level_1<S: AsRef<str>>(lines: &[S]) -> bool {
+    let mut in_nested_block = false;
+    let mut current_fence_len = 0;
+
+    for line in lines {
+        let line = line.as_ref();
+        let trimmed = line.trim_start();
+
+        // Check for nested block boundaries
+        if trimmed.starts_with("```") {
+            let fence_len = trimmed.chars().take_while(|&c| c == '`').count();
+            if fence_len >= 3 {
+                if !in_nested_block {
+                    in_nested_block = true;
+                    current_fence_len = fence_len;
+                    continue;
+                } else if fence_len >= current_fence_len {
+                    in_nested_block = false;
+                    current_fence_len = 0;
+                    continue;
+                }
+            }
+        }
+
+        if !in_nested_block
+            && (line.starts_with("--- ")
+                || line.starts_with("diff --git")
+                || trimmed.starts_with("<<<<")
+                || trimmed.starts_with("====")
+                || trimmed.starts_with(">>>>"))
+            {
+                return true;
+            }
+    }
+    false
 }
 
 /// Helper function to parse a block of lines that could be Unified or Conflict.

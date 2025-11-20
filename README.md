@@ -46,7 +46,7 @@ This same logic makes it perfect for other common developer scenarios where patc
 `mpatch` automatically detects the format based on the **content** of your input file, regardless of the file extension.
 
 ### 1. Markdown
-Commonly output by AI (ChatGPT, Claude, etc.). `mpatch` scans for code blocks containing diffs.
+Commonly output by AI (ChatGPT, Claude, etc.). `mpatch` scans for code blocks containing diffs. It supports variable-length fences (e.g., ` ```` `) and correctly ignores nested code blocks (like diffs inside documentation examples).
 
 ````markdown
 Here is the fix:
