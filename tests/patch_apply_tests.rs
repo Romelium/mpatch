@@ -3224,7 +3224,7 @@ mod fuzzy_finder_diagnostics {
 #[cfg(test)]
 mod parse_single_patch_tests {
     use indoc::indoc;
-    use mpatch::{parse_single_patch, ParseError, SingleParseError};
+    use mpatch::{parse_single_patch, SingleParseError};
 
     const SUCCESS_DIFF: &str = indoc! {r#"
         ```diff
@@ -4372,4 +4372,95 @@ fn test_parse_auto_multiple_raw_patches() {
     assert_eq!(patches.len(), 2);
     assert_eq!(patches[0].file_path.to_str().unwrap(), "file1.txt");
     assert_eq!(patches[1].file_path.to_str().unwrap(), "file2.txt");
+}
+
+#[test]
+fn test_cli_simulation_raw_diff_input() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("raw.txt");
+    fs::write(&file_path, "old content\n").unwrap();
+
+    let patch_content = indoc! {r#"
+        --- a/raw.txt
+        +++ b/raw.txt
+        @@ -1 +1 @@
+        -old content
+        +new content
+    "#};
+
+    // Verify parse_auto detects and parses it correctly
+    let patches = parse_auto(patch_content).unwrap();
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].file_path.to_str().unwrap(), "raw.txt");
+
+    // Verify application
+    let options = ApplyOptions::new();
+    let result = apply_patches_to_dir(&patches, dir.path(), options);
+    assert!(result.all_succeeded());
+
+    let content = fs::read_to_string(file_path).unwrap();
+    assert_eq!(content, "new content\n");
+}
+
+#[test]
+fn test_cli_simulation_conflict_marker_input() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    // Conflict markers default to "patch_target"
+    let file_path = dir.path().join("patch_target");
+    fs::write(&file_path, "line 1\nold\nline 3\n").unwrap();
+
+    let patch_content = indoc! {r#"
+        <<<<
+        old
+        ====
+        new
+        >>>>
+    "#};
+
+    // Verify parse_auto detects and parses it correctly
+    let patches = parse_auto(patch_content).unwrap();
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].file_path.to_str().unwrap(), "patch_target");
+
+    // Verify application
+    let options = ApplyOptions::new();
+    let result = apply_patches_to_dir(&patches, dir.path(), options);
+    assert!(result.all_succeeded());
+
+    let content = fs::read_to_string(file_path).unwrap();
+    assert_eq!(content, "line 1\nnew\nline 3\n");
+}
+
+#[test]
+fn test_cli_simulation_markdown_input() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("md.txt");
+    fs::write(&file_path, "old\n").unwrap();
+
+    let patch_content = indoc! {r#"
+        Here is a fix:
+        ```diff
+        --- a/md.txt
+        +++ b/md.txt
+        @@ -1 +1 @@
+        -old
+        +new
+        ```
+    "#};
+
+    // Verify parse_auto detects and parses it correctly
+    let patches = parse_auto(patch_content).unwrap();
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].file_path.to_str().unwrap(), "md.txt");
+
+    // Verify application
+    let options = ApplyOptions::new();
+    let result = apply_patches_to_dir(&patches, dir.path(), options);
+    assert!(result.all_succeeded());
+
+    let content = fs::read_to_string(file_path).unwrap();
+    assert_eq!(content, "new\n");
 }

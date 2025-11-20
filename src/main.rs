@@ -3,7 +3,7 @@ use clap::Parser;
 use colored::Colorize;
 use env_logger::Builder;
 use log::{error, info, warn, Level, LevelFilter};
-use mpatch::{apply_patches_to_dir, parse_diffs, Patch};
+use mpatch::{apply_patches_to_dir, parse_auto, Patch};
 use std::fmt::Write as FmtWrite;
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -48,7 +48,7 @@ fn run(args: Args) -> Result<()> {
     // Read the input file and pass its content to the core parsing logic from the library.
     let content = fs::read_to_string(&args.input_file)
         .with_context(|| format!("Failed to read input file '{}'", args.input_file.display()))?;
-    let all_patches = parse_diffs(&content)?;
+    let all_patches = parse_auto(&content)?;
 
     // --- Setup Logging and Reporting ---
     // This sets up the logger and, if needed, creates a report file.
@@ -71,7 +71,7 @@ fn run(args: Args) -> Result<()> {
     };
     // --- Core Patching Logic ---
     if all_patches.is_empty() {
-        info!("No valid diff blocks found or processed in the input file.");
+        info!("No valid patches found or processed in the input file.");
         return Ok(());
     }
 
@@ -179,10 +179,10 @@ fn log_failed_hunks(apply_result: &mpatch::ApplyResult, patch: &Patch) {
     author,
     version,
     about = "Apply diff hunks from a file to a target directory based on context, ignoring line numbers.",
-    long_about = "Uses fuzzy matching if exact context fails. Parses unified diffs inside any markdown code blocks."
+    long_about = "Uses fuzzy matching if exact context fails. Automatically detects and parses Unified Diffs, Markdown code blocks, and Conflict Markers."
 )]
 struct Args {
-    /// Path to the input file containing markdown code blocks with diffs.
+    /// Path to the input file containing the patch (Markdown, Unified Diff, or Conflict Markers).
     input_file: PathBuf,
     /// Path to the target directory to apply patches.
     target_dir: PathBuf,
