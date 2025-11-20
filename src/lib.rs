@@ -2038,10 +2038,8 @@ impl Patch {
             });
         }
 
-        // Wrap in markdown block for our parser
-        let full_diff = format!("```diff\n{}\n```", diff_text.trim());
-
-        let patches = parse_diffs(&full_diff)?;
+        // Parse the raw diff directly
+        let patches = parse_patches(diff_text.trim())?;
 
         if let Some(patch) = patches.into_iter().next() {
             Ok(patch)
@@ -2545,9 +2543,9 @@ fn has_patch_signature_at_level_1<S: AsRef<str>>(lines: &[S]) -> bool {
                 || trimmed.starts_with("<<<<")
                 || trimmed.starts_with("====")
                 || trimmed.starts_with(">>>>"))
-            {
-                return true;
-            }
+        {
+            return true;
+        }
     }
     false
 }

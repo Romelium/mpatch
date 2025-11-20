@@ -28,10 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 -   **API:** `patch_content_str` and `parse_single_patch` now use `parse_auto` internally. This means they now accept raw unified diff strings and conflict markers directly, in addition to the previously supported Markdown blocks.
 -   **CLI:** The `mpatch` command now automatically detects the input format using `parse_auto`. This enables support for raw unified diffs and conflict markers as input files, alongside the existing Markdown support.
 -   **Parser:** The Markdown parser now supports variable-length code fences (e.g., ` ```` `). A code block opened with `N` backticks requires a closing fence of at least `N` backticks. This enables support for files containing nested code blocks.
+-   **Performance:** Optimized `Patch::from_texts` to use the raw diff parser directly, avoiding unnecessary Markdown wrapping and string allocation.
 
 ### Fixed
 
 -   **Parser:** Fixed false positives where diffs inside nested code blocks (such as examples in documentation) were incorrectly identified as patches. The parser now checks that patch signatures appear at the top level of the code block.
+-   **CLI:** Fixed a deadlock (freeze) that occurred when running with `-vvvv` (debug report mode). The report generator now correctly manages file locks to prevent recursive locking when internal functions log debug messages.
 
 ## [1.2.0] - 2025-11-17
 

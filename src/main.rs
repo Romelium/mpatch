@@ -353,59 +353,71 @@ fn write_report_footer(
     }
 
     log::logger().flush();
-    let mut file = file_arc.lock().unwrap();
 
-    // Use `let _ = ...` to ignore potential write errors during cleanup.
-    let _ = writeln!(file, "````"); // Close the log block
+    // Scope 1: Write initial headers and final file states
+    {
+        let _file = file_arc.lock().unwrap();
+    }
 
-    // --- Final Target Files Section ---
-    let _ = writeln!(file, "\n## Final Target File(s)\n");
-    let _ = writeln!(file, "> This section shows the state of the target files *after* the patch operation was attempted.\n");
+    log::logger().flush();
 
-    if args.dry_run {
-        let _ = writeln!(
-            file,
-            "*Final file state is the same as the original state because `--dry-run` was active.*"
-        );
-    } else {
-        for patch in all_patches {
-            let target_file_path = args.target_dir.join(&patch.file_path);
-            let _ = writeln!(file, "### File: `{}`\n", patch.file_path.display());
-            match fs::read_to_string(&target_file_path) {
-                Ok(file_content) => {
-                    if file_content.is_empty() {
-                        let _ = writeln!(file, "*File is empty.*");
-                    } else {
-                        let lang = target_file_path
-                            .extension()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("");
-                        let _ = writeln!(file, "````{}", lang);
-                        let _ = writeln!(file, "{}", file_content);
-                        let _ = writeln!(file, "````");
+    // Scope 1: Write initial headers and final file states
+    {
+        let mut file = file_arc.lock().unwrap();
+
+        // Use `let _ = ...` to ignore potential write errors during cleanup.
+        let _ = writeln!(file, "````"); // Close the log block
+
+        // --- Final Target Files Section ---
+        let _ = writeln!(file, "\n## Final Target File(s)\n");
+        let _ = writeln!(file, "> This section shows the state of the target files *after* the patch operation was attempted.\n");
+
+        if args.dry_run {
+            let _ = writeln!(
+                file,
+                "*Final file state is the same as the original state because `--dry-run` was active.*"
+            );
+        } else {
+            for patch in all_patches {
+                let target_file_path = args.target_dir.join(&patch.file_path);
+                let _ = writeln!(file, "### File: `{}`\n", patch.file_path.display());
+                match fs::read_to_string(&target_file_path) {
+                    Ok(file_content) => {
+                        if file_content.is_empty() {
+                            let _ = writeln!(file, "*File is empty.*");
+                        } else {
+                            let lang = target_file_path
+                                .extension()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("");
+                            let _ = writeln!(file, "````{}", lang);
+                            let _ = writeln!(file, "{}", file_content);
+                            let _ = writeln!(file, "````");
+                        }
                     }
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                        let _ = writeln!(file, "*File does not exist.*");
+                    }
+                    Err(e) => _ = writeln!(file, "*Error reading file: {}*", e),
                 }
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    let _ = writeln!(file, "*File does not exist.*");
-                }
-                Err(e) => _ = writeln!(file, "*Error reading file: {}*", e),
             }
         }
-    }
 
-    // --- Discrepancy Check Section ---
-    let _ = writeln!(file, "\n## Discrepancy Check\n");
-    let _ = writeln!(file, "> This section verifies that applying the patch and then creating a new diff from the result reproduces the original input patch. This is a key integrity check.\n");
+        // --- Discrepancy Check Section ---
+        let _ = writeln!(file, "\n## Discrepancy Check\n");
+        let _ = writeln!(file, "> This section verifies that applying the patch and then creating a new diff from the result reproduces the original input patch. This is a key integrity check.\n");
 
-    if args.dry_run {
-        let _ = writeln!(
-            file,
-            "*Discrepancy check was skipped because `--dry-run` was active.*"
-        );
-        return;
-    }
+        if args.dry_run {
+            let _ = writeln!(
+                file,
+                "*Discrepancy check was skipped because `--dry-run` was active.*"
+            );
+            return;
+        }
+    } // Lock released here
 
     let Some(batch_result) = batch_result else {
+        let mut file = file_arc.lock().unwrap();
         let _ = writeln!(
             file,
             "*Discrepancy check was skipped as patch application did not complete.*"
@@ -414,44 +426,57 @@ fn write_report_footer(
     };
 
     for (original_patch, (path, result)) in all_patches.iter().zip(batch_result.results.iter()) {
-        let _ = writeln!(file, "### File: `{}`", path.display());
+        // Scope 2: Write file header
+        {
+            let mut file = file_arc.lock().unwrap();
+            let _ = writeln!(file, "### File: `{}`", path.display());
+        } // Lock released
+
         match result {
             Ok(_) => {
                 let Some(old_content) = original_contents.get(path) else {
+                    let mut file = file_arc.lock().unwrap();
                     let _ = writeln!(file, "\n- **Result:** <span style='color:orange;'>SKIPPED</span> (Could not read original file content for comparison).");
                     continue;
                 };
 
                 let new_content_res = fs::read_to_string(args.target_dir.join(path));
                 let Ok(new_content) = new_content_res else {
+                    let mut file = file_arc.lock().unwrap();
                     let _ = writeln!(file, "\n- **Result:** <span style='color:orange;'>SKIPPED</span> (Could not read new file content after patching).");
                     continue;
                 };
 
                 // Re-create a patch from the before/after state.
+                // NO LOCK HELD HERE - Prevents deadlock if from_texts logs anything
                 let recreated_patch =
                     Patch::from_texts(path, old_content, &new_content, 3).unwrap();
 
-                if compare_patches(original_patch, &recreated_patch) {
-                    let _ = writeln!(file, "\n- **Result:** <span style='color:green;'>SUCCESS</span>\n- **Details:** The regenerated patch is identical to the input patch.");
-                } else {
-                    let _ = writeln!(file, "\n- **Result:** <span style='color:red;'>FAILURE</span>\n- **Details:** The regenerated patch does not match the input patch. This may indicate an issue with how a fuzzy match was applied.");
-                    let _ = writeln!(file, "\nClick to see original vs. regenerated patch\n");
-                    let _ = writeln!(file, "**Original Input Patch:**");
-                    let _ = writeln!(
-                        file,
-                        "```diff\n{}```",
-                        format_patch_for_report(original_patch)
-                    );
-                    let _ = writeln!(file, "\n**Regenerated Patch (from file changes):**");
-                    let _ = writeln!(
-                        file,
-                        "```diff\n{}```",
-                        format_patch_for_report(&recreated_patch)
-                    );
+                // Scope 3: Write result
+                {
+                    let mut file = file_arc.lock().unwrap();
+                    if compare_patches(original_patch, &recreated_patch) {
+                        let _ = writeln!(file, "\n- **Result:** <span style='color:green;'>SUCCESS</span>\n- **Details:** The regenerated patch is identical to the input patch.");
+                    } else {
+                        let _ = writeln!(file, "\n- **Result:** <span style='color:red;'>FAILURE</span>\n- **Details:** The regenerated patch does not match the input patch. This may indicate an issue with how a fuzzy match was applied.");
+                        let _ = writeln!(file, "\nClick to see original vs. regenerated patch\n");
+                        let _ = writeln!(file, "**Original Input Patch:**");
+                        let _ = writeln!(
+                            file,
+                            "```diff\n{}```",
+                            format_patch_for_report(original_patch)
+                        );
+                        let _ = writeln!(file, "\n**Regenerated Patch (from file changes):**");
+                        let _ = writeln!(
+                            file,
+                            "```diff\n{}```",
+                            format_patch_for_report(&recreated_patch)
+                        );
+                    }
                 }
             }
             Err(e) => {
+                let mut file = file_arc.lock().unwrap();
                 let _ = writeln!(file, "\n- **Result:** <span style='color:orange;'>SKIPPED</span> (Patch application failed with a hard error: {}).", e);
             }
         }

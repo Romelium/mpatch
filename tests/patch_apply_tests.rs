@@ -4569,3 +4569,18 @@ fn test_cli_simulation_markdown_input() {
     let content = fs::read_to_string(file_path).unwrap();
     assert_eq!(content, "new\n");
 }
+
+#[test]
+fn test_patch_from_texts_uses_raw_parser() {
+    // This test verifies that Patch::from_texts works correctly with the optimized
+    // raw parser implementation (parse_patches) instead of wrapping in markdown.
+    let old_text = "line 1\nline 2\n";
+    let new_text = "line 1\nline modified\n";
+
+    let patch = Patch::from_texts("test.txt", old_text, new_text, 3).unwrap();
+
+    assert_eq!(patch.file_path.to_str(), Some("test.txt"));
+    assert_eq!(patch.hunks.len(), 1);
+    assert_eq!(patch.hunks[0].removed_lines(), vec!["line 2"]);
+    assert_eq!(patch.hunks[0].added_lines(), vec!["line modified"]);
+}
