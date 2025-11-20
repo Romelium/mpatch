@@ -2,10 +2,10 @@ use indoc::indoc;
 use mpatch::{
     apply_hunk_to_lines, apply_patch_to_file, apply_patch_to_lines, apply_patches_to_dir,
     find_hunk_location, find_hunk_location_in_lines, parse_diffs, parse_patches,
-    parse_patches_from_lines, try_apply_patch_to_content, try_apply_patch_to_file,
-    try_apply_patch_to_lines, ApplyOptions, DefaultHunkFinder, Hunk, HunkApplyError,
-    HunkApplyStatus, HunkFinder, HunkLocation, MatchType, ParseError, Patch, PatchError,
-    StrictApplyError,
+    parse_patches_from_lines, patch_content_str, try_apply_patch_to_content,
+    try_apply_patch_to_file, try_apply_patch_to_lines, ApplyOptions, DefaultHunkFinder, Hunk,
+    HunkApplyError, HunkApplyStatus, HunkFinder, HunkLocation, MatchType, ParseError, Patch,
+    PatchError, StrictApplyError,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -3401,4 +3401,373 @@ fn test_apply_result_helpers() {
     assert!(!empty_result.has_failures());
     assert_eq!(empty_result.success_count(), 0);
     assert_eq!(empty_result.failure_count(), 0);
+}
+
+#[test]
+fn test_parse_conflict_markers() {
+    let diff = indoc! {r#"
+        ```diff
+        fn main() {
+        <<<<
+            println!("Old");
+        ====
+            println!("New");
+        >>>>
+        }
+        ```
+    "#};
+
+    let patches = parse_diffs(diff).unwrap();
+    assert_eq!(patches.len(), 1);
+    let patch = &patches[0];
+
+    // Conflict markers don't have file paths, so it defaults to "patch_target"
+    assert_eq!(patch.file_path.to_str().unwrap(), "patch_target");
+
+    let hunk = &patch.hunks[0];
+    assert_eq!(hunk.context_lines(), vec!["fn main() {", "}"]);
+    assert_eq!(hunk.removed_lines(), vec!["    println!(\"Old\");"]);
+    assert_eq!(hunk.added_lines(), vec!["    println!(\"New\");"]);
+}
+
+#[test]
+fn test_conflict_markers_git_style_labels() {
+    // Git often adds labels like <<<<<<< HEAD or >>>>>>> branch-name
+    let diff = indoc! {r#"
+        ```diff
+        <<<<<<< HEAD
+        Current Code
+        =======
+        Incoming Code
+        >>>>>>> feature/new-stuff
+        ```
+    "#};
+
+    let patches = parse_diffs(diff).unwrap();
+    assert_eq!(patches.len(), 1);
+    let hunk = &patches[0].hunks[0];
+
+    assert_eq!(hunk.removed_lines(), vec!["Current Code"]);
+    assert_eq!(hunk.added_lines(), vec!["Incoming Code"]);
+}
+
+#[test]
+fn test_conflict_markers_multiple_blocks_in_one_file() {
+    // Conflict markers are parsed as a single large hunk containing context and changes
+    let diff = indoc! {r#"
+        ```diff
+        Context Start
+        <<<<
+        Old 1
+        ====
+        New 1
+        >>>>
+        Middle Context
+        <<<<
+        Old 2
+        ====
+        New 2
+        >>>>
+        Context End
+        ```
+    "#};
+
+    let patches = parse_diffs(diff).unwrap();
+    assert_eq!(patches.len(), 1);
+    let hunk = &patches[0].hunks[0];
+
+    // It should capture the flow of the entire file
+    let lines = &hunk.lines;
+    assert!(lines.contains(&" Context Start".to_string()));
+    assert!(lines.contains(&"-Old 1".to_string()));
+    assert!(lines.contains(&"+New 1".to_string()));
+    assert!(lines.contains(&" Middle Context".to_string()));
+    assert!(lines.contains(&"-Old 2".to_string()));
+    assert!(lines.contains(&"+New 2".to_string()));
+    assert!(lines.contains(&" Context End".to_string()));
+}
+
+#[test]
+fn test_conflict_markers_pure_addition() {
+    let diff = indoc! {r#"
+        ```diff
+        <<<<
+        ====
+        New Line
+        >>>>
+        ```
+    "#};
+
+    let patches = parse_diffs(diff).unwrap();
+    let hunk = &patches[0].hunks[0];
+
+    assert!(hunk.removed_lines().is_empty());
+    assert_eq!(hunk.added_lines(), vec!["New Line"]);
+}
+
+#[test]
+fn test_conflict_markers_pure_deletion() {
+    let diff = indoc! {r#"
+        ```diff
+        <<<<
+        Old Line
+        ====
+        >>>>
+        ```
+    "#};
+
+    let patches = parse_diffs(diff).unwrap();
+    let hunk = &patches[0].hunks[0];
+
+    assert_eq!(hunk.removed_lines(), vec!["Old Line"]);
+    assert!(hunk.added_lines().is_empty());
+}
+
+#[test]
+fn test_conflict_markers_apply_end_to_end() {
+    // Use the high-level patch_content_str to verify it actually works
+    let original = indoc! {r#"
+        fn main() {
+            let x = 1;
+            println!("Old logic: {}", x);
+            return;
+        }
+    "#};
+
+    let diff = indoc! {r#"
+        ```diff
+        fn main() {
+            let x = 1;
+        <<<<
+            println!("Old logic: {}", x);
+        ====
+            println!("New logic: {}", x + 1);
+        >>>>
+            return;
+        }
+        ```
+    "#};
+
+    let options = ApplyOptions::new();
+    let result = patch_content_str(diff, Some(original), &options).unwrap();
+
+    let expected = indoc! {r#"
+        fn main() {
+            let x = 1;
+            println!("New logic: {}", x + 1);
+            return;
+        }
+    "#};
+
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn test_conflict_markers_ignore_normal_text() {
+    // If a block doesn't contain markers, it shouldn't be parsed as a conflict patch.
+    // Since it also doesn't look like a unified diff (no @@, ---, +++), standard parsing
+    // returns Ok(empty).
+    let diff = indoc! {r#"
+        ```diff
+        Just some random text
+        that is not a diff
+        and has no markers.
+        ```
+    "#};
+
+    let patches = parse_diffs(diff).unwrap();
+    assert!(patches.is_empty());
+}
+
+#[test]
+fn test_conflict_markers_indented() {
+    let diff = indoc! {r#"
+        ```diff
+        fn main() {
+            <<<<
+            old_code();
+            ====
+            new_code();
+            >>>>
+        }
+        ```
+    "#};
+    let patches = parse_diffs(diff).unwrap();
+    let hunk = &patches[0].hunks[0];
+
+    // Check that content was parsed correctly despite indentation of markers
+    assert!(hunk.removed_lines()[0].contains("old_code"));
+    assert!(hunk.added_lines()[0].contains("new_code"));
+}
+
+#[test]
+fn test_conflict_markers_missing_separator() {
+    // <<<< without ==== means pure deletion
+    let diff = indoc! {r#"
+        ```diff
+        <<<<
+        delete me
+        >>>>
+        ```
+    "#};
+    let patches = parse_diffs(diff).unwrap();
+    let hunk = &patches[0].hunks[0];
+    assert_eq!(hunk.removed_lines(), vec!["delete me"]);
+    assert!(hunk.added_lines().is_empty());
+}
+
+#[test]
+fn test_conflict_markers_missing_start() {
+    // ==== without <<<< means pure addition (if we treat ==== as start of new)
+    let diff = indoc! {r#"
+        ```diff
+        ====
+        add me
+        >>>>
+        ```
+    "#};
+    let patches = parse_diffs(diff).unwrap();
+    let hunk = &patches[0].hunks[0];
+    assert!(hunk.removed_lines().is_empty());
+    assert_eq!(hunk.added_lines(), vec!["add me"]);
+}
+
+#[test]
+fn test_conflict_markers_unclosed() {
+    // <<<< without >>>> (EOF implies end)
+    let diff = indoc! {r#"
+        ```diff
+        <<<<
+        delete me
+        ====
+        add me
+        ```
+    "#};
+    let patches = parse_diffs(diff).unwrap();
+    let hunk = &patches[0].hunks[0];
+    assert_eq!(hunk.removed_lines(), vec!["delete me"]);
+    assert_eq!(hunk.added_lines(), vec!["add me"]);
+}
+
+#[test]
+fn test_conflict_markers_false_positive_check() {
+    // Ensure `<<` operator isn't treated as marker
+    let diff = indoc! {r#"
+        ```diff
+        fn main() {
+            let x = 1 << 2;
+        }
+        ```
+    "#};
+    // This should NOT be parsed as a conflict marker patch because it has no markers (<<<< is 4 chars).
+    // It also doesn't look like a unified diff.
+    // So it should return an empty list of patches.
+    let patches = parse_diffs(diff).unwrap();
+    assert!(patches.is_empty());
+}
+
+#[test]
+fn test_conflict_markers_with_context() {
+    let diff = indoc! {r#"
+        ```diff
+        context before
+        <<<<
+        old
+        ====
+        new
+        >>>>
+        context after
+        ```
+    "#};
+    let patches = parse_diffs(diff).unwrap();
+    let hunk = &patches[0].hunks[0];
+    assert_eq!(hunk.lines[0], " context before");
+    assert!(hunk.lines.contains(&"-old".to_string()));
+    assert!(hunk.lines.contains(&"+new".to_string()));
+    assert_eq!(hunk.lines.last().unwrap(), " context after");
+}
+
+#[test]
+fn test_conflict_markers_malformed_sequence() {
+    let diff = indoc! {r#"
+        ```diff
+        ====
+        middle
+        <<<<
+        start
+        >>>>
+        end
+        ```
+    "#};
+    // ==== -> New. "middle" -> +middle.
+    // <<<< -> Old. "start" -> -start.
+    // >>>> -> Context. "end" ->  end.
+    let patches = parse_diffs(diff).unwrap();
+    let hunk = &patches[0].hunks[0];
+    assert_eq!(hunk.added_lines(), vec!["middle"]);
+    assert_eq!(hunk.removed_lines(), vec!["start"]);
+}
+
+#[test]
+fn test_conflict_markers_in_comments_ignored() {
+    let diff = indoc! {r#"
+        ```diff
+        // <<<< this is a comment
+        old code
+        // ====
+        new code
+        // >>>>
+        ```
+    "#};
+    // Should be ignored (empty patches) because markers must be at start of line (ignoring whitespace)
+    let patches = parse_diffs(diff).unwrap();
+    assert!(patches.is_empty());
+}
+
+#[test]
+fn test_conflict_markers_with_trailing_text() {
+    let diff = indoc! {r#"
+        ```diff
+        <<<< start of conflict
+        old
+        ==== middle of conflict
+        new
+        >>>> end of conflict
+        ```
+    "#};
+    let patches = parse_diffs(diff).unwrap();
+    let hunk = &patches[0].hunks[0];
+    assert_eq!(hunk.removed_lines(), vec!["old"]);
+    assert_eq!(hunk.added_lines(), vec!["new"]);
+}
+
+#[test]
+fn test_conflict_markers_empty_block() {
+    let diff = indoc! {r#"
+        ```diff
+        <<<<
+        ====
+        >>>>
+        ```
+    "#};
+    let patches = parse_diffs(diff).unwrap();
+    let hunk = &patches[0].hunks[0];
+    assert!(!hunk.has_changes());
+}
+
+#[test]
+fn test_malformed_diff_returns_error_not_ignored() {
+    // This looks like a diff (has @@) but is missing headers.
+    // It should NOT be ignored, and should NOT be parsed as conflict markers.
+    // It should return the standard parsing error.
+    let diff = indoc! {r#"
+        ```diff
+        @@ -1 +1 @@
+        -foo
+        +bar
+        ```
+    "#};
+
+    let result = parse_diffs(diff);
+    assert!(matches!(result, Err(ParseError::MissingFileHeader { .. })));
 }

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+-   **API:** Added `mpatch::parse_conflict_markers` to parse patches in the "Conflict Marker" format (`<<<<`, `====`, `>>>>`), commonly used in Git merge conflicts and AI suggestions.
+-   **Parser:** `parse_diffs` now automatically detects and parses conflict marker blocks if standard unified diff parsing fails.
 -   **API:** Added `mpatch::parse_single_patch` to simplify the common workflow of parsing a diff that is expected to contain exactly one patch. It returns a `Result<Patch, SingleParseError>`, handling the "zero or many" cases as an error.
 -   **API:** Added `ApplyOptions::new()`, `ApplyOptions::dry_run()`, and `ApplyOptions::exact()` as convenience constructors to simplify common configuration setups.
 -   **API:** Added a high-level `mpatch::patch_content_str` function for the common one-shot workflow of parsing a diff string and applying it to a content string. It handles parsing, validates that exactly one patch is present, and performs a strict application, returning the new content or a comprehensive error.

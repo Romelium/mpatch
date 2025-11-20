@@ -2217,6 +2217,11 @@ impl std::fmt::Display for Patch {
 /// It can handle multiple blocks in one string, and multiple file patches within a
 /// single block.
 ///
+/// It supports two formats within the blocks:
+/// 1. **Unified Diff:** Standard `--- a/file`, `+++ b/file`, `@@ ... @@` format.
+/// 2. **Conflict Markers:** `<<<<`, `====`, `>>>>` blocks. Since these lack file headers,
+///    patches will be assigned a generic file path (`patch_target`).
+///
 /// # Arguments
 ///
 /// * `content` - A string slice containing the text to parse.
@@ -2286,14 +2291,36 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
             .take_while(|&line| line != "```")
             .collect();
 
-        let block_patches = match parse_patches_from_lines(block_lines.into_iter()) {
-            Ok(p) => p,
-            Err(ParseError::MissingFileHeader { .. }) => {
-                // The raw parser found a hunk without a file header. For the user,
-                // the most useful error points to the start of the markdown block.
-                return Err(ParseError::MissingFileHeader {
-                    line: diff_block_start_line,
-                });
+        let standard_result = parse_patches_from_lines(block_lines.clone().into_iter());
+
+        let block_patches = match standard_result {
+            Ok(patches) => {
+                if !patches.is_empty() {
+                    patches
+                } else {
+                    // Standard parsing found nothing. Try conflict markers.
+
+                    // If conflict markers found, return them. Otherwise return the empty list.
+                    parse_conflict_markers_from_lines(block_lines.into_iter())
+                }
+            }
+            Err(e) => {
+                // Standard parsing failed (likely MissingFileHeader).
+                // Check if it's actually a conflict marker block.
+                let conflict_patches = parse_conflict_markers_from_lines(block_lines.into_iter());
+                if !conflict_patches.is_empty() {
+                    conflict_patches
+                } else {
+                    // It wasn't a conflict marker block, so return the original error.
+                    // If the error was MissingFileHeader, map it to the block start for better UX.
+                    match e {
+                        ParseError::MissingFileHeader { .. } => {
+                            return Err(ParseError::MissingFileHeader {
+                                line: diff_block_start_line,
+                            });
+                        }
+                    }
+                }
             }
         };
         all_patches.extend(block_patches);
@@ -2410,6 +2437,40 @@ pub fn parse_single_patch(content: &str) -> Result<Patch, SingleParseError> {
 pub fn parse_patches(content: &str) -> Result<Vec<Patch>, ParseError> {
     debug!("Starting to parse raw diff content.");
     parse_patches_from_lines(content.lines())
+}
+
+/// Parses a string containing "Conflict Marker" style diffs (<<<<, ====, >>>>).
+///
+/// This format is common in Git merge conflicts or AI-generated code suggestions.
+/// Since this format typically lacks file headers, the resulting [`Patch`] objects
+/// will have a generic file path (`patch_target`).
+///
+/// This function treats text outside the markers as context lines, text between
+/// `<<<<` and `====` as deletions, and text between `====` and `>>>>` as additions.
+///
+/// # Example
+///
+/// ```rust
+/// use mpatch::parse_conflict_markers;
+///
+/// let content = r#"
+/// fn main() {
+/// <<<<
+///     println!("Old");
+/// ====
+///     println!("New");
+/// >>>>
+/// }
+/// "#;
+///
+/// let patches = parse_conflict_markers(content);
+/// assert_eq!(patches.len(), 1);
+/// assert_eq!(patches[0].hunks[0].removed_lines(), vec!["    println!(\"Old\");"]);
+/// assert_eq!(patches[0].hunks[0].added_lines(), vec!["    println!(\"New\");"]);
+/// ```
+pub fn parse_conflict_markers(content: &str) -> Vec<Patch> {
+    debug!("Starting to parse conflict marker content.");
+    parse_conflict_markers_from_lines(content.lines())
 }
 
 /// Parses an iterator of lines containing raw unified diff content into a vector of [`Patch`] objects.
@@ -2630,6 +2691,66 @@ where
     }
 
     Ok(merged_patches)
+}
+
+/// Parses an iterator of lines containing "Conflict Marker" style diffs.
+///
+/// See [`parse_conflict_markers`] for details.
+fn parse_conflict_markers_from_lines<'a, I>(lines: I) -> Vec<Patch>
+where
+    I: Iterator<Item = &'a str>,
+{
+    let mut hunk_lines = Vec::new();
+    let mut has_markers = false;
+
+    enum State {
+        Context,
+        Old,
+        New,
+    }
+    let mut state = State::Context;
+
+    for line in lines {
+        if line.trim_start().starts_with("<<<<") {
+            state = State::Old;
+            has_markers = true;
+            continue;
+        } else if line.trim_start().starts_with("====") {
+            state = State::New;
+            has_markers = true;
+            continue;
+        } else if line.trim_start().starts_with(">>>>") {
+            state = State::Context;
+            has_markers = true;
+            continue;
+        }
+
+        match state {
+            State::Context => hunk_lines.push(format!(" {}", line)),
+            State::Old => hunk_lines.push(format!("-{}", line)),
+            State::New => hunk_lines.push(format!("+{}", line)),
+        }
+    }
+
+    if !has_markers {
+        return Vec::new();
+    }
+
+    // Create a single patch with a single hunk representing the entire block.
+    // Since we don't have line numbers, we leave them as None.
+    let hunk = Hunk {
+        lines: hunk_lines,
+        old_start_line: None,
+        new_start_line: None,
+    };
+
+    // Since conflict markers don't specify a file, we use a placeholder.
+    // The user can override this or use `patch_content_str` where it doesn't matter.
+    vec![Patch {
+        file_path: PathBuf::from("patch_target"),
+        hunks: vec![hunk],
+        ends_with_newline: true, // Assumption
+    }]
 }
 
 /// Converts a `std::io::Error` into a more specific `PatchError`.
