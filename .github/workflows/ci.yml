@@ -81,9 +81,7 @@ jobs:
 
       - name: Run Tests (nextest)
         if: steps.changed_files.outputs.code_any_changed == 'true'
-        run: |
-          cargo nextest run --all-features --profile ci \
-            --junit-path junit-${{ matrix.os }}.xml
+        run: cargo nextest run --all-features --profile ci
 
       - name: Run Doc Tests
         if: steps.changed_files.outputs.code_any_changed == 'true'
@@ -94,7 +92,7 @@ jobs:
         if: (success() || failure()) && steps.changed_files.outputs.code_any_changed == 'true'
         with:
           name: Test Report (${{ matrix.os }})
-          path: junit-${{ matrix.os }}.xml
+          path: junit.xml 
           reporter: java-junit
           fail-on-error: false
 
