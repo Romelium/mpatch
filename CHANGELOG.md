@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2025-11-21
+
 ### Added
 
 -   **API:** Added `mpatch::parse_conflict_markers` to parse patches in the "Conflict Marker" format (`<<<<`, `====`, `>>>>`), commonly used in Git merge conflicts and AI suggestions.
