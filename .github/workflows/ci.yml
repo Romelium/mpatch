@@ -16,7 +16,6 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # JOB 1: Check Formatting (Fast, runs on Linux only)
   style:
     name: Check Style
     runs-on: ubuntu-latest
@@ -29,12 +28,11 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt
-          cache: false # Caching usually not needed just for fmt
+          cache: false
 
       - name: Check Formatting
         run: cargo fmt --all -- --check
 
-  # JOB 2: Build and Test (Matrix, runs in parallel with Style)
   build_and_test:
     name: Build and Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -75,6 +73,21 @@ jobs:
         with:
           tool: cargo-hack, cargo-nextest
 
+      - name: Configure Nextest
+        if: steps.changed_files.outputs.code_any_changed == 'true'
+        shell: bash
+        run: |
+          mkdir -p .config
+          cat <<EOF > .config/nextest.toml
+          [profile.ci]
+          failure-output = "immediate"
+          fail-fast = false
+          
+          [profile.ci.junit]
+          path = "junit.xml"
+          report-name = "nextest-run"
+          EOF
+
       - name: Linting (cargo clippy)
         if: steps.changed_files.outputs.code_any_changed == 'true'
         run: cargo hack --each-feature clippy --all-targets -- -D warnings
@@ -92,7 +105,7 @@ jobs:
         if: (success() || failure()) && steps.changed_files.outputs.code_any_changed == 'true'
         with:
           name: Test Report (${{ matrix.os }})
-          path: junit.xml 
+          path: target/nextest/ci/junit.xml
           reporter: java-junit
           fail-on-error: false
 
