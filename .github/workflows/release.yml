@@ -167,11 +167,27 @@ jobs:
     needs: build-release
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Download all release assets
         uses: actions/download-artifact@v4
         with:
           # Download all artifacts uploaded by the previous job into a single directory.
           path: release-assets
+
+      - name: Get version from tag
+        id: get_version
+        shell: bash
+        # Strip the 'v' prefix from the tag (e.g., v1.3.1 -> 1.3.1) to match CHANGELOG headers.
+        run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      - name: Extract Release Notes
+        id: extract_notes
+        uses: theory/changelog-version-notes-action@v0
+        with:
+          version: ${{ steps.get_version.outputs.version }}
+          changelog: CHANGELOG.md
 
       - name: List downloaded files (for debugging)
         run: ls -R release-assets
@@ -181,8 +197,8 @@ jobs:
         with:
           # Use the tag that triggered the workflow as the release tag.
           tag_name: ${{ github.ref_name }}
-          # Automatically generate release notes from commit messages.
-          generate_release_notes: true
+          # Use the extracted release notes from the changelog.
+          body_path: ${{ steps.extract_notes.outputs.file }}
           # Use a glob pattern to find and upload all downloaded archives.
           files: release-assets/*/*
         env:
