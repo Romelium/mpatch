@@ -49,11 +49,11 @@
 //! ## Applying Patches to Files
 //!
 //! For CLI tools or scripts that need to modify files on disk, the workflow involves
-//! parsing and then using [`apply_patch_to_file()`]. This example shows the end-to-end
+//! parsing and then using [`apply_patches_to_dir()`]. This example shows the end-to-end
 //! process in a temporary directory.
 //!
 //! ````rust
-//! use mpatch::{parse_single_patch, apply_patch_to_file, ApplyOptions};
+//! use mpatch::{parse_auto, apply_patches_to_dir, ApplyOptions};
 //! use std::fs;
 //! use tempfile::tempdir;
 //!
@@ -64,7 +64,7 @@
 //! fs::create_dir_all(file_path.parent().unwrap())?;
 //! fs::write(&file_path, "fn main() {\n    println!(\"Hello, world!\");\n}\n")?;
 //!
-//! // 2. Define the patch content, as if it came from a markdown file.
+//! // 2. Define the diff content, as if it came from a markdown file.
 //! let diff_content = r#"
 //! Some introductory text.
 //!
@@ -81,16 +81,15 @@
 //! Some concluding text.
 //! "#;
 //!
-//! // 3. Parse the diff content to get the patch.
-//! let patch = parse_single_patch(diff_content)?;
+//! // 3. Parse the diff content to get patches.
+//! let patches = parse_auto(diff_content)?;
 //!
-//! // 4. Apply the patch to the directory.
+//! // 4. Apply the patches to the directory.
 //! let options = ApplyOptions::new();
-//! let result = apply_patch_to_file(&patch, dir.path(), options)?;
+//! let result = apply_patches_to_dir(&patches, dir.path(), options);
 //!
-//! // The patch should apply cleanly.
-//! assert!(result.report.all_applied_cleanly());
-//! assert!(result.diff.is_none());
+//! // The batch operation should succeed.
+//! assert!(result.all_succeeded());
 //!
 //! // 5. Verify the file was changed correctly.
 //! let new_content = fs::read_to_string(&file_path)?;
@@ -125,8 +124,11 @@
 //!
 //! Once you have a `Patch`, you can apply it using one of the `apply` functions:
 //!
-//! - [`apply_patch_to_file()`]: The most convenient function for CLI tools. It handles
-//!   reading the original file and writing the new content back to disk.
+//! - [`apply_patches_to_dir()`]: Applies a list of patches to a directory. This is
+//!   ideal for processing multi-file diffs.
+//! - [`apply_patch_to_file()`]: The most convenient function for applying a single
+//!   patch to a file. It handles reading the original file and writing the new content
+//!   back to disk.
 //! - [`apply_patch_to_content()`]: A pure function for in-memory operations. It takes
 //!   the original content as a string and returns the new content.
 //!
@@ -1560,9 +1562,9 @@ pub struct Hunk {
     /// # Example
     ///
     /// ```
-    /// # use mpatch::{parse_diffs, Hunk};
+    /// # use mpatch::{parse_single_patch, Hunk};
     /// # let diff = "```diff\n--- a/f\n+++ b/f\n@@ -1,2 +1,2\n-a\n+b\n```";
-    /// # let patch = &parse_diffs(diff).unwrap()[0];
+    /// # let patch = parse_single_patch(diff).unwrap();
     /// let hunk = &patch.hunks[0];
     ///
     /// // Iterate over the raw lines
@@ -2639,7 +2641,6 @@ fn parse_generic_block_lines(
 /// assert!(matches!(result, Err(SingleParseError::MultiplePatchesFound(2))));
 /// ````
 pub fn parse_single_patch(content: &str) -> Result<Patch, SingleParseError> {
-    // Changed from parse_diffs to parse_auto to support raw diffs too
     let mut patches = parse_auto(content)?;
 
     if patches.len() > 1 {
@@ -3994,7 +3995,6 @@ pub fn patch_content_str(
     original_content: Option<&str>,
     options: &ApplyOptions,
 ) -> Result<String, OneShotError> {
-    // Changed from parse_diffs to parse_auto
     let mut patches = parse_auto(diff_content)?;
     if patches.is_empty() {
         return Err(OneShotError::NoPatchesFound);

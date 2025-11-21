@@ -91,6 +91,8 @@ Add `mpatch` to your `Cargo.toml`:
 cargo add mpatch
 ```
 
+### Simple One-Shot Patching
+
 Here's a basic example of how to parse a diff and apply it to a string in memory:
 
 ````rust
@@ -124,7 +126,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ````
 
-For more advanced use cases, such as applying patches directly to the filesystem or iterating through hunks one by one, check out the [**library documentation on docs.rs**](https://docs.rs/mpatch).
+### Advanced Usage: Applying to Files
+
+For more control, or to apply patches to a directory structure, use `parse_auto` and `apply_patches_to_dir`.
+
+```rust
+use mpatch::{parse_auto, apply_patches_to_dir, ApplyOptions};
+use std::path::Path;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let diff_content = "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new";
+    
+    // 1. Parse the content (automatically detects format)
+    let patches = parse_auto(diff_content)?;
+    
+    // 2. Apply all patches to the target directory
+    let target_dir = Path::new("./project");
+    let options = ApplyOptions::new();
+    
+    let results = apply_patches_to_dir(&patches, target_dir, options);
+    
+    if results.all_succeeded() {
+        println!("Patches applied successfully!");
+    }
+    
+    Ok(())
+}
+```
+
+For even more advanced use cases, such as iterating through hunks one by one, check out the [**library documentation on docs.rs**](https://docs.rs/mpatch).
 
 ---
 
