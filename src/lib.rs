@@ -111,11 +111,11 @@
 //! First, you convert diff text into a structured `Vec<Patch>`. `mpatch` provides
 //! several functions for this, depending on your input format:
 //!
-//! - [`parse_diffs()`]: The most common entry point. It scans a string (like a markdown
-//!   file's content) for any code blocks containing diffs (regardless of the language
-//!   annotation) and parses them, returning a `Vec<Patch>`.
+//! - [`parse_auto()`]: The recommended entry point. It automatically detects the format
+//!   (Markdown, Unified Diff, or Conflict Markers) and parses the content accordingly.
 //! - [`parse_single_patch()`]: A convenient wrapper around `parse_auto()` that ensures
 //!   the input contains exactly one patch, returning a `Result<Patch, _>`.
+//! - [`parse_diffs()`]: Scans a string for markdown code blocks containing diffs.
 //! - [`parse_patches()`]: A lower-level parser that processes a raw unified diff string
 //!   directly, without needing markdown fences.
 //! - [`parse_patches_from_lines()`]: The lowest-level parser. It operates on an iterator
@@ -2414,6 +2414,9 @@ pub fn parse_auto(content: &str) -> Result<Vec<Patch>, ParseError> {
 /// 2. **Conflict Markers:** `<<<<`, `====`, `>>>>` blocks. Since these lack file headers,
 ///    patches will be assigned a generic file path (`patch_target`).
 ///
+/// For automatic format detection (supporting raw diffs and conflict markers outside of markdown),
+/// use [`parse_auto()`].
+///
 /// # Arguments
 ///
 /// * `content` - A string slice containing the text to parse.
@@ -2654,6 +2657,8 @@ pub fn parse_single_patch(content: &str) -> Result<Patch, SingleParseError> {
 /// It assumes the entire input string is valid unified diff content. This is useful
 /// when you have a raw `.diff` or `.patch` file, or the output of a `git diff` command.
 ///
+/// For automatic format detection, use [`parse_auto()`].
+///
 /// # Arguments
 ///
 /// * `content` - A string slice containing the raw unified diff to parse.
@@ -2695,6 +2700,8 @@ pub fn parse_patches(content: &str) -> Result<Vec<Patch>, ParseError> {
 ///
 /// This function treats text outside the markers as context lines, text between
 /// `<<<<` and `====` as deletions, and text between `====` and `>>>>` as additions.
+///
+/// For automatic format detection, use [`parse_auto()`].
 ///
 /// # Example
 ///
