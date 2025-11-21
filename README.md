@@ -4,7 +4,6 @@
 [![Latest Release](https://img.shields.io/github/v/release/romelium/mpatch?style=flat-square&logo=github&logoColor=white)](https://github.com/romelium/mpatch/releases/latest)
 [![Crates.io](https://img.shields.io/crates/v/mpatch?style=flat-square&logo=rust&logoColor=white)](https://crates.io/crates/mpatch)
 [![License: MIT](https://img.shields.io/crates/l/mpatch)](https://opensource.org/licenses/MIT)
-[![Rust Version](https://img.shields.io/badge/rust-1.83.0%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 [![Downloads](https://img.shields.io/crates/d/mpatch?style=flat-square)](https://crates.io/crates/mpatch)
 
 **A smart, context-aware patch tool for the modern developer.**
