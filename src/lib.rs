@@ -53,7 +53,7 @@
 //! process in a temporary directory.
 //!
 //! ````rust
-//! use mpatch::{parse_diffs, apply_patch_to_file, ApplyOptions};
+//! use mpatch::{parse_single_patch, apply_patch_to_file, ApplyOptions};
 //! use std::fs;
 //! use tempfile::tempdir;
 //!
@@ -81,14 +81,12 @@
 //! Some concluding text.
 //! "#;
 //!
-//! // 3. Parse the diff content to get a list of patches.
-//! let patches = parse_diffs(diff_content)?;
-//! assert_eq!(patches.len(), 1);
-//! let patch = &patches[0];
+//! // 3. Parse the diff content to get the patch.
+//! let patch = parse_single_patch(diff_content)?;
 //!
 //! // 4. Apply the patch to the directory.
 //! let options = ApplyOptions::new();
-//! let result = apply_patch_to_file(patch, dir.path(), options)?;
+//! let result = apply_patch_to_file(&patch, dir.path(), options)?;
 //!
 //! // The patch should apply cleanly.
 //! assert!(result.report.all_applied_cleanly());
@@ -116,7 +114,7 @@
 //! - [`parse_diffs()`]: The most common entry point. It scans a string (like a markdown
 //!   file's content) for any code blocks containing diffs (regardless of the language
 //!   annotation) and parses them, returning a `Vec<Patch>`.
-//! - [`parse_single_patch()`]: A convenient wrapper around `parse_diffs()` that ensures
+//! - [`parse_single_patch()`]: A convenient wrapper around `parse_auto()` that ensures
 //!   the input contains exactly one patch, returning a `Result<Patch, _>`.
 //! - [`parse_patches()`]: A lower-level parser that processes a raw unified diff string
 //!   directly, without needing markdown fences.
@@ -197,7 +195,7 @@
 //! partially applies.
 //!
 //! ````rust
-//! use mpatch::{parse_diffs, apply_patch_to_content, HunkApplyError};
+//! use mpatch::{parse_single_patch, apply_patch_to_content, HunkApplyError};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // 1. Define original content and a patch where the second hunk will fail.
@@ -220,12 +218,11 @@
 //! "#;
 //!
 //! // 2. Parse the diff.
-//! let patches = parse_diffs(diff_content)?;
-//! let patch = &patches[0];
+//! let patch = parse_single_patch(diff_content)?;
 //!
 //! // 3. Apply the patch to the content in memory.
 //! let options = mpatch::ApplyOptions::exact();
-//! let result = apply_patch_to_content(patch, Some(original_content), &options);
+//! let result = apply_patch_to_content(&patch, Some(original_content), &options);
 //!
 //! // 4. Verify that the patch did not apply cleanly.
 //! assert!(!result.report.all_applied_cleanly());
@@ -258,7 +255,7 @@
 //! apply-or-fail pattern.
 //!
 //! ````rust
-//! use mpatch::{parse_diffs, try_apply_patch_to_content, ApplyOptions, StrictApplyError};
+//! use mpatch::{parse_single_patch, try_apply_patch_to_content, ApplyOptions, StrictApplyError};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let original_content = "line 1\nline 2\n";
@@ -272,11 +269,11 @@
 //! +line two
 //! ```
 //! "#;
-//! let patch = &parse_diffs(failing_diff)?[0];
+//! let patch = parse_single_patch(failing_diff)?;
 //! let options = ApplyOptions::exact();
 //!
 //! // Using the try_ variant simplifies error handling.
-//! let result = try_apply_patch_to_content(patch, Some(original_content), &options);
+//! let result = try_apply_patch_to_content(&patch, Some(original_content), &options);
 //!
 //! assert!(matches!(result, Err(StrictApplyError::PartialApply { .. })));
 //! # Ok(())
@@ -289,7 +286,7 @@
 //! one at a time and inspect the state between each step.
 //!
 //! ````rust
-//! use mpatch::{parse_diffs, HunkApplier, HunkApplyStatus, ApplyOptions};
+//! use mpatch::{parse_single_patch, HunkApplier, HunkApplyStatus, ApplyOptions};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // 1. Define original content and a patch.
@@ -303,11 +300,11 @@
 //! +line two
 //! ```
 //! "#;
-//! let patch = &parse_diffs(diff_content)?[0];
+//! let patch = parse_single_patch(diff_content)?;
 //! let options = ApplyOptions::new();
 //!
 //! // 2. Create the applier.
-//! let mut applier = HunkApplier::new(patch, Some(&original_lines), &options);
+//! let mut applier = HunkApplier::new(&patch, Some(&original_lines), &options);
 //!
 //! // 3. Apply the first (and only) hunk.
 //! let status = applier.next().unwrap();
@@ -447,7 +444,7 @@ pub enum SingleParseError {
 /// # Example
 ///
 /// ````rust
-/// # use mpatch::{parse_diffs, apply_patch_to_file, ApplyOptions, PatchError};
+/// # use mpatch::{parse_single_patch, apply_patch_to_file, ApplyOptions, PatchError};
 /// # use tempfile::tempdir;
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let dir = tempdir()?;
@@ -462,11 +459,11 @@ pub enum SingleParseError {
 /// +bar
 /// ```
 /// "#;
-/// let patch = &parse_diffs(diff)?[0];
+/// let patch = parse_single_patch(diff)?;
 /// let options = ApplyOptions::new();
 ///
 /// // This will fail because the target file doesn't exist and it's not a creation patch.
-/// let result = apply_patch_to_file(patch, dir.path(), options);
+/// let result = apply_patch_to_file(&patch, dir.path(), options);
 ///
 /// assert!(matches!(result, Err(PatchError::TargetNotFound(_))));
 /// # Ok(())
@@ -509,7 +506,7 @@ pub enum PatchError {
 /// # Example
 ///
 /// ````rust
-/// use mpatch::{parse_diffs, try_apply_patch_to_content, ApplyOptions, StrictApplyError};
+/// use mpatch::{parse_single_patch, try_apply_patch_to_content, ApplyOptions, StrictApplyError};
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let original_content = "line 1\nline 2\n";
@@ -524,11 +521,11 @@ pub enum PatchError {
 /// +line two
 /// ```
 /// "#;
-/// let patch = &parse_diffs(failing_diff)?[0];
+/// let patch = parse_single_patch(failing_diff)?;
 /// let options = ApplyOptions::exact();
 ///
 /// // Using the try_ variant simplifies error handling for partial applications.
-/// let result = try_apply_patch_to_content(patch, Some(original_content), &options);
+/// let result = try_apply_patch_to_content(&patch, Some(original_content), &options);
 ///
 /// assert!(matches!(result, Err(StrictApplyError::PartialApply { .. })));
 /// if let Err(StrictApplyError::PartialApply { report }) = result {
@@ -617,7 +614,7 @@ pub enum OneShotError {
 /// # Example
 ///
 /// ````rust
-/// use mpatch::{apply_patch_to_content, parse_diffs, ApplyOptions, HunkApplyStatus, HunkApplyError};
+/// use mpatch::{apply_patch_to_content, parse_single_patch, ApplyOptions, HunkApplyStatus, HunkApplyError};
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let original_content = "line 1\nline 2\n";
@@ -632,10 +629,10 @@ pub enum OneShotError {
 /// +line two
 /// ```
 /// "#;
-/// let patch = &parse_diffs(diff)?[0];
+/// let patch = parse_single_patch(diff)?;
 /// let options = ApplyOptions::exact();
 ///
-/// let result = apply_patch_to_content(patch, Some(original_content), &options);
+/// let result = apply_patch_to_content(&patch, Some(original_content), &options);
 ///
 /// // We can inspect the status of the first hunk.
 /// let hunk_status = &result.report.hunk_results[0];
@@ -676,7 +673,7 @@ pub enum HunkApplyError {
 /// # Example
 ///
 /// ````rust
-/// use mpatch::{apply_patch_to_content, parse_diffs, ApplyOptions, HunkApplyStatus, MatchType};
+/// use mpatch::{apply_patch_to_content, parse_single_patch, ApplyOptions, HunkApplyStatus, MatchType};
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// // The file content has an extra space, which will prevent an `Exact` match.
@@ -691,10 +688,10 @@ pub enum HunkApplyError {
 /// +line two
 /// ```
 /// "#;
-/// let patch = &parse_diffs(diff)?[0];
+/// let patch = parse_single_patch(diff)?;
 /// let options = ApplyOptions::new();
 ///
-/// let result = apply_patch_to_content(patch, Some(original_content), &options);
+/// let result = apply_patch_to_content(&patch, Some(original_content), &options);
 /// let hunk_status = &result.report.hunk_results[0];
 ///
 /// assert!(matches!(hunk_status, HunkApplyStatus::Applied { match_type: MatchType::ExactIgnoringWhitespace, .. }));
@@ -723,7 +720,7 @@ pub enum MatchType {
 /// # Example
 ///
 /// ````rust
-/// use mpatch::{apply_hunk_to_lines, parse_diffs, ApplyOptions, HunkApplyStatus, HunkApplyError};
+/// use mpatch::{apply_hunk_to_lines, parse_single_patch, ApplyOptions, HunkApplyStatus, HunkApplyError};
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let diff = r#"
@@ -736,18 +733,18 @@ pub enum MatchType {
 /// +line two
 /// ```
 /// "#;
-/// let hunk = &parse_diffs(diff)?[0].hunks[0];
+/// let hunk = parse_single_patch(diff)?.hunks.remove(0);
 /// let options = ApplyOptions::new();
 ///
 /// // --- Success Case ---
 /// let mut lines_success = vec!["line 1".to_string(), "line 2".to_string()];
-/// let status_success = apply_hunk_to_lines(hunk, &mut lines_success, &options);
+/// let status_success = apply_hunk_to_lines(&hunk, &mut lines_success, &options);
 /// assert!(matches!(status_success, HunkApplyStatus::Applied { .. }));
 /// assert_eq!(lines_success, vec!["line 1", "line two"]);
 ///
 /// // --- Failure Case ---
 /// let mut lines_fail = vec!["wrong".to_string(), "content".to_string()];
-/// let fail_status = apply_hunk_to_lines(hunk, &mut lines_fail, &options);
+/// let fail_status = apply_hunk_to_lines(&hunk, &mut lines_fail, &options);
 /// assert!(matches!(fail_status, HunkApplyStatus::Failed(HunkApplyError::FuzzyMatchBelowThreshold { .. })));
 /// assert_eq!(lines_fail, vec!["wrong", "content"]); // Content is unchanged
 /// # Ok(())
@@ -1076,7 +1073,7 @@ impl ApplyOptionsBuilder {
 /// # Example
 ///
 /// ````
-/// # use mpatch::{parse_diffs, apply_patch_to_file, ApplyOptions};
+/// # use mpatch::{parse_single_patch, apply_patch_to_file, ApplyOptions};
 /// # use std::fs;
 /// # use tempfile::tempdir;
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -1093,11 +1090,11 @@ impl ApplyOptionsBuilder {
 /// +line 1
 /// ```
 /// "#;
-/// let patch = &parse_diffs(diff)?[0];
+/// let patch = parse_single_patch(diff)?;
 ///
 /// // Perform a dry run to get a diff.
 /// let options = ApplyOptions::dry_run();
-/// let result = apply_patch_to_file(patch, dir.path(), options)?;
+/// let result = apply_patch_to_file(&patch, dir.path(), options)?;
 ///
 /// // Check the report.
 /// assert!(result.report.all_applied_cleanly());
@@ -1126,7 +1123,7 @@ pub struct PatchResult {
 /// # Example
 ///
 /// ````rust
-/// # use mpatch::{parse_diffs, apply_patch_to_content, ApplyOptions};
+/// # use mpatch::{parse_single_patch, apply_patch_to_content, ApplyOptions};
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let original_content = "line one\n";
 /// let diff = r#"
@@ -1138,10 +1135,10 @@ pub struct PatchResult {
 /// +line 1
 /// ```
 /// "#;
-/// let patch = &parse_diffs(diff)?[0];
+/// let patch = parse_single_patch(diff)?;
 /// let options = ApplyOptions::new();
 ///
-/// let result = apply_patch_to_content(patch, Some(original_content), &options);
+/// let result = apply_patch_to_content(&patch, Some(original_content), &options);
 ///
 /// assert!(result.report.all_applied_cleanly());
 /// assert_eq!(result.new_content, "line 1\n");
@@ -1166,7 +1163,7 @@ pub struct InMemoryResult {
 /// # Example
 ///
 /// ````rust
-/// # use mpatch::{parse_diffs, apply_patch_to_content, ApplyOptions, HunkApplyError};
+/// # use mpatch::{parse_single_patch, apply_patch_to_content, ApplyOptions, HunkApplyError};
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let original_content = "line 1\n";
 /// // This patch will fail because the context is wrong.
@@ -1179,10 +1176,10 @@ pub struct InMemoryResult {
 /// +line 1
 /// ```
 /// "#;
-/// let patch = &parse_diffs(diff)?[0];
+/// let patch = parse_single_patch(diff)?;
 /// let options = ApplyOptions::exact();
 ///
-/// let result = apply_patch_to_content(patch, Some(original_content), &options);
+/// let result = apply_patch_to_content(&patch, Some(original_content), &options);
 /// let report = result.report; // This is the ApplyResult
 ///
 /// assert!(!report.all_applied_cleanly());
@@ -1208,7 +1205,7 @@ pub struct ApplyResult {
 /// # Example
 ///
 /// ````rust
-/// # use mpatch::{parse_diffs, apply_patch_to_content, ApplyOptions, HunkApplyError, HunkFailure};
+/// # use mpatch::{parse_single_patch, apply_patch_to_content, ApplyOptions, HunkApplyError, HunkFailure};
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let original_content = "line 1\n";
 /// let diff = r#"
@@ -1220,10 +1217,10 @@ pub struct ApplyResult {
 /// +line 1
 /// ```
 /// "#;
-/// let patch = &parse_diffs(diff)?[0];
+/// let patch = parse_single_patch(diff)?;
 /// let options = ApplyOptions::exact();
 ///
-/// let result = apply_patch_to_content(patch, Some(original_content), &options);
+/// let result = apply_patch_to_content(&patch, Some(original_content), &options);
 /// let failures: Vec<HunkFailure> = result.report.failures();
 ///
 /// assert_eq!(failures.len(), 1);
@@ -1323,7 +1320,7 @@ impl ApplyResult {
 /// # Example
 ///
 /// ````rust
-/// # use mpatch::{parse_diffs, apply_patches_to_dir, ApplyOptions};
+/// # use mpatch::{parse_auto, apply_patches_to_dir, ApplyOptions};
 /// # use std::fs;
 /// # use tempfile::tempdir;
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -1345,7 +1342,7 @@ impl ApplyResult {
 /// +qux
 /// ```
 /// "#;
-/// let patches = parse_diffs(diff)?;
+/// let patches = parse_auto(diff)?;
 /// let options = ApplyOptions::exact();
 ///
 /// let batch_result = apply_patches_to_dir(&patches, dir.path(), options);
@@ -1380,7 +1377,7 @@ impl BatchResult {
     /// # Example
     ///
     /// ````rust
-    /// # use mpatch::{parse_diffs, apply_patches_to_dir, ApplyOptions};
+    /// # use mpatch::{parse_auto, apply_patches_to_dir, ApplyOptions};
     /// # use std::fs;
     /// # use tempfile::tempdir;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -1402,7 +1399,7 @@ impl BatchResult {
     /// +qux
     /// ```
     /// "#;
-    /// let patches = parse_diffs(diff)?;
+    /// let patches = parse_auto(diff)?;
     /// let options = ApplyOptions::new();
     ///
     /// let batch_result = apply_patches_to_dir(&patches, dir.path(), options);
@@ -1427,13 +1424,13 @@ impl BatchResult {
     /// # Example
     ///
     /// ```rust
-    /// # use mpatch::{parse_diffs, apply_patches_to_dir, ApplyOptions, PatchError};
+    /// # use mpatch::{parse_auto, apply_patches_to_dir, ApplyOptions, PatchError};
     /// # use std::fs;
     /// # use tempfile::tempdir;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let dir = tempdir()?;
     /// # let diff = "```diff\n--- a/missing.txt\n+++ b/missing.txt\n@@ -1 +1 @@\n-a\n+b\n```";
-    /// # let patches = parse_diffs(diff)?;
+    /// # let patches = parse_auto(diff)?;
     /// let batch_result = apply_patches_to_dir(&patches, dir.path(), ApplyOptions::new());
     ///
     /// // Check for any hard failures in the batch.
@@ -1534,7 +1531,7 @@ impl ApplyResult {
 /// # Example
 ///
 /// ````rust
-/// # use mpatch::parse_diffs;
+/// # use mpatch::parse_single_patch;
 /// let diff = r#"
 /// ```diff
 /// --- a/file.txt
@@ -1545,7 +1542,7 @@ impl ApplyResult {
 /// +added line
 /// ```
 /// "#;
-/// let patch = &parse_diffs(diff).unwrap()[0];
+/// let patch = parse_single_patch(diff).unwrap();
 /// let hunk = &patch.hunks[0];
 ///
 /// assert_eq!(hunk.old_start_line, Some(10));
@@ -1849,7 +1846,7 @@ impl std::fmt::Display for Hunk {
 /// # Example
 ///
 /// ````rust
-/// # use mpatch::{find_hunk_location, parse_diffs, ApplyOptions, HunkLocation, MatchType};
+/// # use mpatch::{find_hunk_location, parse_single_patch, ApplyOptions, HunkLocation, MatchType};
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let original_content = "line 1\nline 2\nline 3\n";
 /// let diff = r#"
@@ -1863,10 +1860,10 @@ impl std::fmt::Display for Hunk {
 ///  line 3
 /// ```
 /// "#;
-/// let hunk = &parse_diffs(diff)?[0].hunks[0];
+/// let hunk = parse_single_patch(diff)?.hunks.remove(0);
 /// let options = ApplyOptions::exact();
 ///
-/// let (location, _) = find_hunk_location(hunk, original_content, &options)?;
+/// let (location, _) = find_hunk_location(&hunk, original_content, &options)?;
 ///
 /// assert_eq!(location.start_index, 0); // 0-based index
 /// assert_eq!(location.length, 3);
@@ -1935,7 +1932,7 @@ impl std::fmt::Display for HunkLocation {
 /// # Example
 ///
 /// ````rust
-/// # use mpatch::parse_diffs;
+/// # use mpatch::parse_single_patch;
 /// let diff = r#"
 /// ```diff
 /// --- a/src/main.rs
@@ -1947,8 +1944,7 @@ impl std::fmt::Display for HunkLocation {
 ///  }
 /// ```
 /// "#;
-/// let patches = parse_diffs(diff).unwrap();
-/// let patch = &patches[0];
+/// let patch = parse_single_patch(diff).unwrap();
 ///
 /// assert_eq!(patch.file_path.to_str(), Some("src/main.rs"));
 /// assert_eq!(patch.hunks.len(), 1);
@@ -1965,10 +1961,9 @@ pub struct Patch {
     /// # Example
     ///
     /// ```
-    /// # use mpatch::parse_diffs;
+    /// # use mpatch::parse_single_patch;
     /// # let diff = "```diff\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,1 +1,1\n-a\n+b\n```";
-    /// let patches = parse_diffs(diff).unwrap();
-    /// let patch = &patches[0];
+    /// let patch = parse_single_patch(diff).unwrap();
     ///
     /// assert_eq!(patch.file_path.to_str(), Some("src/main.rs"));
     /// println!("Patch targets the file: {}", patch.file_path.display());
@@ -2104,7 +2099,7 @@ impl Patch {
     /// # Example
     ///
     /// ````
-    /// # use mpatch::parse_diffs;
+    /// # use mpatch::parse_single_patch;
     /// let creation_diff = r#"
     /// ```diff
     /// --- a/new_file.txt
@@ -2114,8 +2109,8 @@ impl Patch {
     /// +World
     /// ```
     /// "#;
-    /// let patches = parse_diffs(creation_diff).unwrap();
-    /// assert!(patches[0].is_creation());
+    /// let patch = parse_single_patch(creation_diff).unwrap();
+    /// assert!(patch.is_creation());
     /// ````
     pub fn is_creation(&self) -> bool {
         self.hunks
@@ -2133,7 +2128,7 @@ impl Patch {
     /// # Example
     ///
     /// ````
-    /// # use mpatch::parse_diffs;
+    /// # use mpatch::parse_single_patch;
     /// let deletion_diff = r#"
     /// ```diff
     /// --- a/old_file.txt
@@ -2143,8 +2138,8 @@ impl Patch {
     /// -World
     /// ```
     /// "#;
-    /// let patches = parse_diffs(deletion_diff).unwrap();
-    /// assert!(patches[0].is_deletion());
+    /// let patch = parse_single_patch(deletion_diff).unwrap();
+    /// assert!(patch.is_deletion());
     /// ````
     pub fn is_deletion(&self) -> bool {
         !self.hunks.is_empty() && self.hunks.iter().all(|h| h.get_replace_block().is_empty())
@@ -2587,7 +2582,7 @@ fn parse_generic_block_lines(
 
 /// Parses a string containing a diff and returns a single [`Patch`] object.
 ///
-/// This is a convenience function that wraps [`parse_diffs()`] but enforces that the
+/// This is a convenience function that wraps [`parse_auto()`] but enforces that the
 /// input `content` results in exactly one `Patch`. It is useful when you expect
 /// a diff for a single file and want to handle the "zero or many" cases as an error.
 ///
@@ -3090,7 +3085,7 @@ pub fn ensure_path_is_safe(base_dir: &Path, relative_path: &Path) -> Result<Path
 /// # Example
 ///
 /// ````
-/// # use mpatch::{parse_diffs, apply_patches_to_dir, ApplyOptions};
+/// # use mpatch::{parse_auto, apply_patches_to_dir, ApplyOptions};
 /// # use std::fs;
 /// # use tempfile::tempdir;
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -3112,7 +3107,7 @@ pub fn ensure_path_is_safe(base_dir: &Path, relative_path: &Path) -> Result<Path
 /// +qux
 /// ```
 /// "#;
-/// let patches = parse_diffs(diff)?;
+/// let patches = parse_auto(diff)?;
 /// let options = ApplyOptions::new();
 ///
 /// let batch_result = apply_patches_to_dir(&patches, dir.path(), options);
@@ -3165,7 +3160,7 @@ pub fn apply_patches_to_dir(
 /// # Example
 ///
 /// ````
-/// # use mpatch::{parse_diffs, apply_patch_to_file, ApplyOptions};
+/// # use mpatch::{parse_single_patch, apply_patch_to_file, ApplyOptions};
 /// # use std::fs;
 /// # use tempfile::tempdir;
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -3184,12 +3179,11 @@ pub fn apply_patches_to_dir(
 /// +Hello, mpatch!
 /// ```
 /// "#;
-/// let patches = parse_diffs(diff_content)?;
-/// let patch = &patches[0];
+/// let patch = parse_single_patch(diff_content)?;
 ///
 /// // 3. Apply the patch to the directory.
 /// let options = ApplyOptions::exact();
-/// let result = apply_patch_to_file(patch, dir.path(), options)?;
+/// let result = apply_patch_to_file(&patch, dir.path(), options)?;
 ///
 /// // 4. Verify the results.
 /// assert!(result.report.all_applied_cleanly());
@@ -3320,7 +3314,7 @@ pub fn apply_patch_to_file(
 /// # Example
 ///
 /// ````rust
-/// use mpatch::{parse_diffs, try_apply_patch_to_file, ApplyOptions, StrictApplyError};
+/// use mpatch::{parse_single_patch, try_apply_patch_to_file, ApplyOptions, StrictApplyError};
 /// use std::fs;
 /// use tempfile::tempdir;
 ///
@@ -3339,11 +3333,10 @@ pub fn apply_patch_to_file(
 /// +Hello, mpatch!
 /// ```
 /// "#;
-/// let patches = parse_diffs(success_diff)?;
-/// let patch = &patches[0];
+/// let patch = parse_single_patch(success_diff)?;
 ///
 /// let options = ApplyOptions::new();
-/// let result = try_apply_patch_to_file(patch, dir.path(), options)?;
+/// let result = try_apply_patch_to_file(&patch, dir.path(), options)?;
 /// assert!(result.report.all_applied_cleanly());
 ///
 /// // --- Failure Case (Partial Apply) ---
@@ -3361,10 +3354,9 @@ pub fn apply_patch_to_file(
 /// +line two
 /// ```
 /// "#;
-/// let patches_fail = parse_diffs(failing_diff)?;
-/// let patch_fail = &patches_fail[0];
+/// let patch_fail = parse_single_patch(failing_diff)?;
 ///
-/// let result = try_apply_patch_to_file(patch_fail, dir_fail.path(), options);
+/// let result = try_apply_patch_to_file(&patch_fail, dir_fail.path(), options);
 /// assert!(matches!(result, Err(StrictApplyError::PartialApply { .. })));
 ///
 /// if let Err(StrictApplyError::PartialApply { report }) = result {
@@ -3401,7 +3393,7 @@ pub fn try_apply_patch_to_file(
 /// # Example
 ///
 /// ````rust
-/// use mpatch::{parse_diffs, HunkApplier, HunkApplyStatus, ApplyOptions};
+/// use mpatch::{parse_single_patch, HunkApplier, HunkApplyStatus, ApplyOptions};
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// // 1. Define original content and a patch.
@@ -3415,11 +3407,11 @@ pub fn try_apply_patch_to_file(
 /// +line two
 /// ```
 /// "#;
-/// let patch = &parse_diffs(diff_content)?[0];
+/// let patch = parse_single_patch(diff_content)?;
 /// let options = ApplyOptions::new();
 ///
 /// // 2. Create the applier.
-/// let mut applier = HunkApplier::new(patch, Some(&original_lines), &options);
+/// let mut applier = HunkApplier::new(&patch, Some(&original_lines), &options);
 ///
 /// // 3. Apply the first (and only) hunk.
 /// let status = applier.next().unwrap();
@@ -3453,15 +3445,15 @@ impl<'a> HunkApplier<'a> {
     /// # Example
     ///
     /// ```
-    /// # use mpatch::{parse_diffs, HunkApplier, ApplyOptions};
+    /// # use mpatch::{parse_single_patch, HunkApplier, ApplyOptions};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let original_lines = vec!["line 1", "line 2"];
     /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -2,1 +2,1\n-line 2\n+line two\n```";
-    /// let patch = &parse_diffs(diff)?[0];
+    /// let patch = parse_single_patch(diff)?;
     /// let options = ApplyOptions::new();
     ///
     /// // Create the applier for a step-by-step operation.
-    /// let mut applier = HunkApplier::new(patch, Some(&original_lines), &options);
+    /// let mut applier = HunkApplier::new(&patch, Some(&original_lines), &options);
     ///
     /// // Now `applier` is ready to be used as an iterator.
     /// let status = applier.next().unwrap();
@@ -3493,14 +3485,14 @@ impl<'a> HunkApplier<'a> {
     /// # Example
     ///
     /// ```rust
-    /// # use mpatch::{parse_diffs, HunkApplier, ApplyOptions};
+    /// # use mpatch::{parse_single_patch, HunkApplier, ApplyOptions};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let original_lines = vec!["line 1", "line 2"];
     /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -2,1 +2,1\n-line 2\n+line two\n```";
-    /// let patch = &parse_diffs(diff)?[0];
+    /// let patch = parse_single_patch(diff)?;
     /// let options = ApplyOptions::new();
     ///
-    /// let mut applier = HunkApplier::new(patch, Some(&original_lines), &options);
+    /// let mut applier = HunkApplier::new(&patch, Some(&original_lines), &options);
     ///
     /// // Before applying, it's the original content.
     /// assert_eq!(applier.current_lines(), &["line 1", "line 2"]);
@@ -3526,14 +3518,14 @@ impl<'a> HunkApplier<'a> {
     /// # Example
     ///
     /// ```rust
-    /// # use mpatch::{parse_diffs, HunkApplier, ApplyOptions};
+    /// # use mpatch::{parse_single_patch, HunkApplier, ApplyOptions};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let original_lines = vec!["line 1", "line 2"];
     /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -2,1 +2,1\n-line 2\n+line two\n```";
-    /// let patch = &parse_diffs(diff)?[0];
+    /// let patch = parse_single_patch(diff)?;
     /// let options = ApplyOptions::new();
     ///
-    /// let mut applier = HunkApplier::new(patch, Some(&original_lines), &options);
+    /// let mut applier = HunkApplier::new(&patch, Some(&original_lines), &options);
     /// applier.next(); // Apply all hunks
     ///
     /// let final_lines = applier.into_lines();
@@ -3555,14 +3547,14 @@ impl<'a> HunkApplier<'a> {
     /// # Example
     ///
     /// ```rust
-    /// # use mpatch::{parse_diffs, HunkApplier, ApplyOptions};
+    /// # use mpatch::{parse_single_patch, HunkApplier, ApplyOptions};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let original_lines = vec!["line 1"];
     /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -1,1 +1,1\n-line 1\n+line one\n```";
-    /// let patch = &parse_diffs(diff)?[0];
+    /// let patch = parse_single_patch(diff)?;
     /// let options = ApplyOptions::new();
     ///
-    /// let mut applier = HunkApplier::new(patch, Some(&original_lines), &options);
+    /// let mut applier = HunkApplier::new(&patch, Some(&original_lines), &options);
     /// applier.next(); // Apply all hunks
     ///
     /// let final_content = applier.into_content();
@@ -3591,14 +3583,14 @@ impl<'a> Iterator for HunkApplier<'a> {
     /// # Example
     ///
     /// ```
-    /// # use mpatch::{parse_diffs, HunkApplier, ApplyOptions, HunkApplyStatus};
+    /// # use mpatch::{parse_single_patch, HunkApplier, ApplyOptions, HunkApplyStatus};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let original_lines = vec!["line 1", "line 2"];
     /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -2,1 +2,1\n-line 2\n+line two\n```";
-    /// let patch = &parse_diffs(diff)?[0];
+    /// let patch = parse_single_patch(diff)?;
     /// let options = ApplyOptions::new();
     ///
-    /// let mut applier = HunkApplier::new(patch, Some(&original_lines), &options);
+    /// let mut applier = HunkApplier::new(&patch, Some(&original_lines), &options);
     ///
     /// // Call next() to apply the first hunk.
     /// let status = applier.next();
@@ -3640,7 +3632,7 @@ impl<'a> Iterator for HunkApplier<'a> {
 /// # Example
 ///
 /// ```rust
-/// # use mpatch::{parse_diffs, apply_patch_to_lines, ApplyOptions};
+/// # use mpatch::{parse_single_patch, apply_patch_to_lines, ApplyOptions};
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// // 1. Define original content and the patch.
 /// let original_lines = vec!["Hello, world!"];
@@ -3656,12 +3648,11 @@ impl<'a> Iterator for HunkApplier<'a> {
 /// ].join("\n");
 ///
 /// // 2. Parse the diff to get a Patch object.
-/// let patches = parse_diffs(&diff_str)?;
-/// let patch = &patches[0];
+/// let patch = parse_single_patch(&diff_str)?;
 ///
 /// // 3. Apply the patch to the lines in memory.
 /// let options = ApplyOptions::exact();
-/// let result = apply_patch_to_lines(patch, Some(&original_lines), &options);
+/// let result = apply_patch_to_lines(&patch, Some(&original_lines), &options);
 ///
 /// // 4. Check the results.
 /// assert_eq!(result.new_content, "Hello, mpatch!\n");
@@ -3739,7 +3730,7 @@ pub fn apply_patch_to_lines<T: AsRef<str>>(
 /// # Example
 ///
 /// ````rust
-/// use mpatch::{parse_diffs, try_apply_patch_to_lines, ApplyOptions, StrictApplyError};
+/// use mpatch::{parse_single_patch, try_apply_patch_to_lines, ApplyOptions, StrictApplyError};
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let original_lines = vec!["line 1", "line 2"];
@@ -3755,9 +3746,9 @@ pub fn apply_patch_to_lines<T: AsRef<str>>(
 /// +line two
 /// ```
 /// "#;
-/// let patch = &parse_diffs(success_diff)?[0];
+/// let patch = parse_single_patch(success_diff)?;
 /// let options = ApplyOptions::new();
-/// let result = try_apply_patch_to_lines(patch, Some(&original_lines), &options)?;
+/// let result = try_apply_patch_to_lines(&patch, Some(&original_lines), &options)?;
 /// assert!(result.report.all_applied_cleanly());
 /// assert_eq!(result.new_content, "line 1\nline two\n");
 ///
@@ -3772,8 +3763,8 @@ pub fn apply_patch_to_lines<T: AsRef<str>>(
 /// +line two
 /// ```
 /// "#;
-/// let failing_patch = &parse_diffs(failing_diff)?[0];
-/// let result = try_apply_patch_to_lines(failing_patch, Some(&original_lines), &options);
+/// let failing_patch = parse_single_patch(failing_diff)?;
+/// let result = try_apply_patch_to_lines(&failing_patch, Some(&original_lines), &options);
 ///
 /// assert!(matches!(result, Err(StrictApplyError::PartialApply { .. })));
 /// if let Err(StrictApplyError::PartialApply { report }) = result {
@@ -3822,7 +3813,7 @@ pub fn try_apply_patch_to_lines<T: AsRef<str>>(
 /// # Example
 ///
 /// ```rust
-/// # use mpatch::{parse_diffs, apply_patch_to_content, ApplyOptions};
+/// # use mpatch::{parse_single_patch, apply_patch_to_content, ApplyOptions};
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// // 1. Define original content and the patch.
 /// let original_content = "Hello, world!\n";
@@ -3838,12 +3829,11 @@ pub fn try_apply_patch_to_lines<T: AsRef<str>>(
 /// ].join("\n");
 ///
 /// // 2. Parse the diff to get a Patch object.
-/// let patches = parse_diffs(&diff_str)?;
-/// let patch = &patches[0];
+/// let patch = parse_single_patch(&diff_str)?;
 ///
 /// // 3. Apply the patch to the content in memory.
 /// let options = ApplyOptions::exact();
-/// let result = apply_patch_to_content(patch, Some(original_content), &options);
+/// let result = apply_patch_to_content(&patch, Some(original_content), &options);
 ///
 /// // 4. Check the results.
 /// assert_eq!(result.new_content, "Hello, mpatch!\n");
@@ -3875,7 +3865,7 @@ pub fn apply_patch_to_content(
 /// # Example
 ///
 /// ````rust
-/// use mpatch::{parse_diffs, try_apply_patch_to_content, ApplyOptions, StrictApplyError};
+/// use mpatch::{parse_single_patch, try_apply_patch_to_content, ApplyOptions, StrictApplyError};
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let original_content = "line 1\nline 2\n";
@@ -3891,9 +3881,9 @@ pub fn apply_patch_to_content(
 /// +line two
 /// ```
 /// "#;
-/// let patch = &parse_diffs(success_diff)?[0];
+/// let patch = parse_single_patch(success_diff)?;
 /// let options = ApplyOptions::new();
-/// let result = try_apply_patch_to_content(patch, Some(original_content), &options)?;
+/// let result = try_apply_patch_to_content(&patch, Some(original_content), &options)?;
 /// assert!(result.report.all_applied_cleanly());
 /// assert_eq!(result.new_content, "line 1\nline two\n");
 ///
@@ -3908,8 +3898,8 @@ pub fn apply_patch_to_content(
 /// +line two
 /// ```
 /// "#;
-/// let failing_patch = &parse_diffs(failing_diff)?[0];
-/// let result = try_apply_patch_to_content(failing_patch, Some(original_content), &options);
+/// let failing_patch = parse_single_patch(failing_diff)?;
+/// let result = try_apply_patch_to_content(&failing_patch, Some(original_content), &options);
 ///
 /// assert!(matches!(result, Err(StrictApplyError::PartialApply { .. })));
 /// if let Err(StrictApplyError::PartialApply { report }) = result {
@@ -4033,7 +4023,7 @@ pub fn patch_content_str(
 /// # Example
 ///
 /// ```rust
-/// # use mpatch::{parse_diffs, apply_hunk_to_lines, ApplyOptions, HunkApplyStatus, HunkLocation, MatchType};
+/// # use mpatch::{parse_single_patch, apply_hunk_to_lines, ApplyOptions, HunkApplyStatus, HunkLocation, MatchType};
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// // 1. Define original content and the patch.
 /// let mut original_lines = vec!["Hello, world!".to_string()];
@@ -4048,8 +4038,8 @@ pub fn patch_content_str(
 /// ].join("\n");
 ///
 /// // 2. Parse the diff to get a Hunk object.
-/// let patches = parse_diffs(&diff_str)?;
-/// let hunk = &patches[0].hunks[0];
+/// let patch = parse_single_patch(&diff_str)?;
+/// let hunk = &patch.hunks[0];
 ///
 /// // 3. Apply the hunk to the lines in memory.
 /// let options = ApplyOptions::exact();
@@ -4233,11 +4223,11 @@ pub trait HunkFinder {
     /// # Example
     ///
     /// ```
-    /// # use mpatch::{parse_diffs, DefaultHunkFinder, HunkFinder, ApplyOptions, HunkLocation, MatchType};
+    /// # use mpatch::{parse_single_patch, DefaultHunkFinder, HunkFinder, ApplyOptions, HunkLocation, MatchType};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// // 1. Create a hunk to search for.
     /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -1,2 +1,2\n line 1\n-line 2\n+line two\n```";
-    /// let hunk = &parse_diffs(diff)?[0].hunks[0];
+    /// let hunk = parse_single_patch(diff)?.hunks.remove(0);
     ///
     /// // 2. Define the content to search within.
     /// let target_lines = vec!["line 1", "line 2"];
@@ -4245,7 +4235,7 @@ pub trait HunkFinder {
     /// // 3. Instantiate a finder and call the method.
     /// let options = ApplyOptions::new();
     /// let finder = DefaultHunkFinder::new(&options);
-    /// let (location, match_type) = finder.find_location(hunk, &target_lines)?;
+    /// let (location, match_type) = finder.find_location(&hunk, &target_lines)?;
     ///
     /// // 4. Check the result.
     /// assert_eq!(location, HunkLocation { start_index: 0, length: 2 });
@@ -4284,7 +4274,7 @@ pub trait HunkFinder {
 /// # Example
 ///
 /// ````rust
-/// # use mpatch::{parse_diffs, DefaultHunkFinder, HunkFinder, ApplyOptions, HunkLocation, MatchType};
+/// # use mpatch::{parse_single_patch, DefaultHunkFinder, HunkFinder, ApplyOptions, HunkLocation, MatchType};
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let original_lines = vec!["line 1", "line two", "line 3"];
 /// let diff = r#"
@@ -4298,13 +4288,13 @@ pub trait HunkFinder {
 ///  line 3
 /// ```
 /// "#;
-/// let hunk = &parse_diffs(diff)?[0].hunks[0];
+/// let hunk = parse_single_patch(diff)?.hunks.remove(0);
 ///
 /// let options = ApplyOptions::exact();
 /// let finder = DefaultHunkFinder::new(&options);
 ///
 /// // Use the finder to locate the hunk.
-/// let (location, match_type) = finder.find_location(hunk, &original_lines)?;
+/// let (location, match_type) = finder.find_location(&hunk, &original_lines)?;
 ///
 /// assert_eq!(location, HunkLocation { start_index: 0, length: 3 });
 /// assert!(matches!(match_type, MatchType::Exact));
@@ -5065,7 +5055,7 @@ impl<'a> HunkFinder for DefaultHunkFinder<'a> {
 /// # Example
 ///
 /// ````rust
-/// # use mpatch::{parse_diffs, find_hunk_location, HunkLocation, ApplyOptions, MatchType};
+/// # use mpatch::{parse_single_patch, find_hunk_location, HunkLocation, ApplyOptions, MatchType};
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let original_content = "line 1\nline two\nline 3\n";
 /// let diff_content = r#"
@@ -5080,8 +5070,8 @@ impl<'a> HunkFinder for DefaultHunkFinder<'a> {
 /// ```
 /// "#;
 ///
-/// let patches = parse_diffs(diff_content)?;
-/// let hunk = &patches[0].hunks[0];
+/// let patch = parse_single_patch(diff_content)?;
+/// let hunk = &patch.hunks[0];
 ///
 /// let options = ApplyOptions::exact();
 /// let (location, match_type) = find_hunk_location(hunk, original_content, &options)?;
@@ -5123,7 +5113,7 @@ pub fn find_hunk_location(
 /// # Example
 ///
 /// ````rust
-/// # use mpatch::{parse_diffs, find_hunk_location_in_lines, HunkLocation, ApplyOptions, MatchType};
+/// # use mpatch::{parse_single_patch, find_hunk_location_in_lines, HunkLocation, ApplyOptions, MatchType};
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let original_lines = vec!["line 1", "line two", "line 3"];
 /// let diff_content = r#"
@@ -5138,8 +5128,8 @@ pub fn find_hunk_location(
 /// ```
 /// "#;
 ///
-/// let patches = parse_diffs(diff_content)?;
-/// let hunk = &patches[0].hunks[0];
+/// let patch = parse_single_patch(diff_content)?;
+/// let hunk = &patch.hunks[0];
 ///
 /// let options = ApplyOptions::exact();
 /// let (location, match_type) = find_hunk_location_in_lines(hunk, &original_lines, &options)?;
