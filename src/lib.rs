@@ -4620,8 +4620,10 @@ impl<'a> DefaultHunkFinder<'a> {
 
         // Optimization: Pre-calculate trimmed lines for subsequent strategies.
         // This avoids repeated allocation and trimming in loops.
-        let target_trimmed: Vec<String> =
-            target_lines.iter().map(|s| s.as_ref().trim_end().to_string()).collect();
+        let target_trimmed: Vec<String> = target_lines
+            .iter()
+            .map(|s| s.as_ref().trim_end().to_string())
+            .collect();
         // Create references to the trimmed strings to avoid allocations in TextDiff
         let target_refs: Vec<&str> = target_trimmed.iter().map(|s| s.as_str()).collect();
 
@@ -4688,7 +4690,8 @@ impl<'a> DefaultHunkFinder<'a> {
             );
 
             // Hoist invariants for performance
-            let match_stripped_lines: Vec<&str> = match_block.iter().map(|s| s.trim_end()).collect();
+            let match_stripped_lines: Vec<&str> =
+                match_block.iter().map(|s| s.trim_end()).collect();
             let match_content = match_stripped_lines.join("\n");
 
             let mut best_score = -1.0;
@@ -4850,10 +4853,8 @@ impl<'a> DefaultHunkFinder<'a> {
                     .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
                 trace!("      Top fuzzy match candidates:");
                 for (score, ratio, _, _, idx, len) in sorted_windows.iter().take(5) {
-                    let window_content: Vec<_> = target_refs[*idx..*idx + *len]
-                        .iter()
-                        .map(|s| *s)
-                        .collect();
+                    let window_content: Vec<_> =
+                        target_refs[*idx..*idx + *len].to_vec();
                     trace!(
                         "        - Index {}, Len {}: Score {:.3} (Ratio {:.3}) | Content: {:?}",
                         idx,
