@@ -141,7 +141,7 @@
 //! - [`Patch`]: Represents all the changes for a single file. It contains the
 //!   target file path and a list of hunks.
 //! - [`Hunk`]: Represents a single block of changes within a patch, corresponding
-//!   to a `@@ ... @@` section in a unified diff.
+//!   to a block of changes (like a `@@ ... @@` section in a unified diff).
 //!
 //! ### Context-Driven Matching
 //!
@@ -152,7 +152,7 @@
 //! - **Primary Search:** It first looks for an exact, character-for-character match
 //!   of the hunk's context.
 //! - **Ambiguity Resolution:** If the same context appears in multiple places,
-//!   `mpatch` uses the line numbers from the `@@ ... @@` header as a *hint* to
+//!   `mpatch` uses the line numbers (e.g., from the `@@ ... @@` header) as a *hint* to
 //!   find the most likely location.
 //! - **Fuzzy Matching:** If no exact match is found, it uses a similarity algorithm
 //!   to find the *best* fuzzy match, making it resilient to minor changes in the
@@ -1530,8 +1530,14 @@ impl ApplyResult {
 
 /// Represents a single hunk of changes within a patch.
 ///
-/// A hunk corresponds to a block of lines starting with `@@ ... @@` in a
-/// unified diff. It contains the context, added, and removed lines.
+/// Structurally, this models a hunk from a Unified Diff (the `@@ ... @@` blocks),
+/// storing lines prefixed with `+`, `-`, or space. However, it serves as the
+/// universal internal representation for all patch formats in `mpatch`.
+///
+/// - **Unified Diffs:** Parsed directly.
+/// - **Conflict Markers:** Converted into a `Hunk` where the "old" block becomes
+///   deletions and the "new" block becomes additions.
+///
 /// You typically get `Hunk` objects as part of a [`Patch`] after parsing a diff.
 ///
 /// # Example
@@ -1542,7 +1548,7 @@ impl ApplyResult {
 /// ```diff
 /// --- a/file.txt
 /// +++ b/file.txt
-/// @@ -10,3 +10,3 @@
+/// @@ -10,2 +10,2 @@
 ///  context line
 /// -removed line
 /// +added line
@@ -1554,14 +1560,16 @@ impl ApplyResult {
 /// assert_eq!(hunk.old_start_line, Some(10));
 /// assert_eq!(hunk.removed_lines(), vec!["removed line"]);
 /// assert_eq!(hunk.added_lines(), vec!["added line"]);
+///
+/// // You can convert the hunk back to a unified diff string:
+/// assert_eq!(hunk.to_string(), "@@ -10,2 +10,2 @@\n context line\n-removed line\n+added line\n");
 /// ````
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hunk {
     /// The raw lines of the hunk, each prefixed with ' ', '+', or '-'.
     ///
-    /// This field gives you direct access to the lines as they appear in the diff,
-    /// including the leading character that indicates the line's type. This can be
-    /// useful for custom analysis or formatting of the hunk's content.
+    /// This vector stores the content exactly as it would appear in a Unified Diff body.
+    /// Lines starting with ` ` are context, `-` are deletions, and `+` are additions.
     ///
     /// # Example
     ///
@@ -1578,11 +1586,47 @@ pub struct Hunk {
     ///     }
     /// }
     /// ```
+    ///
+    /// When parsing Conflict Markers, `mpatch` synthesizes these lines: the "before"
+    /// block becomes `-` lines, and the "after" block becomes `+` lines.
     pub lines: Vec<String>,
-    /// The original starting line number from the `@@ -l,s ...` header.
-    /// This is used as a hint to resolve ambiguity if multiple exact matches are found.
+    /// The starting line number in the original file (1-based).
+    ///
+    /// This corresponds to the `l` in the `@@ -l,s ...` header of a unified diff.
+    /// In `mpatch`, this value is primarily used as a **hint** to resolve ambiguity.
+    /// If the context matches in multiple places, the location closest to this line
+    /// is chosen.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use mpatch::{Hunk};
+    /// let hunk = Hunk {
+    ///     lines: vec!["-old".to_string()],
+    ///     old_start_line: Some(10), // Hint: look near line 10
+    ///     new_start_line: Some(10),
+    /// };
+    /// ```
+    ///
+    /// This may be `None` if the patch source (like Conflict Markers) did not provide line numbers.
     pub old_start_line: Option<usize>,
-    /// The new starting line number from the `@@ ..., +l,s @@` header.
+    /// The starting line number in the new file (1-based).
+    ///
+    /// This corresponds to the `l` in the `@@ ... +l,s @@` header of a unified diff.
+    /// It represents the intended location in the resulting file.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use mpatch::{Hunk};
+    /// let hunk = Hunk {
+    ///     lines: vec!["+new".to_string()],
+    ///     old_start_line: Some(10),
+    ///     new_start_line: Some(12), // Lines shifted down by 2
+    /// };
+    /// ```
+    ///
+    /// This may be `None` if the patch source did not provide line numbers.
     pub new_start_line: Option<usize>,
 }
 
@@ -1805,9 +1849,11 @@ impl Hunk {
 impl std::fmt::Display for Hunk {
     /// Formats the hunk into a valid unified diff hunk block.
     ///
-    /// This includes the `@@ ... @@` header and all the context, addition,
-    /// and deletion lines, ending with a newline. This provides a canonical
-    /// string representation of the hunk's content.
+    /// This generates the `@@ ... @@` header based on the start lines and the
+    /// count of lines in the `lines` vector, followed by the content. This allows
+    /// any `Hunk` (even those from Conflict Markers) to be serialized as standard diffs.
+    ///
+    /// If `old_start_line` or `new_start_line` are `None`, they default to `1` in the output.
     ///
     /// # Example
     ///
@@ -2813,7 +2859,7 @@ pub fn parse_conflict_markers(content: &str) -> Vec<Patch> {
 ///
 /// Returns `Err(ParseError::MissingFileHeader)` if the content contains patch
 /// hunks but no `--- a/path/to/file` header. The `line` number in the error will
-/// correspond to the first hunk header (`@@ ... @@`) found.
+/// correspond to the first hunk header (e.g., `@@ ... @@`) found.
 ///
 /// # Example
 ///
