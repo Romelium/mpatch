@@ -2369,24 +2369,86 @@ pub fn detect_patch(content: &str) -> PatchFormat {
     }
 }
 
-/// Automatically detects the format and parses the content into patches.
+/// Automatically detects the format of the input text and parses it into a list of patches.
 ///
-/// This is the most robust entry point for parsing. It handles Markdown files,
-/// raw diff files, and conflict markers automatically.
+/// This is the recommended entry point for most use cases, as it robustly handles
+/// the various ways diffs are commonly presented (e.g., inside Markdown code blocks
+/// from LLMs, as raw output from `git diff`, or as conflict markers in source files).
 ///
-/// # Example
+/// # Supported Formats
 ///
-/// ```rust
+/// 1.  **Markdown:** Code blocks fenced with backticks (e.g., ` ```diff `) containing
+///     diff content. This is the standard output format for AI coding assistants.
+/// 2.  **Unified Diff:** Standard diffs containing `--- a/path` and `+++ b/path` headers.
+/// 3.  **Conflict Markers:** Blocks delimited by `<<<<`, `====`, and `>>>>`. These are
+///     parsed into patches where the "old" content is removed and the "new" content is added.
+///
+/// # Behavior
+///
+/// The function first attempts to detect the format using lightweight heuristics
+/// (see [`detect_patch`]).
+///
+/// - If **Markdown** is detected, it extracts patches from all valid code blocks.
+/// - If **Unified Diff** headers are detected, it parses the entire string as a raw diff.
+/// - If **Conflict Markers** are detected, it parses the blocks into patches targeting a generic file path.
+/// - If the format is **Unknown**, it attempts to parse the content as a raw diff
+///   as a fallback. This allows parsing fragments that might lack full file headers
+///   but contain valid hunks.
+///
+/// # Examples
+///
+/// **Parsing a Markdown string:**
+/// ````
 /// use mpatch::parse_auto;
 ///
-/// // Works with Markdown
-/// let patches = parse_auto("```diff\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n```").unwrap();
-/// assert_eq!(patches.len(), 1);
-///
-/// // Works with Raw Diffs
-/// let patches = parse_auto("--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b").unwrap();
-/// assert_eq!(patches.len(), 1);
+/// let md = r#"
+/// Here is the fix:
+/// ```diff
+/// --- a/src/main.rs
+/// +++ b/src/main.rs
+/// @@ -1 +1 @@
+/// -println!("Old");
+/// +println!("New");
 /// ```
+/// "#;
+///
+/// let patches = parse_auto(md).unwrap();
+/// assert_eq!(patches.len(), 1);
+/// assert_eq!(patches[0].file_path.to_str(), Some("src/main.rs"));
+/// ````
+///
+/// **Parsing a Raw Diff:**
+/// ````
+/// use mpatch::parse_auto;
+///
+/// let raw = r#"
+/// --- a/config.toml
+/// +++ b/config.toml
+/// @@ -1 +1 @@
+/// -debug = false
+/// +debug = true
+/// "#;
+///
+/// let patches = parse_auto(raw).unwrap();
+/// assert_eq!(patches.len(), 1);
+/// ````
+///
+/// **Parsing Conflict Markers:**
+/// ````
+/// use mpatch::parse_auto;
+///
+/// let conflict = r#"
+/// <<<<
+/// old_code();
+/// ====
+/// new_code();
+/// >>>>
+/// "#;
+///
+/// let patches = parse_auto(conflict).unwrap();
+/// // Conflict markers don't specify a file, so they get a generic path.
+/// assert_eq!(patches[0].file_path.to_str(), Some("patch_target"));
+/// ````
 pub fn parse_auto(content: &str) -> Result<Vec<Patch>, ParseError> {
     match detect_patch(content) {
         PatchFormat::Markdown => parse_diffs(content),
