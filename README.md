@@ -193,7 +193,7 @@ For even more advanced use cases, such as iterating through hunks one by one, ch
 
     ```toml
     [dependencies]
-    mpatch = { version = "1.3.0", default-features = false }
+    mpatch = { version = "1.3.1", default-features = false }
     ```
 
 ---

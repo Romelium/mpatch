@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.1] - 2025-11-21
+
 ### Performance
 
 -   **Search:** Optimized the fuzzy matching algorithm by pre-calculating trimmed lines and using string references. This significantly reduces memory allocation and CPU usage when searching for hunk locations, especially in large files.
