@@ -136,25 +136,59 @@ use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let diff_content = "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new";
-    
+
     // 1. Parse the content (automatically detects format)
     let patches = parse_auto(diff_content)?;
-    
+
     // 2. Apply all patches to the target directory
     let target_dir = Path::new("./project");
     let options = ApplyOptions::new();
-    
+
     let results = apply_patches_to_dir(&patches, target_dir, options);
-    
+
     if results.all_succeeded() {
         println!("Patches applied successfully!");
     }
-    
+
+    Ok(())
+}
+```
+
+### Strict Application (Apply-or-Fail)
+
+For workflows where any failed hunk should be treated as an error, use the `try_` variants (e.g., `try_apply_patch_to_content`). These return a `Result` that fails if any hunk cannot be applied, simplifying error handling.
+
+```rust
+use mpatch::{parse_single_patch, try_apply_patch_to_content, ApplyOptions, StrictApplyError};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let diff = "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new";
+    let patch = parse_single_patch(diff)?;
+    let content = "old\n";
+
+    match try_apply_patch_to_content(&patch, Some(content), &ApplyOptions::new()) {
+        Ok(result) => println!("Success: {}", result.new_content),
+        Err(StrictApplyError::PartialApply { report }) => {
+            println!("Partial failure: {} hunks failed", report.failure_count());
+        }
+        Err(e) => println!("Error: {}", e),
+    }
     Ok(())
 }
 ```
 
 For even more advanced use cases, such as iterating through hunks one by one, check out the [**library documentation on docs.rs**](https://docs.rs/mpatch).
+
+---
+
+## Feature Flags
+
+*   `parallel` (**Enabled by default**): Enables parallel processing for the fuzzy matching algorithm using `rayon`. This significantly speeds up searching in large files. Disable this feature to reduce binary size or for environments that do not support threading (e.g., WASM).
+
+    ```toml
+    [dependencies]
+    mpatch = { version = "1.2.0", default-features = false }
+    ```
 
 ---
 
