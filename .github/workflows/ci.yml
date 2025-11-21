@@ -9,13 +9,32 @@ on:
 permissions:
   contents: read
   pull-requests: read
-  checks: write # Required for dorny/test-reporter
+  checks: write
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
+  # JOB 1: Check Formatting (Fast, runs on Linux only)
+  style:
+    name: Check Style
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt
+          cache: false # Caching usually not needed just for fmt
+
+      - name: Check Formatting
+        run: cargo fmt --all -- --check
+
+  # JOB 2: Build and Test (Matrix, runs in parallel with Style)
   build_and_test:
     name: Build and Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -48,7 +67,7 @@ jobs:
         with:
           toolchain: stable
           cache: true
-          components: clippy, rustfmt
+          components: clippy
 
       - name: Install cargo-hack & cargo-nextest
         if: steps.changed_files.outputs.code_any_changed == 'true'
@@ -56,29 +75,22 @@ jobs:
         with:
           tool: cargo-hack, cargo-nextest
 
-      - name: Check Formatting
-        if: steps.changed_files.outputs.code_any_changed == 'true'
-        run: cargo fmt --all -- --check
-
       - name: Linting (cargo clippy)
         if: steps.changed_files.outputs.code_any_changed == 'true'
         run: cargo hack --each-feature clippy --all-targets -- -D warnings
 
       - name: Run Tests (nextest)
         if: steps.changed_files.outputs.code_any_changed == 'true'
-        # We use a profile to ensure XML output is generated.
         run: |
           cargo nextest run --all-features --profile ci \
             --junit-path junit-${{ matrix.os }}.xml
 
       - name: Run Doc Tests
         if: steps.changed_files.outputs.code_any_changed == 'true'
-        # nextest does not support doctests, so we run them with standard cargo
         run: cargo test --doc --all-features
 
       - name: Upload Test Report
         uses: dorny/test-reporter@v1
-        # Run this step even if tests fail, so we get the report
         if: (success() || failure()) && steps.changed_files.outputs.code_any_changed == 'true'
         with:
           name: Test Report (${{ matrix.os }})
