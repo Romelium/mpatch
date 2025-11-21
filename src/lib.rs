@@ -4862,8 +4862,7 @@ impl<'a> DefaultHunkFinder<'a> {
                     .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
                 trace!("      Top fuzzy match candidates:");
                 for (score, ratio, _, _, idx, len) in sorted_windows.iter().take(5) {
-                    let window_content: Vec<_> =
-                        target_refs[*idx..*idx + *len].to_vec();
+                    let window_content: Vec<_> = target_refs[*idx..*idx + *len].to_vec();
                     trace!(
                         "        - Index {}, Len {}: Score {:.3} (Ratio {:.3}) | Content: {:?}",
                         idx,
