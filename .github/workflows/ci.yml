@@ -44,13 +44,25 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      # --- Smart Change Detection ---
+      - name: Get branch name
+        id: branch-name
+        uses: tj-actions/branch-names@v8
+
+      - name: Get last successful commit
+        uses: nrwl/nx-set-shas@v4
+        id: last_successful_commit
         with:
-          fetch-depth: 0
+          main-branch-name: ${{ steps.branch-name.outputs.current_branch }}
+          workflow-id: 'ci.yml'
 
       - name: Get changed files
         id: changed_files
         uses: tj-actions/changed-files@v45
         with:
+          base_sha: ${{ steps.last_successful_commit.outputs.base }}
           files_yaml: |
             code:
               - src/**/*.rs
@@ -59,6 +71,7 @@ jobs:
               - Cargo.lock
               - .github/workflows/**
 
+      # --- Setup ---
       - name: Install Rust toolchain
         if: steps.changed_files.outputs.code_any_changed == 'true'
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -88,31 +101,32 @@ jobs:
           report-name = "nextest-run"
           EOF
 
+      # --- Execution ---
       - name: Linting (cargo clippy)
         if: steps.changed_files.outputs.code_any_changed == 'true'
+        # Note: setup-rust-toolchain handles the Problem Matcher for Clippy automatically
         run: cargo hack --each-feature clippy --all-targets -- -D warnings
 
       - name: Run Tests (nextest)
         if: steps.changed_files.outputs.code_any_changed == 'true'
+        # We run with --profile ci to ensure XML generation
         run: cargo nextest run --all-features --profile ci
 
       - name: Run Doc Tests
         if: steps.changed_files.outputs.code_any_changed == 'true'
         run: cargo test --doc --all-features
 
-      - name: Upload Test Report
-        uses: dorny/test-reporter@v1
-        if: (success() || failure()) && steps.changed_files.outputs.code_any_changed == 'true'
-        with:
-          name: Test Report (${{ matrix.os }})
-          path: target/nextest/ci/junit.xml
-          reporter: java-junit
-          fail-on-error: false
-
       - name: Build (Release)
         if: steps.changed_files.outputs.code_any_changed == 'true'
         run: cargo build --release --all-features --verbose
 
-      - name: Indicate checks skipped
-        if: steps.changed_files.outputs.code_any_changed == 'false'
-        run: echo "Rust checks skipped as no relevant code changes were detected."
+      # --- Artifact Upload ---
+      - name: Upload Test Results
+        # Run if code changed, even if previous steps failed (so we see WHY they failed)
+        if: steps.changed_files.outputs.code_any_changed == 'true' && !cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          # Naming convention is critical here for the reporter regex
+          name: test-results-${{ matrix.os }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore

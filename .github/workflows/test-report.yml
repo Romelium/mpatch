@@ -1,0 +1,58 @@
+name: Test Report
+
+# Trigger ONLY after the CI workflow finishes
+on:
+  workflow_run:
+    workflows: ["Rust CI"]
+    types:
+      - completed
+
+permissions:
+  contents: read
+  actions: read
+  checks: write # Required to create the Check Run
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create Test Report
+        uses: dorny/test-reporter@v2
+        with:
+          # 1. ARTIFACT REGEX
+          # Automatically downloads artifacts matching this pattern from the 'Rust CI' workflow.
+          # It captures the group (.*) to use in the report name.
+          artifact: /test-results-(.*)/
+
+          # 2. DYNAMIC NAMING
+          # Uses the captured group ($1) to create separate reports for 
+          # 'ubuntu-latest', 'windows-latest', etc.
+          name: 'Test Report ($1)'
+
+          # 3. PATH
+          # Where to look for XML files inside the downloaded artifact zip
+          path: '*.xml'
+
+          # 4. REPORTER
+          # Nextest produces JUnit style XML
+          reporter: java-junit
+
+          # 5. VISUALIZATION SETTINGS
+          # Generate a summary table in the "Summary" tab of the workflow run
+          use-actions-summary: 'true'
+          # Customize the badge title in the summary
+          badge-title: 'Test Results'
+          # List every single test suite and case, not just failed ones
+          list-suites: 'all'
+          list-tests: 'all'
+          # Maximize the number of code annotations (red squiggles in files)
+          max-annotations: '50'
+
+          # 6. ERROR HANDLING
+          # If the tests failed in CI, mark this Check Run as failed too
+          fail-on-error: 'true'
+          # If CI skipped tests (no code changes), don't fail this reporting step
+          fail-on-empty: 'false'
+
+          # Token required to write checks
+          token: ${{ secrets.GITHUB_TOKEN }}
