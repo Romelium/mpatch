@@ -4618,6 +4618,13 @@ impl<'a> DefaultHunkFinder<'a> {
             }
         }
 
+        // Optimization: Pre-calculate trimmed lines for subsequent strategies.
+        // This avoids repeated allocation and trimming in loops.
+        let target_trimmed: Vec<String> =
+            target_lines.iter().map(|s| s.as_ref().trim_end().to_string()).collect();
+        // Create references to the trimmed strings to avoid allocations in TextDiff
+        let target_refs: Vec<&str> = target_trimmed.iter().map(|s| s.as_str()).collect();
+
         // --- STRATEGY 2: Exact Match (Ignoring Trailing Whitespace) ---
         // Handles minor formatting differences.
         trace!("    Attempting exact match (ignoring trailing whitespace)...");
@@ -4626,13 +4633,13 @@ impl<'a> DefaultHunkFinder<'a> {
             let stripped_matches: Box<dyn Iterator<Item = usize>> =
                 if match_block.len() <= target_lines.len() {
                     Box::new(
-                        target_lines
+                        target_trimmed
                             .windows(match_block.len())
                             .enumerate()
                             .filter(move |(_, window)| {
                                 window
                                     .iter()
-                                    .map(|s| s.as_ref().trim_end())
+                                    .map(|s| s.as_str())
                                     .eq(match_stripped.iter().copied())
                             })
                             .map(|(i, _)| i),
@@ -4681,7 +4688,7 @@ impl<'a> DefaultHunkFinder<'a> {
             );
 
             // Hoist invariants for performance
-            let match_stripped_lines: Vec<_> = match_block.iter().map(|s| s.trim_end()).collect();
+            let match_stripped_lines: Vec<&str> = match_block.iter().map(|s| s.trim_end()).collect();
             let match_content = match_stripped_lines.join("\n");
 
             let mut best_score = -1.0;
@@ -4703,7 +4710,7 @@ impl<'a> DefaultHunkFinder<'a> {
             );
 
             // Performance heuristic: narrow down the search space using anchor lines.
-            let search_ranges = Self::find_search_ranges(match_block, target_lines, len);
+            let search_ranges = Self::find_search_ranges(match_block, &target_trimmed, len);
             trace!("    Using search ranges: {:?}", search_ranges);
 
             // When the anchor heuristic fails, the search can be slow. We parallelize the
@@ -4717,7 +4724,7 @@ impl<'a> DefaultHunkFinder<'a> {
                     // the original non-`Copy` `Vec` and `String` from the outer scope.
                     let match_stripped_lines = &match_stripped_lines;
                     let match_content = &match_content;
-                    let target_slice = &target_lines[range_start..range_end];
+                    let target_slice = &target_refs[range_start..range_end];
 
                     (min_len..=max_len)
                         .into_par_iter()
@@ -4726,18 +4733,28 @@ impl<'a> DefaultHunkFinder<'a> {
                             (0..=target_slice.len() - window_len)
                                 .into_par_iter()
                                 .map(move |i| {
-                                    let window = &target_slice[i..i + window_len];
+                                    let window_stripped_lines = &target_slice[i..i + window_len];
                                     let absolute_index = range_start + i;
 
                                     // HYBRID SCORING: (Copied from original sequential loop)
-                                    let window_stripped_lines: Vec<_> =
-                                        window.iter().map(|s| s.as_ref().trim_end()).collect();
                                     let diff_lines = similar::TextDiff::from_slices(
-                                        &window_stripped_lines,
+                                        window_stripped_lines,
                                         match_stripped_lines,
                                     );
                                     let ratio_lines = diff_lines.ratio();
-                                    let window_content = window_stripped_lines.join("\n");
+
+                                    let mut capacity = 0;
+                                    for line in window_stripped_lines {
+                                        capacity += line.len() + 1;
+                                    }
+                                    let mut window_content = String::with_capacity(capacity);
+                                    for (j, line) in window_stripped_lines.iter().enumerate() {
+                                        if j > 0 {
+                                            window_content.push('\n');
+                                        }
+                                        window_content.push_str(line);
+                                    }
+
                                     let diff_words = similar::TextDiff::from_words(
                                         &window_content,
                                         match_content,
@@ -4774,24 +4791,34 @@ impl<'a> DefaultHunkFinder<'a> {
                     // the original non-`Copy` `Vec` and `String` from the outer scope.
                     let match_stripped_lines = &match_stripped_lines;
                     let match_content = &match_content;
-                    let target_slice = &target_lines[range_start..range_end];
+                    let target_slice = &target_refs[range_start..range_end];
 
                     (min_len..=max_len)
                         .filter(move |&window_len| window_len <= target_slice.len())
                         .flat_map(move |window_len| {
                             (0..=target_slice.len() - window_len).map(move |i| {
-                                let window = &target_slice[i..i + window_len];
+                                let window_stripped_lines = &target_slice[i..i + window_len];
                                 let absolute_index = range_start + i;
 
                                 // HYBRID SCORING: (Copied from original sequential loop)
-                                let window_stripped_lines: Vec<_> =
-                                    window.iter().map(|s| s.as_ref().trim_end()).collect();
                                 let diff_lines = similar::TextDiff::from_slices(
-                                    &window_stripped_lines,
+                                    window_stripped_lines,
                                     match_stripped_lines,
                                 );
                                 let ratio_lines = diff_lines.ratio();
-                                let window_content = window_stripped_lines.join("\n");
+
+                                let mut capacity = 0;
+                                for line in window_stripped_lines {
+                                    capacity += line.len() + 1;
+                                }
+                                let mut window_content = String::with_capacity(capacity);
+                                for (j, line) in window_stripped_lines.iter().enumerate() {
+                                    if j > 0 {
+                                        window_content.push('\n');
+                                    }
+                                    window_content.push_str(line);
+                                }
+
                                 let diff_words =
                                     similar::TextDiff::from_words(&window_content, match_content);
                                 let ratio_words = diff_words.ratio();
@@ -4823,9 +4850,9 @@ impl<'a> DefaultHunkFinder<'a> {
                     .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
                 trace!("      Top fuzzy match candidates:");
                 for (score, ratio, _, _, idx, len) in sorted_windows.iter().take(5) {
-                    let window_content: Vec<_> = target_lines[*idx..*idx + *len]
+                    let window_content: Vec<_> = target_refs[*idx..*idx + *len]
                         .iter()
-                        .map(|s| s.as_ref())
+                        .map(|s| *s)
                         .collect();
                     trace!(
                         "        - Index {}, Len {}: Score {:.3} (Ratio {:.3}) | Content: {:?}",
@@ -4997,10 +5024,8 @@ impl<'a> DefaultHunkFinder<'a> {
             && self.options.fuzz_factor > 0.0
         {
             trace!("    Target file is shorter than hunk. Attempting end-of-file fuzzy match...");
-            let target_stripped: Vec<_> =
-                target_lines.iter().map(|s| s.as_ref().trim_end()).collect();
-            let match_stripped: Vec<_> = match_block.iter().map(|s| s.trim_end()).collect();
-            let diff = TextDiff::from_slices(&target_stripped, &match_stripped);
+            let match_stripped: Vec<&str> = match_block.iter().map(|s| s.trim_end()).collect();
+            let diff = TextDiff::from_slices(&target_refs, &match_stripped);
             let ratio = diff.ratio();
 
             // Be slightly more lenient for this specific end-of-file prefix case.
