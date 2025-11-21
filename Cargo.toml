@@ -41,3 +41,29 @@ path = "src/lib.rs"
 [[bench]]
 name = "mpatch_bench"
 harness = false
+
+# --- Cargo Release Configuration ---
+# This section configures the `cargo-release` tool to automatically update version
+# numbers in documentation and source files when you publish a new release.
+#
+# Usage:
+# 1. Install the tool:          cargo install cargo-release
+# 2. Dry run (preview changes): cargo release <version>
+# 3. Execute (commit & tag):    cargo release <version> --execute
+[package.metadata.release]
+pre-release-replacements = [
+  # Update Changelog headers
+  {file="CHANGELOG.md", search="## \\[Unreleased\\]", replace="## [Unreleased]\n\n## [{{version}}] - {{date}}"},
+
+  # --- src/lib.rs ---
+  # Update simple style: mpatch = "x.y.z" (min=0 prevents error if not found)
+  {file="src/lib.rs", search="mpatch = \"[0-9.]+\"", replace="mpatch = \"{{version}}\"", min=0},
+  # Update complex style: version = "x.y.z" (inside feature flags or brackets)
+  {file="src/lib.rs", search="version = \"[0-9.]+\"", replace="version = \"{{version}}\"", min=0},
+
+  # --- README.md ---
+  # Update simple style: mpatch = "x.y.z" (min=0 prevents error if not found)
+  {file="README.md", search="mpatch = \"[0-9.]+\"", replace="mpatch = \"{{version}}\"", min=0},
+  # Update complex style: version = "x.y.z" (inside feature flags or brackets)
+  {file="README.md", search="version = \"[0-9.]+\"", replace="version = \"{{version}}\"", min=0}
+]
