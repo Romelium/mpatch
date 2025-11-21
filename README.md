@@ -84,7 +84,14 @@ println!("New");
 
 ## Library Usage
 
-While `mpatch` is a powerful CLI tool, it's also designed to be used as a library in your own Rust projects. The core logic is exposed through a simple and flexible API.
+While `mpatch` is a powerful CLI tool, it is also designed to be the patching engine for your own AI tools and workflows.
+
+If you are building an AI coding agent, a CLI utility, or a CI bot, you don't need to write your own fuzzy matching logic or Markdown parsers. `mpatch` exposes its core logic as a robust Rust crate.
+
+**Why use `mpatch` in your tool?**
+*   **Robust Parsing:** Feed it raw LLM output (Markdown, conflict markers, or diffs), and it extracts the patches automatically.
+*   **Safety:** Built-in path traversal checks prevent AI hallucinations from writing outside the target directory.
+*   **Detailed Diagnostics:** Get structured error reports (`ApplyResult`) to tell your agent exactly *why* a patch failed (e.g., "Context not found at line 50"), allowing for self-correction loops.
 
 Add `mpatch` to your `Cargo.toml`:
 ```bash
