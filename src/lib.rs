@@ -356,10 +356,11 @@ use thiserror::Error;
 
 /// Represents errors that can occur during the parsing of a diff file.
 ///
-/// This error is returned by parsing functions like [`parse_patches()`] when the input
-/// content is syntactically invalid. Note that [`parse_diffs()`] is lenient and
-/// will typically skip blocks that do not look like valid patches rather than returning
-/// this error.
+/// This error is returned by parsing functions like [`parse_patches()`] and
+/// [`parse_auto()`] when the input content is syntactically invalid.
+///
+/// Note that [`parse_diffs()`] is lenient and will typically skip blocks that do
+/// not look like valid patches rather than returning this error.
 ///
 /// # Example
 ///
@@ -379,7 +380,7 @@ use thiserror::Error;
 /// ````
 #[derive(Error, Debug, PartialEq)]
 pub enum ParseError {
-    /// A ` ```diff` block was found, but it was missing the `--- a/path/to/file`
+    /// A diff block or raw patch was found, but it was missing the `--- a/path/to/file`
     /// header required to identify the target file.
     #[error("Diff block starting on line {line} was found without a file path header (e.g., '--- a/path/to/file')")]
     MissingFileHeader {
@@ -391,7 +392,8 @@ pub enum ParseError {
 /// Represents errors that can occur when parsing a diff expected to contain exactly one patch.
 ///
 /// This enum is returned by [`parse_single_patch()`] when the input content does not
-/// result in exactly one `Patch` object.
+/// result in exactly one `Patch` object. It handles errors from format detection,
+/// parsing, and patch count validation.
 ///
 /// # Example
 ///
@@ -424,7 +426,8 @@ pub enum SingleParseError {
     #[error("Failed to parse diff content")]
     Parse(#[from] ParseError),
 
-    /// The provided diff content did not contain any valid ` ```diff` blocks.
+    /// The provided diff content did not contain any valid patches (Markdown blocks,
+    /// Unified Diffs, or Conflict Markers).
     #[error("No patches were found in the provided diff content")]
     NoPatchesFound,
 
@@ -595,7 +598,8 @@ pub enum OneShotError {
     #[error("Failed to apply patch")]
     Apply(#[from] StrictApplyError),
 
-    /// The provided diff content did not contain any valid ` ```diff` blocks.
+    /// The provided diff content did not contain any valid patches (Markdown blocks,
+    /// Unified Diffs, or Conflict Markers).
     #[error("No patches were found in the provided diff content")]
     NoPatchesFound,
 
@@ -1927,8 +1931,10 @@ impl std::fmt::Display for HunkLocation {
 
 /// Represents all the changes to be applied to a single file.
 ///
-/// A `Patch` is derived from a `--- a/path/to/file` section within a ` ```diff`
-/// block and contains one or more [`Hunk`]s.
+/// A `Patch` contains a target file path and a list of [`Hunk`]s. It is typically
+/// created by parsing a diff string (Unified Diff, Markdown block, or Conflict Markers)
+/// using functions like [`parse_auto()`] or [`parse_diffs()`].
+///
 /// It is the primary unit of work for the `apply` functions.
 ///
 /// # Example
@@ -2207,8 +2213,8 @@ impl std::fmt::Display for Patch {
 
 /// Identifies the syntactic format of a patch content string.
 ///
-/// This enum is returned by [`detect_patch`](crate::detect_patch) and used internally by
-/// [`parse_auto`](crate::parse_auto) to determine which parsing strategy to apply.
+/// This enum is returned by [`detect_patch()`] and used internally by
+/// [`parse_auto()`] to determine which parsing strategy to apply.
 ///
 /// It distinguishes between raw diffs (commonly output by `git diff`), diffs wrapped
 /// in Markdown code blocks (commonly output by LLMs), and conflict marker blocks
@@ -2235,9 +2241,8 @@ pub enum PatchFormat {
 
     /// A Markdown file containing diff code blocks.
     ///
-    /// This format is characterized by the presence of code fences annotated with
-    /// `diff` or `patch` (e.g., ` ```diff `). `mpatch` will extract and parse
-    /// the content inside these blocks.
+    /// This format is characterized by the presence of code fences (e.g., ` ```diff `)
+    /// containing patch data. `mpatch` will extract and parse the content inside these blocks.
     ///
     /// # Example
     /// ````text
@@ -2593,8 +2598,8 @@ fn parse_generic_block_lines(
 ///
 /// # Arguments
 ///
-/// * `content` - A string slice containing the text to parse, which can be a raw
-///   unified diff or markdown containing a ` ```diff` block.
+/// * `content` - A string slice containing the text to parse. This can be a raw
+///   Unified Diff, a Markdown block, or a set of Conflict Markers.
 ///
 /// # Errors
 ///
@@ -3939,7 +3944,8 @@ pub fn try_apply_patch_to_content(
 /// content in memory. It combines parsing and strict application into a single call.
 ///
 /// It performs the following steps:
-/// 1.  Parses the `diff_content` using [`parse_diffs()`].
+/// 1.  Parses the `diff_content` using [`parse_auto()`] (supporting Markdown,
+///     Unified Diffs, and Conflict Markers).
 /// 2.  Ensures that exactly one `Patch` is found. If zero or more than one are
 ///     found, it returns an error.
 /// 3.  Applies the single patch to `original_content` using the strict logic of
@@ -3947,8 +3953,8 @@ pub fn try_apply_patch_to_content(
 ///
 /// # Arguments
 ///
-/// * `diff_content` - A string slice containing the diff, typically inside a
-///   markdown code block (e.g., ` ```diff ... ``` `).
+/// * `diff_content` - A string slice containing the diff. This can be a Markdown
+///   code block, a raw Unified Diff, or Conflict Markers.
 /// * `original_content` - An `Option<&str>` representing the content to be patched.
 ///   Use `Some(content)` for an existing file, or `None` for a file creation patch.
 /// * `options` - Configuration for the patch operation, such as `fuzz_factor`.
