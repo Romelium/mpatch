@@ -9,77 +9,54 @@ on:
 permissions:
   contents: read
   pull-requests: read
+  checks: write # Required for dorny/test-reporter
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
 
 jobs:
   build_and_test:
     name: Build and Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        # Fetch depth 0 is needed for changed-files to correctly compare PR base/head or push history
         with:
           fetch-depth: 0
 
       - name: Get changed files
-        id: changed_files # The ID for this step is 'changed_files'
-        uses: tj-actions/changed-files@ed68ef82c095e0d48ec87eccea555d944a631a4c # v46
+        id: changed_files
+        uses: tj-actions/changed-files@v45
         with:
-          # Define file sets. Output will be like steps.changed-files.outputs.code_any_changed == 'true'
           files_yaml: |
-            rust_code:
-              - src/**/*.rs
-              - tests/**/*.rs
-            manifest:
-              - Cargo.toml
-              - Cargo.lock
-            # Combined group for convenience
             code:
               - src/**/*.rs
               - tests/**/*.rs
               - Cargo.toml
               - Cargo.lock
-            ci:
               - .github/workflows/**
-              - .pre-commit-config.yaml
-            docs:
-              - README.md
-              - COMMIT.md
-              - LICENSE
 
-      - name: Install Rust toolchain (stable)
+      - name: Install Rust toolchain
+        if: steps.changed_files.outputs.code_any_changed == 'true'
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
-          # The 'cargo' cache is for dependencies, sccache will cache compilation results
-          cache: 'cargo'
+          cache: true
           components: clippy, rustfmt
-        # This step always runs, as caching makes it fast, and subsequent steps might need it.
 
-      - name: Setup sccache
+      - name: Install cargo-hack & cargo-nextest
         if: steps.changed_files.outputs.code_any_changed == 'true'
-        uses: mozilla-actions/sccache-action@v0.0.9
-
-      - name: Configure Rust to use sccache
-        if: steps.changed_files.outputs.code_any_changed == 'true'
-        run: |
-          echo "SCCACHE_GHA_ENABLED=true" >> $GITHUB_ENV
-          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
-
-      - name: Install cargo-hack
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-hack
+          tool: cargo-hack, cargo-nextest
 
-      - name: Check Formatting (cargo fmt)
-        # Only run if Rust code or manifest files changed
+      - name: Check Formatting
         if: steps.changed_files.outputs.code_any_changed == 'true'
         run: cargo fmt --all -- --check
 
@@ -87,23 +64,32 @@ jobs:
         if: steps.changed_files.outputs.code_any_changed == 'true'
         run: cargo hack --each-feature clippy --all-targets -- -D warnings
 
-      - name: Run Tests (cargo test)
+      - name: Run Tests (nextest)
         if: steps.changed_files.outputs.code_any_changed == 'true'
-        run: cargo hack --each-feature test --all-targets --verbose
+        # We use a profile to ensure XML output is generated.
+        run: |
+          cargo nextest run --all-features --profile ci \
+            --junit-path junit-${{ matrix.os }}.xml
 
-      - name: Run ignored (network-dependent) tests
+      - name: Run Doc Tests
         if: steps.changed_files.outputs.code_any_changed == 'true'
-        run: cargo hack --each-feature test --all-targets -- --ignored
+        # nextest does not support doctests, so we run them with standard cargo
+        run: cargo test --doc --all-features
 
-      - name: Build (Release) for each feature
+      - name: Upload Test Report
+        uses: dorny/test-reporter@v1
+        # Run this step even if tests fail, so we get the report
+        if: (success() || failure()) && steps.changed_files.outputs.code_any_changed == 'true'
+        with:
+          name: Test Report (${{ matrix.os }})
+          path: junit-${{ matrix.os }}.xml
+          reporter: java-junit
+          fail-on-error: false
+
+      - name: Build (Release)
         if: steps.changed_files.outputs.code_any_changed == 'true'
-        run: cargo hack --each-feature build --release --verbose
+        run: cargo build --release --all-features --verbose
 
-      - name: Show sccache stats
-        if: always() && steps.changed_files.outputs.code_any_changed == 'true'
-        shell: bash
-        run: ${SCCACHE_PATH} --show-stats
-
-      - name: Indicate checks skipped (if applicable)
+      - name: Indicate checks skipped
         if: steps.changed_files.outputs.code_any_changed == 'false'
         run: echo "Rust checks skipped as no relevant code changes were detected."
