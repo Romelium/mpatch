@@ -117,8 +117,13 @@
 //! - [`parse_diffs()`]: Scans a string for markdown code blocks containing diffs.
 //! - [`parse_patches()`]: A lower-level parser that processes a raw unified diff string
 //!   directly, without needing markdown fences.
+//! - [`parse_conflict_markers()`]: Parses a string containing conflict markers
+//!   (`<<<<`, `====`, `>>>>`) into patches.
 //! - [`parse_patches_from_lines()`]: The lowest-level parser. It operates on an iterator
 //!   of lines, which is useful for streaming or avoiding large string allocations.
+//!
+//! You can also use [`detect_patch()`] to identify the format (Markdown, Unified, or Conflict)
+//! without parsing the full content.
 //!
 //! #### 2. Applying
 //!
@@ -142,6 +147,8 @@
 //!   target file path and a list of hunks.
 //! - [`Hunk`]: Represents a single block of changes within a patch, corresponding
 //!   to a block of changes (like a `@@ ... @@` section in a unified diff).
+//!   For **Conflict Markers**, the "before" block is treated as deletions and the
+//!   "after" block as additions.
 //!
 //! ### Context-Driven Matching
 //!
@@ -154,6 +161,8 @@
 //! - **Ambiguity Resolution:** If the same context appears in multiple places,
 //!   `mpatch` uses the line numbers (e.g., from the `@@ ... @@` header) as a *hint* to
 //!   find the most likely location.
+//!   Note that patches derived from **Conflict Markers** typically lack line numbers,
+//!   so ambiguity cannot be resolved this way.
 //! - **Fuzzy Matching:** If no exact match is found, it uses a similarity algorithm
 //!   to find the *best* fuzzy match, making it resilient to minor changes in the
 //!   surrounding code.
