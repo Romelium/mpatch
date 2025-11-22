@@ -1,62 +1,67 @@
-# This workflow builds and releases cross-platform binaries for the Rust project.
-# It triggers automatically when a new version tag (e.g., v1.2.3) is pushed.
 name: Release
 
 on:
   push:
     tags:
       - 'v*.*.*'
-
   workflow_dispatch:
 
-# Grant permissions for the workflow to create a GitHub Release and upload assets.
 permissions:
   contents: write
 
 env:
-  # The name of the binary to be built.
-  BINARY_NAME: mpatch
-  # A temporary directory for collecting release assets before packaging.
-  STAGING_DIR: staging
+  # Prevent Cargo from stripping binaries automatically.
+  # We need unstripped binaries for the "Full" artifacts (debug symbols/PDBs).
+  CARGO_PROFILE_RELEASE_STRIP: false
 
 jobs:
-  build-release:
-    name: Build Release Binaries (${{ matrix.target }})
+  # ===========================================================================
+  # JOB 1: Build Matrix (Linux, Windows, macOS Single-Arch)
+  # ===========================================================================
+  build-matrix:
+    name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
-      # Ensures that if one platform build fails, the others can still complete.
       fail-fast: false
       matrix:
         include:
-          # --- Linux Builds ---
-          # Standard GNU target for broad compatibility.
+          # --- Linux (GNU) ---
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          # Statically linked MUSL target for maximum portability across Linux distributions.
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-          # ARM64 target for devices like Raspberry Pi 4/5 and ARM-based cloud servers.
+            use_cross: false
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
+            use_cross: true
+          - os: ubuntu-latest
+            target: armv7-unknown-linux-gnueabihf
+            use_cross: true
 
-          # --- macOS Builds ---
-          # For Intel-based Macs.
+          # --- Linux (MUSL) ---
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            use_cross: true
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            use_cross: true
+          - os: ubuntu-latest
+            target: armv7-unknown-linux-musleabihf
+            use_cross: true
+
+          # --- macOS ---
           - os: macos-latest
             target: x86_64-apple-darwin
-          # For Apple Silicon (M1/M2/M3) Macs.
-          - os: macos-14
+            use_cross: false
+          - os: macos-14 # Apple Silicon runner
             target: aarch64-apple-darwin
+            use_cross: false
 
-          # --- Windows Builds ---
-          # Standard 64-bit MSVC target.
+          # --- Windows ---
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-          # 32-bit MSVC target for legacy system support.
-          - os: windows-latest
-            target: i686-pc-windows-msvc
-          # ARM64 MSVC target for Windows on ARM devices (e.g., Surface Pro X).
+            use_cross: false
           - os: windows-latest
             target: aarch64-pc-windows-msvc
+            use_cross: false
 
     steps:
       - name: Checkout repository
@@ -66,120 +71,283 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
-          # Install the specific target for the current matrix job.
           target: ${{ matrix.target }}
-          # Enable caching for Cargo dependencies to speed up subsequent builds.
           cache: 'cargo'
 
-      - name: Install cross-compilation dependencies (Linux)
-        if: runner.os == 'Linux'
+      # --- Auto-detect Binary Name ---
+      - name: Get Binary Name
+        id: bin_name
+        shell: bash
         run: |
-          set -e
-          # Install musl-tools for the static MUSL build.
-          if [[ "${{ matrix.target }}" == "x86_64-unknown-linux-musl" ]]; then
-            sudo apt-get update && sudo apt-get install -y musl-tools
-          # Install the GCC cross-compiler and linker for the ARM64 build.
-          elif [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
-            sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+          # Parses Cargo.toml metadata to find the name of the first "bin" target.
+          # This handles cases where package.name != binary.name
+          BIN_NAME=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].targets[] | select(.kind[] | contains("bin")) | .name' | head -n 1)
+          if [ -z "$BIN_NAME" ]; then
+            echo "Error: Could not determine binary name from Cargo.toml"
+            exit 1
+          fi
+          echo "Detected binary: $BIN_NAME"
+          echo "BINARY_NAME=$BIN_NAME" >> $GITHUB_ENV
+
+      - name: Install Cross
+        if: matrix.use_cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Build Binary
+        shell: bash
+        run: |
+          CMD="cargo"
+          if [[ "${{ matrix.use_cross }}" == "true" ]]; then CMD="cross"; fi
+          $CMD build --release --target ${{ matrix.target }} --verbose
+
+      # Only import GPG if the secret is actually set.
+      - name: Import GPG Key
+        if: ${{ secrets.GPG_PRIVATE_KEY != '' }}
+        uses: crazy-max/ghaction-import-gpg@v6
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.GPG_PASSPHRASE }}
+
+      - name: Package and Sign
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          REF_NAME: ${{ github.ref_name }}
+          HAS_GPG: ${{ secrets.GPG_PRIVATE_KEY != '' }}
+        run: |
+          # --- Setup Variables ---
+          # Ensure version always has 'v' prefix for folder naming (e.g., v1.0.0).
+          CLEAN_VERSION="${REF_NAME#v}"
+          VERSION="v${CLEAN_VERSION}"
+          
+          # Normalize binary name (Rust replaces hyphens with underscores).
+          BIN_FILE="${BINARY_NAME//-/_}"
+          
+          # Determine extensions based on OS.
+          BIN_EXT=""
+          ARCHIVE_EXT="tar.gz"
+          if [[ "$TARGET" == *"windows"* ]]; then
+            BIN_EXT=".exe"
+            ARCHIVE_EXT="zip"
+          elif [[ "$TARGET" == *"apple"* ]]; then
+            ARCHIVE_EXT="zip"
           fi
 
-      - name: Configure Cargo linker for ARM64 cross-compile
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          mkdir -p .cargo
-          # Instruct Cargo to use the cross-compiler's linker for this specific target.
-          cat > .cargo/config.toml <<EOF
-          [target.aarch64-unknown-linux-gnu]
-          linker = "aarch64-linux-gnu-gcc"
-          EOF
+          # Locate the built binary.
+          BUILD_DIR="target/$TARGET/release"
+          BIN_PATH="$BUILD_DIR/$BIN_FILE$BIN_EXT"
 
-      - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }} --verbose
-
-      - name: Prepare artifact details
-        id: artifact_details
-        shell: bash
-        run: |
-          # Determine the binary suffix and archive format based on the target platform.
-          # This centralizes naming logic and keeps the matrix definition clean.
-          BIN_SUFFIX=""
-          ARCHIVE_FORMAT="tar.gz"
-          if [[ "${{ matrix.target }}" == *"-windows-"* ]]; then
-            BIN_SUFFIX=".exe"
-            ARCHIVE_FORMAT="zip"
+          if [[ ! -f "$BIN_PATH" ]]; then
+            echo "Error: Binary not found at $BIN_PATH"
+            exit 1
           fi
-          echo "BIN_SUFFIX=${BIN_SUFFIX}" >> $GITHUB_ENV
-          echo "ARCHIVE_FORMAT=${ARCHIVE_FORMAT}" >> $GITHUB_ENV
+
+          # --- Prepare Directories (binstall compliance) ---
+          # Structure: {name}-{target}-{version}/
+          DIR_NAME="${BINARY_NAME}-${TARGET}-${VERSION}"
+          FULL_DIR_NAME="${BINARY_NAME}-${TARGET}-${VERSION}-full"
           
-          # Define the final archive filename, e.g., "BINARY_NAME-v1.2.3-x86_64-unknown-linux-gnu.tar.gz".
-          ARCHIVE_FILENAME="${{ env.BINARY_NAME }}-${{ github.ref_name }}-${{ matrix.target }}.${ARCHIVE_FORMAT}"
-          echo "archive_filename=${ARCHIVE_FILENAME}" >> $GITHUB_OUTPUT
+          mkdir -p "$DIR_NAME" "$FULL_DIR_NAME"
 
-      - name: Create staging directory and copy files (Unix)
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          set -e
-          mkdir -p ${{ env.STAGING_DIR }}
-          cp "target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}${{ env.BIN_SUFFIX }}" "${{ env.STAGING_DIR }}/"
-          cp LICENSE README.md "${{ env.STAGING_DIR }}/"
+          # --- Populate "Full" Directory (Unstripped + PDB) ---
+          cp "$BIN_PATH" "$FULL_DIR_NAME/$BINARY_NAME$BIN_EXT"
+          cp LICENSE README.md "$FULL_DIR_NAME/"
+          # On Windows, include the PDB debug symbols.
+          if [[ "$TARGET" == *"windows"* ]]; then
+            cp "$BUILD_DIR/$BIN_FILE.pdb" "$FULL_DIR_NAME/$BINARY_NAME.pdb" || true
+          fi
 
-      - name: Create staging directory and copy files (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Path "${{ env.STAGING_DIR }}" -Force
-          Copy-Item -Path "target\${{ matrix.target }}\release\${{ env.BINARY_NAME }}${{ env.BIN_SUFFIX }}" -Destination "${{ env.STAGING_DIR }}\"
-          Copy-Item -Path "LICENSE", "README.md" -Destination "${{ env.STAGING_DIR }}\"
-
-      - name: Prepare archive structure for binstall
-        shell: bash
-        run: |
-          # Create a root directory inside the archive. This is a best practice that
-          # prevents "tarbombs" and is the preferred structure for `cargo binstall`.
-          ARCHIVE_ROOT_DIR=$(basename "${{ steps.artifact_details.outputs.archive_filename }}" .${{ env.ARCHIVE_FORMAT }})
-          echo "ARCHIVE_ROOT_DIR=${ARCHIVE_ROOT_DIR}" >> $GITHUB_ENV
+          # --- Populate "Standard" Directory (Stripped) ---
+          cp "$BIN_PATH" "$DIR_NAME/$BINARY_NAME$BIN_EXT"
+          cp LICENSE README.md "$DIR_NAME/"
           
-          # Move all staged files into this new root directory.
-          mkdir "$ARCHIVE_ROOT_DIR"
-          mv ${{ env.STAGING_DIR }}/* "$ARCHIVE_ROOT_DIR/"
+          # Manually strip the binary for the standard release to reduce size.
+          if [[ "$TARGET" != *"windows"* ]]; then
+            if [[ "$TARGET" == *"apple"* ]]; then
+              strip -x "$DIR_NAME/$BINARY_NAME$BIN_EXT" || true
+            else
+              strip "$DIR_NAME/$BINARY_NAME$BIN_EXT" || true
+            fi
+          fi
 
-      - name: Package release artifacts (Unix)
-        if: runner.os != 'Windows'
-        shell: bash
-        run: tar czf "${{ steps.artifact_details.outputs.archive_filename }}" "${{ env.ARCHIVE_ROOT_DIR }}"
+          # --- Create Archives ---
+          FULL_ARCHIVE="${FULL_DIR_NAME}.${ARCHIVE_EXT}"
+          STD_ARCHIVE="${DIR_NAME}.${ARCHIVE_EXT}"
 
-      - name: Package release artifacts (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: Compress-Archive -Path "${{ env.ARCHIVE_ROOT_DIR }}" -DestinationPath "${{ steps.artifact_details.outputs.archive_filename }}"
+          if [[ "$ARCHIVE_EXT" == "zip" ]]; then
+            zip -r "$FULL_ARCHIVE" "$FULL_DIR_NAME"
+            zip -r "$STD_ARCHIVE" "$DIR_NAME"
+          else
+            tar -czf "$FULL_ARCHIVE" "$FULL_DIR_NAME"
+            tar -czf "$STD_ARCHIVE" "$DIR_NAME"
+          fi
 
-      - name: Upload release asset
+          # --- Sign Archives (Optional) ---
+          if [[ "$HAS_GPG" == "true" ]]; then
+            gpg --batch --yes --detach-sign --armor --output "${FULL_ARCHIVE}.sig" "$FULL_ARCHIVE"
+            gpg --batch --yes --detach-sign --armor --output "${STD_ARCHIVE}.sig" "$STD_ARCHIVE"
+          fi
+
+          # --- Organize for Upload ---
+          mkdir dist
+          mv "${FULL_ARCHIVE}" "${STD_ARCHIVE}" dist/
+          if [[ "$HAS_GPG" == "true" ]]; then
+            mv "${FULL_ARCHIVE}.sig" "${STD_ARCHIVE}.sig" dist/
+          fi
+
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          # Upload the packaged archive as a temporary artifact for the next job.
-          name: release-asset-${{ matrix.target }}
-          path: ${{ steps.artifact_details.outputs.archive_filename }}
+          name: artifacts-${{ matrix.target }}
+          path: dist/*
 
-  create-release:
-    name: Create GitHub Release
-    # This job will only run after all matrix builds in `build-release` have succeeded.
-    needs: build-release
-    runs-on: ubuntu-latest
+  # ===========================================================================
+  # JOB 2: Build Universal macOS Binary
+  # ===========================================================================
+  build-mac-universal:
+    name: Build universal-apple-darwin
+    needs: build-matrix
+    runs-on: macos-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download all release assets
+      # We need Rust installed here just to run 'cargo metadata' to get the name.
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          cache: 'cargo'
+
+      # --- Auto-detect Binary Name ---
+      - name: Get Binary Name
+        id: bin_name
+        shell: bash
+        run: |
+          BIN_NAME=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].targets[] | select(.kind[] | contains("bin")) | .name' | head -n 1)
+          echo "Detected binary: $BIN_NAME"
+          echo "BINARY_NAME=$BIN_NAME" >> $GITHUB_ENV
+
+      - name: Download x86_64 Artifacts
         uses: actions/download-artifact@v4
         with:
-          # Download all artifacts uploaded by the previous job into a single directory.
-          path: release-assets
+          name: artifacts-x86_64-apple-darwin
+          path: artifacts-x86
 
-      - name: Get version from tag
-        id: get_version
+      - name: Download arm64 Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: artifacts-aarch64-apple-darwin
+          path: artifacts-arm
+
+      - name: Create Universal Binary (Lipo)
         shell: bash
-        # Strip the 'v' prefix from the tag (e.g., v1.3.1 -> 1.3.1) to match CHANGELOG headers.
+        run: |
+          # Extract the "Full" (unstripped) zips to get the raw binaries.
+          unzip -o artifacts-x86/*x86_64-apple-darwin*.full.zip -d x86_extract
+          unzip -o artifacts-arm/*aarch64-apple-darwin*.full.zip -d arm_extract
+          
+          # Find the binary files (ignoring folder structure).
+          BIN_X86=$(find x86_extract -type f -name "${BINARY_NAME}" | head -n 1)
+          BIN_ARM=$(find arm_extract -type f -name "${BINARY_NAME}" | head -n 1)
+
+          if [[ -z "$BIN_X86" || -z "$BIN_ARM" ]]; then
+            echo "Error: Could not locate extracted binaries for lipo."
+            exit 1
+          fi
+
+          # Merge architectures.
+          mkdir -p output
+          lipo -create -output output/${BINARY_NAME} "$BIN_X86" "$BIN_ARM"
+
+      - name: Import GPG Key
+        if: ${{ secrets.GPG_PRIVATE_KEY != '' }}
+        uses: crazy-max/ghaction-import-gpg@v6
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.GPG_PASSPHRASE }}
+
+      - name: Package and Sign
+        shell: bash
+        env:
+          HAS_GPG: ${{ secrets.GPG_PRIVATE_KEY != '' }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          CLEAN_VERSION="${REF_NAME#v}"
+          VERSION="v${CLEAN_VERSION}"
+          
+          TARGET="universal-apple-darwin"
+          BIN_PATH="output/${BINARY_NAME}"
+          
+          # --- Prepare Directories ---
+          DIR_NAME="${BINARY_NAME}-${TARGET}-${VERSION}"
+          FULL_DIR_NAME="${BINARY_NAME}-${TARGET}-${VERSION}-full"
+          
+          mkdir -p "$DIR_NAME" "$FULL_DIR_NAME"
+
+          # Full (Unstripped)
+          cp "$BIN_PATH" "$FULL_DIR_NAME/$BINARY_NAME"
+          cp LICENSE README.md "$FULL_DIR_NAME/"
+          
+          # Standard (Stripped)
+          cp "$BIN_PATH" "$DIR_NAME/$BINARY_NAME"
+          cp LICENSE README.md "$DIR_NAME/"
+          strip -x "$DIR_NAME/$BINARY_NAME"
+
+          # --- Create Archives ---
+          FULL_ARCHIVE="${FULL_DIR_NAME}.zip"
+          STD_ARCHIVE="${DIR_NAME}.zip"
+          
+          zip -r "$FULL_ARCHIVE" "$FULL_DIR_NAME"
+          zip -r "$STD_ARCHIVE" "$DIR_NAME"
+
+          # --- Sign Archives ---
+          if [[ "$HAS_GPG" == "true" ]]; then
+            gpg --batch --yes --detach-sign --armor --output "${FULL_ARCHIVE}.sig" "$FULL_ARCHIVE"
+            gpg --batch --yes --detach-sign --armor --output "${STD_ARCHIVE}.sig" "$STD_ARCHIVE"
+          fi
+
+          # --- Organize for Upload ---
+          mkdir dist
+          mv "${FULL_ARCHIVE}" "${STD_ARCHIVE}" dist/
+          if [[ "$HAS_GPG" == "true" ]]; then
+             mv "${FULL_ARCHIVE}.sig" "${STD_ARCHIVE}.sig" dist/
+          fi
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-universal
+          path: dist/*
+
+  # ===========================================================================
+  # JOB 3: Create Release
+  # ===========================================================================
+  create-release:
+    name: Create GitHub Release
+    needs: [build-matrix, build-mac-universal]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Include Public Key
+        # Only run if the variable is set in GitHub Settings
+        if: ${{ vars.GPG_PUBLIC_KEY != '' }}
+        run: |
+          # Write the variable content to a file in the assets folder
+          echo "${{ vars.GPG_PUBLIC_KEY }}" > release-assets/public.key
+
+      - name: Get Version
+        id: get_version
         run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
 
       - name: Extract Release Notes
@@ -189,17 +357,14 @@ jobs:
           version: ${{ steps.get_version.outputs.version }}
           changelog: CHANGELOG.md
 
-      - name: List downloaded files (for debugging)
-        run: ls -R release-assets
-
-      - name: Create Release and Upload Assets
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          # Use the tag that triggered the workflow as the release tag.
           tag_name: ${{ github.ref_name }}
-          # Use the extracted release notes from the changelog.
           body_path: ${{ steps.extract_notes.outputs.file }}
-          # Use a glob pattern to find and upload all downloaded archives.
-          files: release-assets/*/*
+          generate_release_notes: true
+          files: release-assets/*
+          draft: true
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
