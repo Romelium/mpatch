@@ -169,7 +169,7 @@
 //!
 //! ## Advanced Usage
 //!
-//! ### Configuring `ApplyOptions`
+//! ### Configuring [`ApplyOptions`]
 //!
 //! The behavior of the `apply` functions is controlled by the [`ApplyOptions`] struct.
 //! `mpatch` provides several convenient ways to construct it:
@@ -868,7 +868,7 @@ impl Default for ApplyOptions {
 impl ApplyOptions {
     /// Creates a new [`ApplyOptions`] instance with default values.
     ///
-    /// This is an alias for `ApplyOptions::default()`.
+    /// This is an alias for [`ApplyOptions::default()`].
     ///
     /// # Example
     ///
