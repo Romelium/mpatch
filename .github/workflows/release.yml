@@ -364,6 +364,7 @@ jobs:
       - name: Extract Release Notes
         id: extract_notes
         uses: theory/changelog-version-notes-action@v0
+        continue-on-error: true
         with:
           version: ${{ steps.get_version.outputs.version }}
           changelog: CHANGELOG.md
@@ -372,7 +373,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          body_path: ${{ steps.extract_notes.outputs.file }}
+          body_path: ${{ steps.extract_notes.outcome == 'success' && steps.extract_notes.outputs.file || '' }}
           generate_release_notes: true
           files: release-assets/*
           draft: true
