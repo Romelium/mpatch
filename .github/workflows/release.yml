@@ -374,7 +374,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           body_path: ${{ steps.extract_notes.outcome == 'success' && steps.extract_notes.outputs.file || '' }}
-          generate_release_notes: true
+          generate_release_notes: ${{ steps.extract_notes.outcome != 'success' }}
           files: release-assets/*
           draft: true
           prerelease: false
