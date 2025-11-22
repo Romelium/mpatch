@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.2] - 2025-11-22
+
 ### Fixed
 
 -   **Fuzzy Matching:** Fixed a critical bug where applying a patch via fuzzy matching would overwrite local changes in the context lines (e.g., updated comments, different indentation). The application logic now performs a granular merge to preserve the target file's content while applying the patch's specific changes.
