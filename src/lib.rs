@@ -4216,61 +4216,158 @@ pub fn apply_hunk_to_lines(
                         .to_vec();
                     trace!("      File content in matched range: {:?}", file_matched_lines);
 
-                    // Create a pure delta patch (no context) from the hunk's changes. This isolates
-                    // the exact lines to be removed and added.
-                    let removed_text = hunk.removed_lines().join("\n");
-                    let added_text = hunk.added_lines().join("\n");
+                    // 1. Parse hunk to separate match lines and additions.
+                    // We map each line in the match block (Context/Removal) to a list of additions that follow it.
+                    // match_lines_meta: Vec<(is_removal, additions_after_this_line)>
+                    let mut match_lines_meta: Vec<(bool, Vec<String>)> = Vec::new();
+                    let mut initial_additions: Vec<String> = Vec::new();
 
-                    // Use a context of 0 to ensure we only match the delta.
-                    match Patch::from_texts("delta", &removed_text, &added_text, 0) {
-                        Ok(delta_patch) => {
-                            if delta_patch.hunks.is_empty() {
-                                // No effective changes in the delta, so return the original file block.
-                                trace!("      Delta patch has no changes. Preserving original file block.");
-                                file_matched_lines
+                    let mut line_iter = hunk.lines.iter().peekable();
+
+                    // Consume any additions that appear before the first context/removal line
+                    while let Some(line) = line_iter.peek() {
+                        if let Some(stripped) = line.strip_prefix('+') {
+                            initial_additions.push(stripped.to_string());
+                            line_iter.next();
+                        } else {
+                            break;
+                        }
+                    }
+
+                    // Process the rest of the hunk
+                    for line in line_iter {
+                        if let Some(stripped) = line.strip_prefix('+') {
+                            // Attach this addition to the most recent match line
+                            if let Some(last) = match_lines_meta.last_mut() {
+                                last.1.push(stripped.to_string());
                             } else {
-                                let mut temp_lines = file_matched_lines.clone();
-                                let mut all_succeeded = true;
-                                // The inner search must be exact, as we are looking for the specific lines to remove
-                                // within the fuzzy-matched block.
-                                let inner_options =
-                                    ApplyOptions::exact();
+                                // Should be unreachable if match block is not empty, but safe fallback
+                                initial_additions.push(stripped.to_string());
+                            }
+                        } else {
+                            // It's a Context (' ') or Removal ('-') line
+                            let is_removal = line.starts_with('-');
+                            match_lines_meta.push((is_removal, Vec::new()));
+                        }
+                    }
 
-                                for delta_hunk in &delta_patch.hunks {
-                                    if !delta_hunk.has_changes() {
-                                        continue;
+                    // 2. Prepare text for diffing
+                    // We align the hunk's "old" view (match block) with the file's actual content.
+                    let match_block_content: Vec<&str> = hunk.get_match_block();
+                    let file_block_content: Vec<&str> =
+                        file_matched_lines.iter().map(|s| s.as_str()).collect();
+
+                    // 3. Diff
+                    let diff = similar::TextDiff::from_slices(
+                        &match_block_content,
+                        &file_block_content,
+                    );
+
+                    // 4. Reconstruct the block
+                    let mut final_lines = Vec::new();
+                    final_lines.extend(initial_additions);
+
+                    let is_at_eof = (location.start_index + location.length) == target_lines.len();
+                    let ops = diff.ops().to_vec();
+
+                    for (op_idx, op) in ops.iter().enumerate() {
+                        match op {
+                            similar::DiffOp::Equal {
+                                old_index,
+                                new_index,
+                                len,
+                            } => {
+                                // The file content matches the hunk's expectation (fuzzy or exact).
+                                for i in 0..*len {
+                                    let old_idx = old_index + i;
+                                    let new_idx = new_index + i;
+                                    let (is_removal, additions) = &match_lines_meta[old_idx];
+
+                                    // If it's not a removal, keep the file's version of the line (preserves local edits)
+                                    if !*is_removal {
+                                        final_lines.push(file_matched_lines[new_idx].clone());
                                     }
-                                    // Recursively call this function to apply the delta hunk.
-                                    // This is safe because the inner call will use an exact match.
-                                    let status =
-                                        apply_hunk_to_lines(delta_hunk, &mut temp_lines, &inner_options);
-                                    if let HunkApplyStatus::Failed(e) = status {
-                                        trace!("      Inner delta hunk application failed: {}", e);
-                                        all_succeeded = false;
-                                        break;
-                                    }
+                                    // Always insert the additions associated with this line
+                                    final_lines.extend(additions.clone());
                                 }
+                            }
+                            similar::DiffOp::Delete {
+                                old_index, old_len, ..
+                            } => {
+                                // Lines in hunk match block that are missing in the file.
+                                // If it was a REMOVAL line, it's already gone, so we skip it.
+                                // If it was a CONTEXT line, we only restore it if we are at the EOF
+                                // and this is the trailing part of the patch (implying truncation).
+                                // Otherwise, we assume it's stale context (extra line in patch) and skip it.
+                                let is_last_op = op_idx == ops.len() - 1;
+                                for i in 0..*old_len {
+                                    let old_idx = old_index + i;
+                                    let (is_removal, additions) = &match_lines_meta[old_idx];
+                                    if !*is_removal && is_at_eof && is_last_op {
+                                        final_lines.push(match_block_content[old_idx].to_string());
+                                    }
+                                    final_lines.extend(additions.clone());
+                                }
+                            }
+                            similar::DiffOp::Insert {
+                                new_index, new_len, ..
+                            } => {
+                                // Extra lines in the file (local insertions).
+                                // We preserve them.
+                                for i in 0..*new_len {
+                                    let new_idx = new_index + i;
+                                    final_lines.push(file_matched_lines[new_idx].clone());
+                                }
+                            }
+                            similar::DiffOp::Replace {
+                                old_index,
+                                old_len,
+                                new_index,
+                                new_len,
+                            } => {
+                                // A region where the file differs significantly from the hunk.
+                                // If lengths match, we assume a 1-to-1 correspondence (e.g. whitespace changes).
+                                if *old_len == *new_len {
+                                    for i in 0..*old_len {
+                                        let old_idx = old_index + i;
+                                        let new_idx = new_index + i;
+                                        let (is_removal, additions) = &match_lines_meta[old_idx];
 
-                                if all_succeeded {
-                                    trace!("      Inner delta patch application succeeded. Using transformed lines: {:?}", temp_lines);
-                                    temp_lines
+                                        if !*is_removal {
+                                            final_lines.push(file_matched_lines[new_idx].clone());
+                                        }
+                                        final_lines.extend(additions.clone());
+                                    }
                                 } else {
-                                    warn!("    Internal delta patch application failed. Overwriting block with patch content as a last resort.");
-                                    hunk.get_replace_block()
-                                        .iter()
-                                        .map(|s| s.to_string())
-                                        .collect()
+                                    // Heuristic: If the hunk region contains ANY context lines, we assume
+                                    // the file content is a modified version of that context, so we KEEP it.
+                                    // If the hunk region is PURELY removals, we assume the file content
+                                    // is what needs to be removed, so we DROP it.
+                                    let mut has_context = false;
+                                    for i in 0..*old_len {
+                                        if !match_lines_meta[old_index + i].0 {
+                                            has_context = true;
+                                            break;
+                                        }
+                                    }
+
+                                    if has_context {
+                                        for i in 0..*new_len {
+                                            final_lines
+                                                .push(file_matched_lines[new_index + i].clone());
+                                        }
+                                    }
+
+                                    // Always append additions associated with the old lines
+                                    for i in 0..*old_len {
+                                        let (_, additions) = &match_lines_meta[old_index + i];
+                                        final_lines.extend(additions.clone());
+                                    }
                                 }
                             }
                         }
-                        Err(e) => {
-                            warn!("    Internal error: Failed to create delta patch for fuzzy apply: {}. Falling back to simple replace.", e);
-                            hunk.get_replace_block()
-                                .iter()
-                                .map(|s| s.to_string())
-                                .collect()
-                        }
                     }
+                    final_lines
                 } else {
                     // For exact matches, the original behavior is correct and faster.
                     trace!("    Applying hunk via exact logic.");

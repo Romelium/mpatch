@@ -4584,3 +4584,545 @@ fn test_patch_from_texts_uses_raw_parser() {
     assert_eq!(patch.hunks[0].removed_lines(), vec!["line 2"]);
     assert_eq!(patch.hunks[0].added_lines(), vec!["line modified"]);
 }
+
+mod fuzzy_logic_edge_cases {
+    use indoc::indoc;
+    use mpatch::{apply_patch_to_file, parse_auto, parse_diffs, ApplyOptions};
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_fuzzy_insertion_clobbers_context() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("main.rs");
+
+        // The file has a comment that has been modified locally ("modified").
+        let original_content = indoc! {r#"
+            fn main() {
+                // comment (modified)
+                println!("Hello");
+            }
+        "#};
+        fs::write(&file_path, original_content).unwrap();
+
+        // The patch expects the comment to be "(original)" and wants to INSERT a line.
+        let diff = indoc! {r#"
+            ```diff
+            --- a/main.rs
+            +++ b/main.rs
+            @@ -1,3 +1,4 @@
+             fn main() {
+                 // comment (original)
+            +    let x = 1;
+                 println!("Hello");
+             }
+            ```
+        "#};
+
+        let patches = parse_diffs(diff).unwrap();
+        let patch = &patches[0];
+
+        // Enable fuzzy matching so it matches despite the comment difference.
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
+
+        assert!(result.report.all_applied_cleanly());
+
+        let content = fs::read_to_string(&file_path).unwrap();
+
+        // EXPECTED: The local modification "(modified)" should be preserved.
+        let expected_content = indoc! {r#"
+            fn main() {
+                // comment (modified)
+                let x = 1;
+                println!("Hello");
+            }
+        "#};
+
+        assert_eq!(
+            content, expected_content,
+            "Fuzzy insertion clobbered the local file context!"
+        );
+    }
+
+    #[test]
+    fn test_fuzzy_interleaved_local_edits() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("config.toml");
+
+        // Local file has an extra line inserted in the middle of the context
+        let original_content = indoc! {r#"
+            [server]
+            host = "localhost"
+            # Local comment
+            port = 8080
+        "#};
+        fs::write(&file_path, original_content).unwrap();
+
+        // Patch wants to change port to 9090, unaware of the local comment
+        let diff = indoc! {r#"
+            ```diff
+            --- a/config.toml
+            +++ b/config.toml
+            @@ -1,3 +1,3 @@
+             [server]
+             host = "localhost"
+            -port = 8080
+            +port = 9090
+            ```
+        "#};
+
+        let patches = parse_diffs(diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(result.report.all_applied_cleanly());
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        let expected = indoc! {r#"
+            [server]
+            host = "localhost"
+            # Local comment
+            port = 9090
+        "#};
+        assert_eq!(content, expected);
+    }
+
+    #[test]
+    fn test_fuzzy_indentation_context_preserved() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("style.css");
+
+        // File uses tabs
+        let original_content = "body {\n\tcolor: red;\n\tbackground: white;\n}\n";
+        fs::write(&file_path, original_content).unwrap();
+
+        // Patch uses spaces
+        let diff = indoc! {r#"
+            ```diff
+            --- a/style.css
+            +++ b/style.css
+            @@ -1,4 +1,4 @@
+             body {
+                 color: red;
+            -    background: white;
+            +    background: black;
+             }
+            ```
+        "#};
+
+        let patches = parse_diffs(diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(result.report.all_applied_cleanly());
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        // Context lines (body {, color: red;, }) should keep tabs.
+        // The changed line comes from patch, so it will have spaces.
+        let expected = "body {\n\tcolor: red;\n    background: black;\n}\n";
+        assert_eq!(content, expected);
+    }
+
+    #[test]
+    fn test_fuzzy_extra_newlines_in_target() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("list.txt");
+
+        let original_content = "item 1\n\nitem 2\n\nitem 3\n";
+        fs::write(&file_path, original_content).unwrap();
+
+        let diff = indoc! {r#"
+            ```diff
+            --- a/list.txt
+            +++ b/list.txt
+            @@ -1,3 +1,3 @@
+             item 1
+            -item 2
+            +item two
+             item 3
+            ```
+        "#};
+
+        let patches = parse_diffs(diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(result.report.all_applied_cleanly());
+
+        // The extra newlines should be preserved as local insertions
+        let content = fs::read_to_string(&file_path).unwrap();
+        let expected = "item 1\n\nitem two\n\nitem 3\n";
+        assert_eq!(content, expected);
+    }
+
+    #[test]
+    fn test_fuzzy_restore_truncated_context_at_eof() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("truncated.rs");
+
+        // File is missing the closing brace
+        let original_content = "fn main() {\n    println!(\"hi\");\n";
+        fs::write(&file_path, original_content).unwrap();
+
+        // Patch expects the brace to be there and adds a line after it
+        let diff = indoc! {r#"
+            ```diff
+            --- a/truncated.rs
+            +++ b/truncated.rs
+            @@ -1,3 +1,4 @@
+             fn main() {
+                 println!("hi");
+             }
+            +// end
+            ```
+        "#};
+
+        let patches = parse_diffs(diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(result.report.all_applied_cleanly());
+
+        // The missing context "}" should be restored because it's at EOF
+        let content = fs::read_to_string(&file_path).unwrap();
+        let expected = "fn main() {\n    println!(\"hi\");\n}\n// end\n";
+        assert_eq!(content, expected);
+    }
+
+    #[test]
+    fn test_fuzzy_skip_stale_context_middle() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("stale.txt");
+
+        // File is missing "line B" which is in patch context
+        let original_content = "line A\nline C\n";
+        fs::write(&file_path, original_content).unwrap();
+
+        // Patch has "line B" in context. Since it's not at EOF, it should be treated as stale and skipped.
+        let diff = indoc! {r#"
+            ```diff
+            --- a/stale.txt
+            +++ b/stale.txt
+            @@ -1,4 +1,4 @@
+             line A
+             line B
+            -line C
+            +line changed
+            ```
+        "#};
+
+        let patches = parse_diffs(diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(result.report.all_applied_cleanly());
+
+        // "line B" should NOT be re-inserted.
+        let content = fs::read_to_string(&file_path).unwrap();
+        let expected = "line A\nline changed\n";
+        assert_eq!(content, expected);
+    }
+
+    #[test]
+    fn test_conflict_markers_adjacent() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("patch_target");
+
+        let original_content = "block1\nblock2\n";
+        fs::write(&file_path, original_content).unwrap();
+
+        let diff = indoc! {r#"
+            <<<<
+            block1
+            ====
+            new1
+            >>>>
+            <<<<
+            block2
+            ====
+            new2
+            >>>>
+        "#};
+
+        let patches = parse_auto(diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(result.report.all_applied_cleanly());
+        let content = fs::read_to_string(&file_path).unwrap();
+        let expected = "new1\nnew2\n";
+        assert_eq!(content, expected);
+    }
+
+    #[test]
+    fn test_hunks_out_of_order() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("order.txt");
+
+        let original_content = "line 1\nline 2\nline 3\nline 4\nline 5\n";
+        fs::write(&file_path, original_content).unwrap();
+
+        let diff = indoc! {r#"
+            ```diff
+            --- a/order.txt
+            +++ b/order.txt
+            @@ -5,1 +5,1 @@
+            -line 5
+            +line five
+            @@ -1,1 +1,1 @@
+            -line 1
+            +line one
+            ```
+        "#};
+
+        let patches = parse_diffs(diff).unwrap();
+        let options = ApplyOptions::exact();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(result.report.all_applied_cleanly());
+        let content = fs::read_to_string(&file_path).unwrap();
+        let expected = "line one\nline 2\nline 3\nline 4\nline five\n";
+        assert_eq!(content, expected);
+    }
+
+    #[test]
+    fn test_large_offset_application() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("offset.txt");
+
+        // File has content shifted by 100 lines compared to patch expectation
+        let mut content = String::new();
+        for _ in 0..100 {
+            content.push_str("prefix\n");
+        }
+        content.push_str("target\n");
+        fs::write(&file_path, &content).unwrap();
+
+        // Patch expects "target" at line 1
+        let diff = indoc! {r#"
+            ```diff
+            --- a/offset.txt
+            +++ b/offset.txt
+            @@ -1,1 +1,1 @@
+            -target
+            +hit
+            ```
+        "#};
+
+        let patches = parse_diffs(diff).unwrap();
+        let options = ApplyOptions::exact(); // Exact match should still find it by scanning
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(result.report.all_applied_cleanly());
+        let file_content = fs::read_to_string(&file_path).unwrap();
+        assert!(file_content.ends_with("hit\n"));
+    }
+}
+
+mod extended_stress_tests {
+    use indoc::indoc;
+    use mpatch::{apply_patch_to_file, parse_auto, ApplyOptions};
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_fuzzy_crlf_mismatch() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("crlf.txt");
+        // File uses CRLF
+        fs::write(&file_path, "line1\r\nline2\r\nline3\r\n").unwrap();
+
+        // Patch uses LF
+        let diff =
+            "--- a/crlf.txt\n+++ b/crlf.txt\n@@ -1,3 +1,3 @@\n line1\n-line2\n+line two\n line3\n";
+
+        let patches = parse_auto(diff).unwrap();
+        // Exact match should work because mpatch normalizes line endings during parsing/reading
+        let options = ApplyOptions::exact();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(result.report.all_applied_cleanly());
+        let content = fs::read_to_string(&file_path).unwrap();
+        // Output is normalized to LF by mpatch
+        assert_eq!(content, "line1\nline two\nline3\n");
+    }
+
+    #[test]
+    fn test_fuzzy_unicode_context() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("unicode.txt");
+        // File has "Hello 🌍" (Europe-Africa)
+        fs::write(&file_path, "Start\nHello 🌍\nEnd\n").unwrap();
+
+        // Patch expects "Hello 🌎" (Americas) and changes it to "Hello 🌏" (Asia-Australia)
+        let diff = indoc! {r#"
+            --- a/unicode.txt
+            +++ b/unicode.txt
+            @@ -1,3 +1,3 @@
+             Start
+            -Hello 🌎
+            +Hello 🌏
+             End
+        "#};
+
+        let patches = parse_auto(diff).unwrap();
+        let options = ApplyOptions::new(); // Fuzzy
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(result.report.all_applied_cleanly());
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "Start\nHello 🌏\nEnd\n");
+    }
+
+    #[test]
+    fn test_fuzzy_repeated_lines_ambiguity_resolution() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("repeat.txt");
+
+        // A file with repeating patterns
+        let content = "A\nB\nC\n\nA\nB\nC\n\nA\nB\nC\n";
+        fs::write(&file_path, content).unwrap();
+
+        // Patch targets the middle block (line 5)
+        // But context is slightly different in patch ("B" -> "B modified") to force fuzzy
+        let diff = indoc! {r#"
+            --- a/repeat.txt
+            +++ b/repeat.txt
+            @@ -5,3 +5,3 @@
+             A
+            -B modified
+            +B changed
+             C
+        "#};
+
+        let patches = parse_auto(diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(result.report.all_applied_cleanly());
+
+        let new_content = fs::read_to_string(&file_path).unwrap();
+        // Should change the middle block
+        let expected = "A\nB\nC\n\nA\nB changed\nC\n\nA\nB\nC\n";
+        assert_eq!(new_content, expected);
+    }
+
+    #[test]
+    fn test_apply_patch_with_huge_offset() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("offset.txt");
+
+        let mut content = String::new();
+        for _ in 0..500 {
+            content.push_str("noise\n");
+        }
+        content.push_str("target\n");
+        for _ in 0..500 {
+            content.push_str("noise\n");
+        }
+
+        fs::write(&file_path, &content).unwrap();
+
+        // Patch expects target at line 1
+        let diff = indoc! {r#"
+            --- a/offset.txt
+            +++ b/offset.txt
+            @@ -1,1 +1,1 @@
+            -target
+            +hit
+        "#};
+
+        let patches = parse_auto(diff).unwrap();
+        let options = ApplyOptions::exact();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(result.report.all_applied_cleanly());
+        let new_content = fs::read_to_string(&file_path).unwrap();
+        assert!(new_content.contains("hit\n"));
+        assert!(!new_content.contains("target\n"));
+    }
+
+    #[test]
+    fn test_parse_auto_mixed_formats() {
+        // A file containing both a markdown block and raw conflict markers
+        let content = indoc! {r#"
+            Some text
+            ```diff
+            --- a/file1.txt
+            +++ b/file1.txt
+            @@ -1 +1 @@
+            -a
+            +b
+            ```
+            
+            <<<<
+            old
+            ====
+            new
+            >>>>
+        "#};
+
+        // parse_auto detects format. It prioritizes Markdown if code blocks are present.
+        // It should parse the markdown block and ignore the outer conflict markers.
+
+        let patches = parse_auto(content).unwrap();
+        assert_eq!(patches.len(), 1);
+        assert_eq!(patches[0].file_path.to_str().unwrap(), "file1.txt");
+    }
+}
+
+#[test]
+fn test_fuzzy_insertion_clobbers_context() {
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("main.rs");
+
+    // The file has a comment that has been modified locally ("modified").
+    let original_content = indoc! {r#"
+        fn main() {
+            // comment (modified)
+            println!("Hello");
+        }
+    "#};
+    fs::write(&file_path, original_content).unwrap();
+
+    // The patch expects the comment to be "(original)" and wants to INSERT a line.
+    let diff = indoc! {r#"
+        ```diff
+        --- a/main.rs
+        +++ b/main.rs
+        @@ -1,3 +1,4 @@
+         fn main() {
+             // comment (original)
+        +    let x = 1;
+             println!("Hello");
+         }
+        ```
+    "#};
+
+    let patches = parse_diffs(diff).unwrap();
+    let patch = &patches[0];
+
+    // Enable fuzzy matching so it matches despite the comment difference.
+    let options = ApplyOptions::new();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
+
+    assert!(result.report.all_applied_cleanly());
+
+    let content = fs::read_to_string(&file_path).unwrap();
+
+    // EXPECTED: The local modification "(modified)" should be preserved.
+    // ACTUAL: It is overwritten by "(original)" from the patch context.
+    let expected_content = indoc! {r#"
+        fn main() {
+            // comment (modified)
+            let x = 1;
+            println!("Hello");
+        }
+    "#};
+
+    assert_eq!(
+        content, expected_content,
+        "Fuzzy insertion clobbered the local file context!"
+    );
+}

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+-   **Fuzzy Matching:** Fixed a critical bug where applying a patch via fuzzy matching would overwrite local changes in the context lines (e.g., updated comments, different indentation). The application logic now performs a granular merge to preserve the target file's content while applying the patch's specific changes.
+-   **Context Restoration:** Improved the heuristic for handling missing context lines. Missing lines at the end of a file are now restored (fixing truncated files), while missing lines in the middle of a block are treated as stale and skipped.
+
 ## [1.3.1] - 2025-11-21
 
 ### Performance
