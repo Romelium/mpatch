@@ -257,8 +257,8 @@ jobs:
         shell: bash
         run: |
           # Extract the "Full" (unstripped) zips to get the raw binaries.
-          unzip -o artifacts-x86/*x86_64-apple-darwin*.full.zip -d x86_extract
-          unzip -o artifacts-arm/*aarch64-apple-darwin*.full.zip -d arm_extract
+          unzip -o artifacts-x86/*x86_64-apple-darwin*-full.zip -d x86_extract
+          unzip -o artifacts-arm/*aarch64-apple-darwin*-full.zip -d arm_extract
           
           # Find the binary files (ignoring folder structure).
           BIN_X86=$(find x86_extract -type f -name "${BINARY_NAME}" | head -n 1)
