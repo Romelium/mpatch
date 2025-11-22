@@ -104,7 +104,7 @@ jobs:
 
       # Only import GPG if the secret is actually set.
       - name: Import GPG Key
-        if: ${{ secrets.GPG_PRIVATE_KEY != '' }}
+        if: secrets.GPG_PRIVATE_KEY != ''
         uses: crazy-max/ghaction-import-gpg@v6
         with:
           gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
@@ -263,7 +263,7 @@ jobs:
           lipo -create -output output/${BINARY_NAME} "$BIN_X86" "$BIN_ARM"
 
       - name: Import GPG Key
-        if: ${{ secrets.GPG_PRIVATE_KEY != '' }}
+        if: secrets.GPG_PRIVATE_KEY != ''
         uses: crazy-max/ghaction-import-gpg@v6
         with:
           gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
@@ -341,7 +341,7 @@ jobs:
 
       - name: Include Public Key
         # Only run if the variable is set in GitHub Settings
-        if: ${{ vars.GPG_PUBLIC_KEY != '' }}
+        if: vars.GPG_PUBLIC_KEY != ''
         run: |
           # Write the variable content to a file in the assets folder
           echo "${{ vars.GPG_PUBLIC_KEY }}" > release-assets/public.key
