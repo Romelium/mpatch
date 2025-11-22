@@ -13,6 +13,9 @@ env:
   # Prevent Cargo from stripping binaries automatically.
   # We need unstripped binaries for the "Full" artifacts (debug symbols/PDBs).
   CARGO_PROFILE_RELEASE_STRIP: false
+  # Map secret existence to env vars to avoid context issues in 'if' conditions
+  HAS_GPG_SECRET: ${{ secrets.GPG_PRIVATE_KEY != '' }}
+  HAS_PUBLIC_KEY: ${{ vars.GPG_PUBLIC_KEY != '' }}
 
 jobs:
   # ===========================================================================
@@ -104,7 +107,7 @@ jobs:
 
       # Only import GPG if the secret is actually set.
       - name: Import GPG Key
-        if: secrets.GPG_PRIVATE_KEY != ''
+        if: env.HAS_GPG_SECRET == 'true'
         uses: crazy-max/ghaction-import-gpg@v6
         with:
           gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
@@ -263,7 +266,7 @@ jobs:
           lipo -create -output output/${BINARY_NAME} "$BIN_X86" "$BIN_ARM"
 
       - name: Import GPG Key
-        if: secrets.GPG_PRIVATE_KEY != ''
+        if: env.HAS_GPG_SECRET == 'true'
         uses: crazy-max/ghaction-import-gpg@v6
         with:
           gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
@@ -341,7 +344,7 @@ jobs:
 
       - name: Include Public Key
         # Only run if the variable is set in GitHub Settings
-        if: vars.GPG_PUBLIC_KEY != ''
+        if: env.HAS_PUBLIC_KEY == 'true'
         run: |
           # Write the variable content to a file in the assets folder
           echo "${{ vars.GPG_PUBLIC_KEY }}" > release-assets/public.key
