@@ -228,25 +228,46 @@ cargo binstall mpatch
 
 ### Method 2: From GitHub Releases (Manual)
 
-Pre-compiled binaries for various platforms are available for direct download.
+Pre-compiled binaries are available for Linux, macOS, and Windows.
 
-1.  Navigate to the [**GitHub Releases page**](https://github.com/romelium/mpatch/releases).
-2.  Find the latest release and download the archive that matches your system (e.g., `.tar.gz` for Linux/macOS, `.zip` for Windows).
-3.  Extract the `mpatch` executable (`mpatch.exe` on Windows).
-4.  Move the executable to a directory in your system's `PATH` (e.g., `/usr/local/bin` on Linux/macOS).
+### 1. Download
+Navigate to the [**GitHub Releases page**](https://github.com/romelium/mpatch/releases) and find the latest version.
 
-Binaries are available for the following targets:
+You will see two types of archives for each target:
+*   **Standard** (Recommended): Optimized, stripped binaries. Smallest file size.
+*   **Full** (`-full`): Unstripped binaries containing debug symbols. On Windows, this includes the `.pdb` file. Use this if you need to debug a crash or provide a detailed stack trace.
 
-| OS      | Architecture | Target Triple                  |
-|---------|--------------|--------------------------------|
-| Linux   | x86-64       | `x86_64-unknown-linux-gnu`     |
-| Linux   | x86-64       | `x86_64-unknown-linux-musl` (static) |
-| Linux   | ARM64        | `aarch64-unknown-linux-gnu`    |
-| macOS   | Intel        | `x86_64-apple-darwin`          |
-| macOS   | Apple Silicon| `aarch64-apple-darwin`         |
-| Windows | x86-64       | `x86_64-pc-windows-msvc`       |
-| Windows | x86 (32-bit) | `i686-pc-windows-msvc`         |
-| Windows | ARM64        | `aarch64-pc-windows-msvc`      |
+### 2. Install
+1.  Download the archive matching your system (see the [Compatibility Table](#compatibility-table) below).
+2.  Extract the archive.
+3.  **Linux/macOS:** Move the `mpatch` binary to a directory in your `PATH` (e.g., `/usr/local/bin`).
+4.  **Windows:** Place `mpatch.exe` in a folder of your choice and add that folder to your System PATH.
+
+### Compatibility Table
+
+| Platform | Architecture | Target Triple | Description |
+| :--- | :--- | :--- | :--- |
+| **macOS** | **Universal** | `universal-apple-darwin` | **Best for macOS.** Runs natively on both Intel and Apple Silicon (M1/M2/M3). |
+| | Intel | `x86_64-apple-darwin` | Specific to older Intel Macs. |
+| | Apple Silicon | `aarch64-apple-darwin` | Specific to M-series chips. |
+| **Windows** | x64 | `x86_64-pc-windows-msvc` | Standard 64-bit Windows. |
+| | ARM64 | `aarch64-pc-windows-msvc` | Windows on ARM (Surface Pro X, Parallels, etc). |
+| **Linux** | x64 | `x86_64-unknown-linux-gnu` | Standard desktop/server Linux (Ubuntu, Debian, Fedora). |
+| | x64 (Static) | `x86_64-unknown-linux-musl` | Statically linked. Ideal for **Alpine Linux** or container images. |
+| | ARM64 | `aarch64-unknown-linux-gnu` | 64-bit ARM (Raspberry Pi 4/5, AWS Graviton). |
+| | ARM64 (Static)| `aarch64-unknown-linux-musl` | Static 64-bit ARM. |
+| | ARMv7 | `armv7-unknown-linux-gnueabihf`| 32-bit ARM (Raspberry Pi 2/3, older IoT devices). |
+| | ARMv7 (Static)| `armv7-unknown-linux-musleabihf`| Static 32-bit ARM. |
+
+### Security & Verification
+All release artifacts are signed with GPG.
+1.  Download the `public.key` file from the release assets.
+2.  Download the archive (e.g., `.tar.gz`) and its corresponding signature file (`.tar.gz.sig`).
+3.  Import the key and verify the signature:
+    ```bash
+    gpg --import public.key
+    gpg --verify mpatch-x86_64-unknown-linux-gnu-v1.0.0.tar.gz.sig mpatch-x86_64-unknown-linux-gnu-v1.0.0.tar.gz
+    ```
 
 ### Method 3: From Crates.io (Build from Source)
 
