@@ -180,8 +180,16 @@ jobs:
           STD_ARCHIVE="${DIR_NAME}.${ARCHIVE_EXT}"
 
           if [[ "$ARCHIVE_EXT" == "zip" ]]; then
-            zip -r "$FULL_ARCHIVE" "$FULL_DIR_NAME"
-            zip -r "$STD_ARCHIVE" "$DIR_NAME"
+            if command -v zip &> /dev/null; then
+              zip -r "$FULL_ARCHIVE" "$FULL_DIR_NAME"
+              zip -r "$STD_ARCHIVE" "$DIR_NAME"
+            elif command -v 7z &> /dev/null; then
+              7z a "$FULL_ARCHIVE" "$FULL_DIR_NAME"
+              7z a "$STD_ARCHIVE" "$DIR_NAME"
+            else
+              echo "Error: Neither 'zip' nor '7z' found."
+              exit 1
+            fi
           else
             tar -czf "$FULL_ARCHIVE" "$FULL_DIR_NAME"
             tar -czf "$STD_ARCHIVE" "$DIR_NAME"
