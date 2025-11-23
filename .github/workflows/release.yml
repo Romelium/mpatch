@@ -343,6 +343,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Fetch full history so we can find the previous tag for comparison links
+          fetch-depth: 0
 
       - name: Download All Artifacts
         uses: actions/download-artifact@v4
@@ -357,24 +360,48 @@ jobs:
           # Write the variable content to a file in the assets folder
           echo "${{ vars.GPG_PUBLIC_KEY }}" > release-assets/public.key
 
-      - name: Get Version
-        id: get_version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
-
-      - name: Extract Release Notes
-        id: extract_notes
-        uses: theory/changelog-version-notes-action@v0
-        continue-on-error: true
+      - name: Install parse-changelog
+        uses: taiki-e/install-action@v2
         with:
-          version: ${{ steps.get_version.outputs.version }}
-          changelog: CHANGELOG.md
+          tool: parse-changelog
+
+      - name: Generate Release Notes
+        id: notes
+        shell: bash
+        run: |
+          # Try to parse the changelog. 
+          # 2>/dev/null suppresses error messages if not found.
+          if parse-changelog CHANGELOG.md "${{ github.ref_name }}" > release_notes.md 2>/dev/null; then
+            echo "✅ Found entry in CHANGELOG.md"
+            
+            # --- Append Compare Link (Only if using custom changelog) ---
+            CURRENT_TAG="${{ github.ref_name }}"
+            PREV_TAG=$(git describe --abbrev=0 --tags "${CURRENT_TAG}^" 2>/dev/null || true)
+            
+            if [ -n "$PREV_TAG" ]; then
+              REPO_URL="${{ github.server_url }}/${{ github.repository }}"
+              echo -e "\n\n---" >> release_notes.md
+              echo "🆚 [Compare changes](${REPO_URL}/compare/${PREV_TAG}...${CURRENT_TAG})" >> release_notes.md
+            fi
+            
+            # Set output to true
+            echo "use_changelog=true" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️ No entry found in CHANGELOG.md for ${{ github.ref_name }}"
+            echo "Falling back to GitHub auto-generated notes."
+            
+            # Set output to false
+            echo "use_changelog=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          body_path: ${{ steps.extract_notes.outcome == 'success' && steps.extract_notes.outputs.file || '' }}
-          generate_release_notes: ${{ steps.extract_notes.outcome != 'success' }}
+          # If use_changelog is true, use the file. Otherwise, leave empty.
+          body_path: ${{ steps.notes.outputs.use_changelog == 'true' && 'release_notes.md' || '' }}
+          # If use_changelog is NOT true, generate notes automatically.
+          generate_release_notes: ${{ steps.notes.outputs.use_changelog != 'true' }}
           files: release-assets/*
           draft: true
           prerelease: false
