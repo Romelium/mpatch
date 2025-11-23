@@ -2992,6 +2992,8 @@ where
                 trace!("  Found '\\ No newline at end of file' marker.");
                 ends_with_newline_for_section = false;
             }
+        } else if is_git_header_line(line) {
+            trace!("  Ignoring Git header line: '{}'", line.trim_end());
         } else if current_hunk_old_start_line.is_some() {
             trace!(
                 "    Adding unrecognized line as context to current hunk: '{}'",
@@ -3069,6 +3071,21 @@ where
     }
 
     Ok(merged_patches)
+}
+
+/// Checks if a line is a standard Git diff header that should be ignored when parsing hunks.
+fn is_git_header_line(line: &str) -> bool {
+    line.starts_with("diff --git")
+        || line.starts_with("index ")
+        || line.starts_with("old mode ")
+        || line.starts_with("new mode ")
+        || line.starts_with("new file mode ")
+        || line.starts_with("deleted file mode ")
+        || line.starts_with("similarity index ")
+        || line.starts_with("copy from ")
+        || line.starts_with("copy to ")
+        || line.starts_with("rename from ")
+        || line.starts_with("rename to ")
 }
 
 /// Parses an iterator of lines containing "Conflict Marker" style diffs.

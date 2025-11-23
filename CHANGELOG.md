@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+-   **Parser:** Fixed a bug where Git extended headers (e.g., `diff --git`, `index`, `new file mode`) appearing between file sections were incorrectly parsed as context lines for the preceding hunk. This prevents patch corruption when parsing raw Git output containing multiple files or metadata changes.
+
 ## [1.3.2] - 2025-11-22
 
 ### Fixed

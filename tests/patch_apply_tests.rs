@@ -5126,3 +5126,152 @@ fn test_fuzzy_insertion_clobbers_context() {
         "Fuzzy insertion clobbered the local file context!"
     );
 }
+
+#[test]
+fn test_git_diff_header_is_not_absorbed_into_previous_hunk() {
+    let diff = indoc! {r#"
+        --- a/file1.txt
+        +++ b/file1.txt
+        @@ -1,1 +1,1 @@
+        -foo
+        +bar
+        diff --git a/file2.txt b/file2.txt
+        index 1234567..89abcdef 100644
+        --- a/file2.txt
+        +++ b/file2.txt
+        @@ -1,1 +1,1 @@
+        -baz
+        +qux
+    "#};
+
+    let patches = parse_patches(diff).unwrap();
+    assert_eq!(patches.len(), 2);
+
+    let hunk1 = &patches[0].hunks[0];
+    assert_eq!(
+        hunk1.lines.len(),
+        2,
+        "Hunk 1 absorbed git headers as context lines! Lines: {:?}",
+        hunk1.lines
+    );
+    assert!(!hunk1.lines.iter().any(|l| l.contains("diff --git")));
+    assert!(!hunk1.lines.iter().any(|l| l.contains("index")));
+}
+
+#[test]
+fn test_new_file_mode_header_is_not_context() {
+    let diff = indoc! {r#"
+        --- a/src/lib.rs
+        +++ b/src/lib.rs
+        @@ -5,1 +5,1 @@
+         fn existing() {}
+        diff --git a/tests/new_test.rs b/tests/new_test.rs
+        new file mode 100644
+        index 0000000..1234567
+        --- /dev/null
+        +++ b/tests/new_test.rs
+        @@ -0,0 +1 @@
+        +#[test] fn t() {}
+    "#};
+
+    let patches = parse_patches(diff).unwrap();
+    assert_eq!(patches.len(), 2);
+
+    let hunk1 = &patches[0].hunks[0];
+    assert_eq!(
+        hunk1.lines.len(),
+        1,
+        "Hunk 1 absorbed new file headers! Lines: {:?}",
+        hunk1.lines
+    );
+    assert_eq!(hunk1.lines[0], " fn existing() {}");
+}
+
+#[test]
+fn test_deleted_file_mode_header_is_not_context() {
+    let diff = indoc! {r#"
+        --- a/keep.txt
+        +++ b/keep.txt
+        @@ -1 +1 @@
+         keep
+        diff --git a/delete.txt b/delete.txt
+        deleted file mode 100644
+        index 1234567..0000000
+        --- a/delete.txt
+        +++ /dev/null
+        @@ -1 +0,0 @@
+        -content
+    "#};
+
+    let patches = parse_patches(diff).unwrap();
+    assert_eq!(patches.len(), 2);
+
+    let hunk1 = &patches[0].hunks[0];
+    assert_eq!(
+        hunk1.lines.len(),
+        1,
+        "Hunk 1 absorbed deleted file headers! Lines: {:?}",
+        hunk1.lines
+    );
+    assert_eq!(hunk1.lines[0], " keep");
+}
+
+#[test]
+fn test_markdown_block_with_git_headers() {
+    // Ensure the issue is also reproduced when parsing markdown blocks,
+    // as this uses the same underlying line parser.
+    let content = indoc! {r#"
+        ```diff
+        --- a/f1
+        +++ b/f1
+        @@ -1 +1 @@
+        -a
+        +b
+        diff --git a/f2 b/f2
+        index 111..222
+        --- a/f2
+        +++ b/f2
+        @@ -1 +1 @@
+        -c
+        +d
+        ```
+    "#};
+
+    let patches = parse_diffs(content).unwrap();
+    assert_eq!(patches.len(), 2);
+    let hunk1 = &patches[0].hunks[0];
+    assert_eq!(
+        hunk1.lines.len(),
+        2,
+        "Markdown parser absorbed git headers into hunk"
+    );
+}
+
+#[test]
+fn test_extended_git_headers() {
+    // Test other git headers like similarity index, rename, etc.
+    let diff = indoc! {r#"
+        --- a/f1
+        +++ b/f1
+        @@ -1 +1 @@
+         context
+        diff --git a/old b/new
+        similarity index 100%
+        rename from old
+        rename to new
+        --- a/old
+        +++ b/new
+        @@ -1 +1 @@
+         context
+    "#};
+
+    let patches = parse_patches(diff).unwrap();
+    assert_eq!(patches.len(), 2);
+    let hunk1 = &patches[0].hunks[0];
+    assert_eq!(
+        hunk1.lines.len(),
+        1,
+        "Hunk absorbed rename/similarity headers"
+    );
+    assert_eq!(hunk1.lines[0], " context");
+}
