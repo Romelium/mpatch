@@ -369,28 +369,44 @@ jobs:
         id: notes
         shell: bash
         run: |
-          # Try to parse the changelog. 
-          # 2>/dev/null suppresses error messages if not found.
-          if parse-changelog CHANGELOG.md "${{ github.ref_name }}" > release_notes.md 2>/dev/null; then
-            echo "✅ Found entry in CHANGELOG.md"
-            
-            # --- Append Compare Link (Only if using custom changelog) ---
-            CURRENT_TAG="${{ github.ref_name }}"
-            PREV_TAG=$(git describe --abbrev=0 --tags "${CURRENT_TAG}^" 2>/dev/null || true)
+          TAG_NAME="${{ github.ref_name }}"
+          
+          # 1. Generate both version formats (with 'v' and without)
+          # Strip existing 'v' prefix if present to get the raw number
+          CLEAN_VERSION="${TAG_NAME#v}"
+          
+          VERSION_WITH_V="v${CLEAN_VERSION}"  # e.g., v1.0.0
+          VERSION_NO_V="${CLEAN_VERSION}"     # e.g., 1.0.0
+          
+          echo "Searching CHANGELOG.md for '$VERSION_WITH_V' or '$VERSION_NO_V'..."
+
+          # 2. Attempt parse: Try 'v' format first, then 'no-v' format
+          if parse-changelog CHANGELOG.md "$VERSION_WITH_V" > release_notes.md 2>/dev/null; then
+            echo "✅ Found entry using format: $VERSION_WITH_V"
+            FOUND=true
+          elif parse-changelog CHANGELOG.md "$VERSION_NO_V" > release_notes.md 2>/dev/null; then
+            echo "✅ Found entry using format: $VERSION_NO_V"
+            FOUND=true
+          else
+            echo "⚠️ No entry found in CHANGELOG.md"
+            FOUND=false
+          fi
+
+          # 3. Finalize Output
+          if [ "$FOUND" == "true" ]; then
+            # --- Append Compare Link ---
+            # We use the actual git tag (TAG_NAME) for the URL, regardless of changelog format
+            PREV_TAG=$(git describe --abbrev=0 --tags "${TAG_NAME}^" 2>/dev/null || true)
             
             if [ -n "$PREV_TAG" ]; then
               REPO_URL="${{ github.server_url }}/${{ github.repository }}"
               echo -e "\n\n---" >> release_notes.md
-              echo "🆚 [Compare changes](${REPO_URL}/compare/${PREV_TAG}...${CURRENT_TAG})" >> release_notes.md
+              echo "🆚 [Compare changes](${REPO_URL}/compare/${PREV_TAG}...${TAG_NAME})" >> release_notes.md
             fi
             
-            # Set output to true
             echo "use_changelog=true" >> $GITHUB_OUTPUT
           else
-            echo "⚠️ No entry found in CHANGELOG.md for ${{ github.ref_name }}"
             echo "Falling back to GitHub auto-generated notes."
-            
-            # Set output to false
             echo "use_changelog=false" >> $GITHUB_OUTPUT
           fi
 
