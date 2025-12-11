@@ -65,5 +65,7 @@ pre-release-replacements = [
   # Update simple style: mpatch = "x.y.z" (min=0 prevents error if not found)
   {file="README.md", search="mpatch = \"[0-9.]+\"", replace="mpatch = \"{{version}}\"", min=0},
   # Update complex style: version = "x.y.z" (inside feature flags or brackets)
-  {file="README.md", search="version = \"[0-9.]+\"", replace="version = \"{{version}}\"", min=0}
+  {file="README.md", search="version = \"[0-9.]+\"", replace="version = \"{{version}}\"", min=0},
+  # Update GPG verification example
+  {file="README.md", search="mpatch-x86_64-unknown-linux-gnu-v[0-9.]+\\.tar\\.gz", replace="mpatch-x86_64-unknown-linux-gnu-v{{version}}.tar.gz", min=0}
 ]
