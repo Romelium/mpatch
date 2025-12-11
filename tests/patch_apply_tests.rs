@@ -4203,6 +4203,28 @@ fn test_nested_diff_block_is_ignored() {
 }
 
 #[test]
+fn test_parse_diff_with_nested_indented_code_block() {
+    // This tests a regression where an indented code block inside a diff
+    // was incorrectly interpreted as the closing fence of the diff block.
+    let diff = indoc! {r#"
+        ```diff
+        --- README.md
+        +++ README.md
+        @@ -1,3 +1,3 @@
+         1. Step one
+             ```bash
+        -    old_command
+        +    new_command
+             ```
+         2. Step two
+        ```
+    "#};
+    let patches = parse_diffs(diff).unwrap();
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].hunks[0].added_lines(), vec!["    new_command"]);
+}
+
+#[test]
 fn test_detect_markdown_patch_keyword() {
     let content = indoc! {r#"
         ```patch

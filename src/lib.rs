@@ -2590,6 +2590,7 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
     }) {
         let trimmed = line_text.trim_start();
         let fence_len = trimmed.chars().take_while(|&c| c == '`').count();
+        let opening_indent = line_text.len() - trimmed.len();
 
         trace!(
             "Found potential diff block start on line {}: '{}'",
@@ -2603,8 +2604,10 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
         // Consume lines until end of block
         while let Some((_, line)) = lines.peek() {
             let inner_trimmed = line.trim_start();
+            let current_indent = line.len() - inner_trimmed.len();
             if inner_trimmed.starts_with("```")
                 && inner_trimmed.chars().take_while(|&c| c == '`').count() >= fence_len
+                && current_indent < opening_indent + 4
             {
                 lines.next(); // Consume the closing fence
                 break;
