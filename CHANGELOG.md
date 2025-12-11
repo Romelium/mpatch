@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.4] - 2025-12-11
+
 ### Fixed
 
 -   **Fuzzy Matching:** Enhanced the fuzzy matching algorithm to be robust against indentation differences. It now calculates a "loose" similarity score based on trimmed lines, allowing patches with extra indentation (e.g., nested in Markdown lists) to correctly match flat code in the target file.

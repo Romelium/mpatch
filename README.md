@@ -194,7 +194,7 @@ For even more advanced use cases, such as iterating through hunks one by one, ch
 
     ```toml
     [dependencies]
-    mpatch = { version = "1.3.3", default-features = false }
+    mpatch = { version = "1.3.4", default-features = false }
     ```
 
 ---
@@ -267,7 +267,7 @@ All release artifacts are signed with GPG.
 3.  Import the key and verify the signature:
     ```bash
     gpg --import public.key
-    gpg --verify mpatch-x86_64-unknown-linux-gnu-v1.0.0.tar.gz.sig mpatch-x86_64-unknown-linux-gnu-v1.0.0.tar.gz
+    gpg --verify mpatch-x86_64-unknown-linux-gnu-v1.3.4.tar.gz.sig mpatch-x86_64-unknown-linux-gnu-v1.3.4.tar.gz
     ```
 
 ### Method 3: From Crates.io (Build from Source)
