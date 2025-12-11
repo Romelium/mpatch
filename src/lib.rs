@@ -4259,231 +4259,265 @@ pub fn apply_hunk_to_lines(
                 match_type
             );
 
-            let final_replace_block: Vec<String> =
-                if matches!(match_type, MatchType::Exact) {
-                    // For Exact matches, we assume the patch's indentation is intentional and correct relative to the context.
-                    // We don't need dynamic adjustment because the context matched byte-for-byte.
-                    trace!("    Applying hunk via exact logic.");
-                    hunk.get_replace_block().iter().map(|s| s.to_string()).collect()
-                } else {
-                    // For Fuzzy and ExactIgnoringWhitespace, indentation might mismatch or drift.
-                    // We use a robust reconstruction that dynamically adjusts indentation based on the
-                    // nearest matching line.
-                    debug!("    Applying hunk via robust reconstruction logic (preserving file context & adjusting indent).");
-                    trace!(
-                        "      Fuzzy match location: start={}, len={}",
-                        location.start_index,
-                        location.length
-                    );
-                    let file_matched_lines: Vec<_> = target_lines
-                        [location.start_index..location.start_index + location.length]
-                        .to_vec();
-                    trace!("      File content in matched range: {:?}", file_matched_lines);
+            let final_replace_block: Vec<String> = if matches!(match_type, MatchType::Exact) {
+                // For Exact matches, we assume the patch's indentation is intentional and correct relative to the context.
+                // We don't need dynamic adjustment because the context matched byte-for-byte.
+                trace!("    Applying hunk via exact logic.");
+                hunk.get_replace_block()
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect()
+            } else {
+                // For Fuzzy and ExactIgnoringWhitespace, indentation might mismatch or drift.
+                // We use a robust reconstruction that dynamically adjusts indentation based on the
+                // nearest matching line.
+                debug!("    Applying hunk via robust reconstruction logic (preserving file context & adjusting indent).");
+                trace!(
+                    "      Fuzzy match location: start={}, len={}",
+                    location.start_index,
+                    location.length
+                );
+                let file_matched_lines: Vec<_> = target_lines
+                    [location.start_index..location.start_index + location.length]
+                    .to_vec();
+                trace!(
+                    "      File content in matched range: {:?}",
+                    file_matched_lines
+                );
 
-                    // 1. Parse hunk to separate match lines and additions.
-                    // We map each line in the match block (Context/Removal) to a list of additions that follow it.
-                    // match_lines_meta: Vec<(is_removal, additions_after_this_line)>
-                    // Note: We store raw additions here and adjust them later during reconstruction.
-                    let mut match_lines_meta: Vec<(bool, Vec<String>)> = Vec::new();
-                    let mut initial_additions: Vec<String> = Vec::new();
+                // 1. Parse hunk to separate match lines and additions.
+                // We map each line in the match block (Context/Removal) to a list of additions that follow it.
+                // match_lines_meta: Vec<(is_removal, additions_after_this_line)>
+                // Note: We store raw additions here and adjust them later during reconstruction.
+                let mut match_lines_meta: Vec<(bool, Vec<String>)> = Vec::new();
+                let mut initial_additions: Vec<String> = Vec::new();
 
-                    let mut line_iter = hunk.lines.iter().peekable();
+                let mut line_iter = hunk.lines.iter().peekable();
 
-                    // Consume any additions that appear before the first context/removal line
-                    while let Some(line) = line_iter.peek() {
-                        if let Some(stripped) = line.strip_prefix('+') {
-                            initial_additions.push(stripped.to_string());
-                            line_iter.next();
+                // Consume any additions that appear before the first context/removal line
+                while let Some(line) = line_iter.peek() {
+                    if let Some(stripped) = line.strip_prefix('+') {
+                        initial_additions.push(stripped.to_string());
+                        line_iter.next();
+                    } else {
+                        break;
+                    }
+                }
+
+                // Process the rest of the hunk
+                for line in line_iter {
+                    if let Some(stripped) = line.strip_prefix('+') {
+                        // Attach this addition to the most recent match line
+                        if let Some(last) = match_lines_meta.last_mut() {
+                            last.1.push(stripped.to_string());
                         } else {
+                            // Should be unreachable if match block is not empty, but safe fallback
+                            initial_additions.push(stripped.to_string());
+                        }
+                    } else {
+                        // It's a Context (' ') or Removal ('-') line
+                        let is_removal = line.starts_with('-');
+                        match_lines_meta.push((is_removal, Vec::new()));
+                    }
+                }
+
+                // 2. Prepare text for diffing
+                // We align the hunk's "old" view (match block) with the file's actual content.
+                let match_block_content: Vec<&str> = hunk.get_match_block();
+                let file_block_content: Vec<&str> =
+                    file_matched_lines.iter().map(|s| s.as_str()).collect();
+
+                // 3. Diff
+                let diff =
+                    similar::TextDiff::from_slices(&match_block_content, &file_block_content);
+
+                // 4. Determine Initial Indentation Context
+                // We scan the diff ops to find the first aligned line (Equal or Replace)
+                // to establish the baseline indentation difference.
+                let mut current_hunk_indent = "";
+                let mut current_target_indent = "";
+
+                for op in diff.ops() {
+                    match op {
+                        similar::DiffOp::Equal {
+                            old_index,
+                            new_index,
+                            ..
+                        }
+                        | similar::DiffOp::Replace {
+                            old_index,
+                            new_index,
+                            ..
+                        } => {
+                            // Use the first line of the block to gauge indentation
+                            let h_line = match_block_content[*old_index];
+                            let t_line = file_block_content[*new_index];
+                            current_hunk_indent = get_indent(h_line);
+                            current_target_indent = get_indent(t_line);
                             break;
                         }
+                        _ => {}
                     }
+                }
 
-                    // Process the rest of the hunk
-                    for line in line_iter {
-                        if let Some(stripped) = line.strip_prefix('+') {
-                            // Attach this addition to the most recent match line
-                            if let Some(last) = match_lines_meta.last_mut() {
-                                last.1.push(stripped.to_string());
-                            } else {
-                                // Should be unreachable if match block is not empty, but safe fallback
-                                initial_additions.push(stripped.to_string());
-                            }
-                        } else {
-                            // It's a Context (' ') or Removal ('-') line
-                            let is_removal = line.starts_with('-');
-                            match_lines_meta.push((is_removal, Vec::new()));
-                        }
-                    }
+                // 5. Reconstruct the block
+                let mut final_lines = Vec::new();
 
-                    // 2. Prepare text for diffing
-                    // We align the hunk's "old" view (match block) with the file's actual content.
-                    let match_block_content: Vec<&str> = hunk.get_match_block();
-                    let file_block_content: Vec<&str> =
-                        file_matched_lines.iter().map(|s| s.as_str()).collect();
+                // Apply initial additions using the seeded indentation
+                for line in initial_additions {
+                    final_lines.push(adjust_indentation(
+                        &line,
+                        current_hunk_indent,
+                        current_target_indent,
+                    ));
+                }
 
-                    // 3. Diff
-                    let diff = similar::TextDiff::from_slices(
-                        &match_block_content,
-                        &file_block_content,
-                    );
+                let is_at_eof = (location.start_index + location.length) == target_lines.len();
+                let ops = diff.ops().to_vec();
 
-                    // 4. Determine Initial Indentation Context
-                    // We scan the diff ops to find the first aligned line (Equal or Replace)
-                    // to establish the baseline indentation difference.
-                    let mut current_hunk_indent = "";
-                    let mut current_target_indent = "";
-                    
-                    for op in diff.ops() {
-                        match op {
-                            similar::DiffOp::Equal { old_index, new_index, .. } |
-                            similar::DiffOp::Replace { old_index, new_index, .. } => {
-                                // Use the first line of the block to gauge indentation
-                                let h_line = match_block_content[*old_index];
-                                let t_line = file_block_content[*new_index];
+                for (op_idx, op) in ops.iter().enumerate() {
+                    match op {
+                        similar::DiffOp::Equal {
+                            old_index,
+                            new_index,
+                            len,
+                        } => {
+                            // The file content matches the hunk's expectation (fuzzy or exact).
+                            for i in 0..*len {
+                                let old_idx = old_index + i;
+                                let new_idx = new_index + i;
+                                let (is_removal, additions) = &match_lines_meta[old_idx];
+
+                                // Update indentation context dynamically based on this matching line
+                                let h_line = match_block_content[old_idx];
+                                let t_line = &file_matched_lines[new_idx];
                                 current_hunk_indent = get_indent(h_line);
                                 current_target_indent = get_indent(t_line);
-                                break; 
+
+                                // If it's not a removal, keep the file's version of the line (preserves local edits)
+                                if !*is_removal {
+                                    final_lines.push(file_matched_lines[new_idx].clone());
+                                }
+                                // Always insert the additions associated with this line
+                                for add in additions {
+                                    final_lines.push(adjust_indentation(
+                                        add,
+                                        current_hunk_indent,
+                                        current_target_indent,
+                                    ));
+                                }
                             }
-                            _ => {}
                         }
-                    }
+                        similar::DiffOp::Delete {
+                            old_index, old_len, ..
+                        } => {
+                            // Lines in hunk match block that are missing in the file.
+                            // If it was a REMOVAL line, it's already gone, so we skip it.
+                            // If it was a CONTEXT line, we only restore it if we are at the EOF
+                            // and this is the trailing part of the patch (implying truncation).
+                            // Otherwise, we assume it's stale context (extra line in patch) and skip it.
+                            let is_last_op = op_idx == ops.len() - 1;
+                            for i in 0..*old_len {
+                                let old_idx = old_index + i;
+                                let (is_removal, additions) = &match_lines_meta[old_idx];
+                                if !*is_removal && is_at_eof && is_last_op {
+                                    // Restore truncated context at EOF
+                                    let line = match_block_content[old_idx];
+                                    // Adjust it to match target style? Best effort using last known.
+                                    final_lines.push(adjust_indentation(
+                                        line,
+                                        current_hunk_indent,
+                                        current_target_indent,
+                                    ));
+                                }
+                                for add in additions {
+                                    final_lines.push(adjust_indentation(
+                                        add,
+                                        current_hunk_indent,
+                                        current_target_indent,
+                                    ));
+                                }
+                            }
+                        }
+                        similar::DiffOp::Insert {
+                            new_index, new_len, ..
+                        } => {
+                            // Extra lines in the file (local insertions).
+                            // We preserve them.
+                            for i in 0..*new_len {
+                                let new_idx = new_index + i;
+                                final_lines.push(file_matched_lines[new_idx].clone());
+                            }
+                        }
+                        similar::DiffOp::Replace {
+                            old_index,
+                            old_len,
+                            new_index,
+                            new_len,
+                        } => {
+                            // A region where the file differs significantly from the hunk.
+                            // Try to update indentation from the first line of the replacement block
+                            if *old_len > 0 && *new_len > 0 {
+                                let h_line = match_block_content[*old_index];
+                                let t_line = &file_matched_lines[*new_index];
+                                current_hunk_indent = get_indent(h_line);
+                                current_target_indent = get_indent(t_line);
+                            }
 
-                    // 5. Reconstruct the block
-                    let mut final_lines = Vec::new();
-                    
-                    // Apply initial additions using the seeded indentation
-                    for line in initial_additions {
-                        final_lines.push(adjust_indentation(&line, current_hunk_indent, current_target_indent));
-                    }
-
-                    let is_at_eof = (location.start_index + location.length) == target_lines.len();
-                    let ops = diff.ops().to_vec();
-
-                    for (op_idx, op) in ops.iter().enumerate() {
-                        match op {
-                            similar::DiffOp::Equal {
-                                old_index,
-                                new_index,
-                                len,
-                            } => {
-                                // The file content matches the hunk's expectation (fuzzy or exact).
-                                for i in 0..*len {
+                            // If lengths match, we assume a 1-to-1 correspondence (e.g. whitespace changes).
+                            if *old_len == *new_len {
+                                for i in 0..*old_len {
                                     let old_idx = old_index + i;
                                     let new_idx = new_index + i;
                                     let (is_removal, additions) = &match_lines_meta[old_idx];
 
-                                    // Update indentation context dynamically based on this matching line
-                                    let h_line = match_block_content[old_idx];
-                                    let t_line = &file_matched_lines[new_idx];
-                                    current_hunk_indent = get_indent(h_line);
-                                    current_target_indent = get_indent(t_line);
-
-                                    // If it's not a removal, keep the file's version of the line (preserves local edits)
                                     if !*is_removal {
                                         final_lines.push(file_matched_lines[new_idx].clone());
                                     }
-                                    // Always insert the additions associated with this line
                                     for add in additions {
-                                        final_lines.push(adjust_indentation(add, current_hunk_indent, current_target_indent));
+                                        final_lines.push(adjust_indentation(
+                                            add,
+                                            current_hunk_indent,
+                                            current_target_indent,
+                                        ));
                                     }
                                 }
-                            }
-                            similar::DiffOp::Delete {
-                                old_index, old_len, ..
-                            } => {
-                                // Lines in hunk match block that are missing in the file.
-                                // If it was a REMOVAL line, it's already gone, so we skip it.
-                                // If it was a CONTEXT line, we only restore it if we are at the EOF
-                                // and this is the trailing part of the patch (implying truncation).
-                                // Otherwise, we assume it's stale context (extra line in patch) and skip it.
-                                let is_last_op = op_idx == ops.len() - 1;
+                            } else {
+                                // Heuristic: If the hunk region contains ANY context lines, we assume
+                                // the file content is a modified version of that context, so we KEEP it.
+                                // If the hunk region is PURELY removals, we assume the file content
+                                // is what needs to be removed, so we DROP it.
+                                let mut has_context = false;
                                 for i in 0..*old_len {
-                                    let old_idx = old_index + i;
-                                    let (is_removal, additions) = &match_lines_meta[old_idx];
-                                    if !*is_removal && is_at_eof && is_last_op {
-                                        // Restore truncated context at EOF
-                                        let line = match_block_content[old_idx];
-                                        // Adjust it to match target style? Best effort using last known.
-                                        final_lines.push(adjust_indentation(line, current_hunk_indent, current_target_indent));
+                                    if !match_lines_meta[old_index + i].0 {
+                                        has_context = true;
+                                        break;
                                     }
+                                }
+
+                                if has_context {
+                                    for i in 0..*new_len {
+                                        final_lines.push(file_matched_lines[new_index + i].clone());
+                                    }
+                                }
+
+                                // Always append additions associated with the old lines
+                                for i in 0..*old_len {
+                                    let (_, additions) = &match_lines_meta[old_index + i];
                                     for add in additions {
-                                        final_lines.push(adjust_indentation(add, current_hunk_indent, current_target_indent));
-                                    }
-                                }
-                            }
-                            similar::DiffOp::Insert {
-                                new_index, new_len, ..
-                            } => {
-                                // Extra lines in the file (local insertions).
-                                // We preserve them.
-                                for i in 0..*new_len {
-                                    let new_idx = new_index + i;
-                                    final_lines.push(file_matched_lines[new_idx].clone());
-                                }
-                            }
-                            similar::DiffOp::Replace {
-                                old_index,
-                                old_len,
-                                new_index,
-                                new_len,
-                            } => {
-                                // A region where the file differs significantly from the hunk.
-                                // Try to update indentation from the first line of the replacement block
-                                if *old_len > 0 && *new_len > 0 {
-                                    let h_line = match_block_content[*old_index];
-                                    let t_line = &file_matched_lines[*new_index];
-                                    current_hunk_indent = get_indent(h_line);
-                                    current_target_indent = get_indent(t_line);
-                                }
-
-                                // If lengths match, we assume a 1-to-1 correspondence (e.g. whitespace changes).
-                                if *old_len == *new_len {
-                                    for i in 0..*old_len {
-                                        let old_idx = old_index + i;
-                                        let new_idx = new_index + i;
-                                        let (is_removal, additions) = &match_lines_meta[old_idx];
-
-                                        if !*is_removal {
-                                            final_lines.push(file_matched_lines[new_idx].clone());
-                                        }
-                                        for add in additions {
-                                            final_lines.push(adjust_indentation(add, current_hunk_indent, current_target_indent));
-                                        }
-                                    }
-                                } else {
-                                    // Heuristic: If the hunk region contains ANY context lines, we assume
-                                    // the file content is a modified version of that context, so we KEEP it.
-                                    // If the hunk region is PURELY removals, we assume the file content
-                                    // is what needs to be removed, so we DROP it.
-                                    let mut has_context = false;
-                                    for i in 0..*old_len {
-                                        if !match_lines_meta[old_index + i].0 {
-                                            has_context = true;
-                                            break;
-                                        }
-                                    }
-
-                                    if has_context {
-                                        for i in 0..*new_len {
-                                            final_lines
-                                                .push(file_matched_lines[new_index + i].clone());
-                                        }
-                                    }
-
-                                    // Always append additions associated with the old lines
-                                    for i in 0..*old_len {
-                                        let (_, additions) = &match_lines_meta[old_index + i];
-                                        for add in additions {
-                                            final_lines.push(adjust_indentation(add, current_hunk_indent, current_target_indent));
-                                        }
+                                        final_lines.push(adjust_indentation(
+                                            add,
+                                            current_hunk_indent,
+                                            current_target_indent,
+                                        ));
                                     }
                                 }
                             }
                         }
                     }
-                    final_lines
-                };
+                }
+                final_lines
+            };
 
             let replaced_lines: Vec<String> = target_lines
                 .splice(
@@ -4910,7 +4944,7 @@ impl<'a> DefaultHunkFinder<'a> {
             let match_stripped_lines: Vec<&str> =
                 match_block.iter().map(|s| s.trim_end()).collect();
             let match_content = match_stripped_lines.join("\n");
-            
+
             // Pre-calculate trimmed versions for "loose" matching (ignoring indentation)
             let match_loose_lines: Vec<&str> = match_block.iter().map(|s| s.trim()).collect();
             let match_loose_content = match_loose_lines.join("\n");
@@ -4990,25 +5024,28 @@ impl<'a> DefaultHunkFinder<'a> {
                                     // better at detecting small changes within a line. Line-based
                                     // ratio is still important for overall structure, especially
                                     // when lines are inserted or deleted.
-                                    let ratio_strict = 0.3 * ratio_lines as f64 + 0.7 * ratio_words as f64;
+                                    let ratio_strict =
+                                        0.3 * ratio_lines as f64 + 0.7 * ratio_words as f64;
 
                                     // --- LOOSE MATCHING (Ignore Indentation) ---
                                     // Calculate a score based on fully trimmed lines. This helps
                                     // when the patch is nested (e.g. in a markdown list) but the file is flat.
-                                    let window_loose_lines: Vec<&str> = window_stripped_lines.iter().map(|s| s.trim()).collect();
+                                    let window_loose_lines: Vec<&str> =
+                                        window_stripped_lines.iter().map(|s| s.trim()).collect();
                                     let diff_loose_lines = similar::TextDiff::from_slices(
                                         &window_loose_lines,
                                         match_loose_lines,
                                     );
                                     let ratio_loose_lines = diff_loose_lines.ratio();
-                                    
+
                                     let window_loose_content = window_loose_lines.join("\n");
                                     let diff_loose_words = similar::TextDiff::from_words(
                                         &window_loose_content,
                                         match_loose_content,
                                     );
                                     let ratio_loose_words = diff_loose_words.ratio();
-                                    let ratio_loose = 0.3 * ratio_loose_lines as f64 + 0.7 * ratio_loose_words as f64;
+                                    let ratio_loose = 0.3 * ratio_loose_lines as f64
+                                        + 0.7 * ratio_loose_words as f64;
 
                                     // The ratio from the `similar` crate already implicitly includes a
                                     // penalty for size differences. We use the raw ratio as the score.
@@ -5075,25 +5112,28 @@ impl<'a> DefaultHunkFinder<'a> {
                                 // better at detecting small changes within a line. Line-based
                                 // ratio is still important for overall structure, especially
                                 // when lines are inserted or deleted.
-                                let ratio_strict = 0.3 * ratio_lines as f64 + 0.7 * ratio_words as f64;
+                                let ratio_strict =
+                                    0.3 * ratio_lines as f64 + 0.7 * ratio_words as f64;
 
                                 // --- LOOSE MATCHING (Ignore Indentation) ---
                                 // Calculate a score based on fully trimmed lines. This helps
                                 // when the patch is nested (e.g. in a markdown list) but the file is flat.
-                                let window_loose_lines: Vec<&str> = window_stripped_lines.iter().map(|s| s.trim()).collect();
+                                let window_loose_lines: Vec<&str> =
+                                    window_stripped_lines.iter().map(|s| s.trim()).collect();
                                 let diff_loose_lines = similar::TextDiff::from_slices(
                                     &window_loose_lines,
                                     match_loose_lines,
                                 );
                                 let ratio_loose_lines = diff_loose_lines.ratio();
-                                
+
                                 let window_loose_content = window_loose_lines.join("\n");
                                 let diff_loose_words = similar::TextDiff::from_words(
                                     &window_loose_content,
                                     match_loose_content,
                                 );
                                 let ratio_loose_words = diff_loose_words.ratio();
-                                let ratio_loose = 0.3 * ratio_loose_lines as f64 + 0.7 * ratio_loose_words as f64;
+                                let ratio_loose =
+                                    0.3 * ratio_loose_lines as f64 + 0.7 * ratio_loose_words as f64;
 
                                 // The ratio from the `similar` crate already implicitly includes a
                                 // penalty for size differences. We use the raw ratio as the score.

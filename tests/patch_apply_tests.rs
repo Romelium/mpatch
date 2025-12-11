@@ -5159,7 +5159,7 @@ fn test_fuzzy_match_ignores_indentation() {
     "#};
     let patch = parse_patches(diff).unwrap().remove(0);
     let options = ApplyOptions::new(); // Default fuzz factor 0.7
-    
+
     let result = try_apply_patch_to_content(&patch, Some(original), &options).unwrap();
     assert_eq!(result.new_content, "line1\nline two\nline3\n");
 }
@@ -5395,13 +5395,13 @@ fn test_fuzzy_indentation_drift() {
 
     let patches = parse_diffs(diff).unwrap();
     // Use fuzzy matching to trigger the robust logic (or ExactIgnoringWhitespace)
-    let options = ApplyOptions::new(); 
+    let options = ApplyOptions::new();
     let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
 
     assert!(result.report.all_applied_cleanly());
 
     let content = fs::read_to_string(&file_path).unwrap();
-    
+
     // Expected: The new item should match the target file's indentation (0 spaces),
     // not the patch's indentation (3 spaces).
     let expected = indoc! {r#"
@@ -5409,6 +5409,9 @@ fn test_fuzzy_indentation_drift() {
         * Item 1
         * Item Two
     "#};
-    
-    assert_eq!(content, expected, "Indentation should be dynamically adjusted based on local context");
+
+    assert_eq!(
+        content, expected,
+        "Indentation should be dynamically adjusted based on local context"
+    );
 }
