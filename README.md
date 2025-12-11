@@ -32,7 +32,8 @@ This same logic makes it perfect for other common developer scenarios where patc
 
 *   **Format Agnostic:** Automatically detects and parses **Markdown** code blocks, raw **Unified Diffs**, and **Conflict Markers** (`<<<<`, `====`, `>>>>`). Just pass the file, and `mpatch` figures it out.
 *   **Context-Driven:** Primarily finds patch locations by matching context lines, making it resilient to preceding file changes. It intelligently uses the `@@ ... @@` line numbers as a hint to resolve ambiguity when the same context appears in multiple places.
-*   **Fuzzy Matching:** If an exact context match isn't found, `mpatch` uses a sophisticated similarity algorithm to find the *best* fuzzy match. This logic can handle cases where lines have been added or removed near the patch location, allowing patches to apply even when the surrounding context has moderately diverged.
+*   **Fuzzy Matching:** If an exact context match isn't found, `mpatch` uses a sophisticated similarity algorithm to find the *best* fuzzy match. This logic handles cases where lines have been added/removed or where **indentation differs** (e.g., code inside a nested Markdown list).
+*   **Smart Indentation:** When applying patches, `mpatch` automatically adjusts the indentation of added lines to match the target file's style, preventing "drift" when the patch source has different indentation than the destination.
 *   **Highly Performant:** The most computationally intensive task—fuzzy searching—is parallelized to take full advantage of multi-core processors, ensuring fast performance even on large files.
 *   **Safe & Secure:** Includes a `--dry-run` mode to preview changes and built-in protection against path traversal attacks.
 *   **Flexible:** Handles multiple files and multiple hunks in a single pass. It correctly processes file creations, modifications, and deletions (by removing all content from a file).

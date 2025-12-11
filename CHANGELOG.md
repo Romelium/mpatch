@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+-   **Fuzzy Matching:** Enhanced the fuzzy matching algorithm to be robust against indentation differences. It now calculates a "loose" similarity score based on trimmed lines, allowing patches with extra indentation (e.g., nested in Markdown lists) to correctly match flat code in the target file.
+-   **Patch Application:** Implemented smart indentation adjustment. When applying a patch via fuzzy matching or whitespace-insensitive matching, the indentation of added lines is now dynamically adjusted to match the surrounding context of the target file, preventing "drift" or corruption of indentation styles.
+
 ## [1.3.3] - 2025-11-23
 
 ### Fixed

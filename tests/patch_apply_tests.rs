@@ -1111,7 +1111,9 @@ fn test_match_with_different_trailing_whitespace() {
         "Patch should apply by ignoring trailing whitespace"
     );
     let content = fs::read_to_string(file_path).unwrap();
-    assert_eq!(content, "line one\nchanged\nline three\n");
+    // The robust application logic preserves the file's context lines (including trailing whitespace)
+    // when using ExactIgnoringWhitespace or Fuzzy matching.
+    assert_eq!(content, "line one  \nchanged\nline three\t\n");
 }
 
 #[test]
@@ -5073,6 +5075,74 @@ mod extended_stress_tests {
 }
 
 #[test]
+fn test_smart_indentation_adjustment() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("indent.rs");
+
+    // Target file has standard 4-space indentation
+    let original_content = indoc! {r#"
+        fn main() {
+            println!("Hello");
+        }
+    "#};
+    fs::write(&file_path, original_content).unwrap();
+
+    // Patch has extra indentation (e.g. copied from a nested list in markdown)
+    // It uses 8 spaces for context, whereas file has 4.
+    let diff = indoc! {r#"
+        ```diff
+        --- a/indent.rs
+        +++ b/indent.rs
+        @@ -1,3 +1,4 @@
+             fn main() {
+                 println!("Hello");
+        +        println!("World");
+             }
+        ```
+    "#};
+
+    let patches = parse_diffs(diff).unwrap();
+    let options = ApplyOptions::new();
+    let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+    assert!(result.report.all_applied_cleanly());
+
+    let content = fs::read_to_string(&file_path).unwrap();
+    // The added line should be adjusted to 4 spaces, not 8.
+    let expected = indoc! {r#"
+        fn main() {
+            println!("Hello");
+            println!("World");
+        }
+    "#};
+    assert_eq!(content, expected);
+}
+
+#[test]
+fn test_fuzzy_match_ignores_indentation() {
+    // This tests the "Robust Fuzzy Matching" feature.
+    // The patch is heavily indented, the file is not.
+    // Standard fuzzy matching would fail (score ~0.67).
+    // Robust matching (trimming whitespace) should succeed (score ~1.0).
+    let original = "line1\nline2\nline3\n";
+    let diff = indoc! {r#"
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1,3 +1,3 @@
+            line1
+        -   line2
+        +   line two
+            line3
+    "#};
+    let patch = parse_patches(diff).unwrap().remove(0);
+    let options = ApplyOptions::new(); // Default fuzz factor 0.7
+    
+    let result = try_apply_patch_to_content(&patch, Some(original), &options).unwrap();
+    assert_eq!(result.new_content, "line1\nline two\nline3\n");
+}
+
+#[test]
 fn test_fuzzy_insertion_clobbers_context() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("main.rs");
@@ -5274,4 +5344,49 @@ fn test_extended_git_headers() {
         "Hunk absorbed rename/similarity headers"
     );
     assert_eq!(hunk1.lines[0], " context");
+}
+
+#[test]
+fn test_fuzzy_indentation_drift() {
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("drift.md");
+
+    let original_content = indoc! {r#"
+        # Header
+        * Item 1
+        * Item 2
+    "#};
+    fs::write(&file_path, original_content).unwrap();
+
+    // Patch has indented list items
+    let diff = indoc! {r#"
+        ```diff
+        --- a/drift.md
+        +++ b/drift.md
+        @@ -1,3 +1,4 @@
+         # Header
+            * Item 1
+        -   * Item 2
+        +   * Item Two
+        ```
+    "#};
+
+    let patches = parse_diffs(diff).unwrap();
+    // Use fuzzy matching to trigger the robust logic (or ExactIgnoringWhitespace)
+    let options = ApplyOptions::new(); 
+    let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+    assert!(result.report.all_applied_cleanly());
+
+    let content = fs::read_to_string(&file_path).unwrap();
+    
+    // Expected: The new item should match the target file's indentation (0 spaces),
+    // not the patch's indentation (3 spaces).
+    let expected = indoc! {r#"
+        # Header
+        * Item 1
+        * Item Two
+    "#};
+    
+    assert_eq!(content, expected, "Indentation should be dynamically adjusted based on local context");
 }
