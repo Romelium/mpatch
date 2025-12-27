@@ -2901,12 +2901,13 @@ where
     I: Iterator<Item = &'a str>,
 {
     let mut unmerged_patches: Vec<Patch> = Vec::new();
+    const HUNK_BUFFER_CAPACITY: usize = 32;
 
     // State variables for the parser as it moves through the diff block.
     let mut first_hunk_header_line: Option<usize> = None;
     let mut current_file: Option<PathBuf> = None;
     let mut current_hunks: Vec<Hunk> = Vec::new();
-    let mut current_hunk_lines: Vec<String> = Vec::new();
+    let mut current_hunk_lines: Vec<String> = Vec::with_capacity(HUNK_BUFFER_CAPACITY);
     let mut current_hunk_old_start_line: Option<usize> = None;
     let mut current_hunk_new_start_line: Option<usize> = None;
     let mut ends_with_newline_for_section = true;
@@ -2923,7 +2924,10 @@ where
                         current_hunk_lines.len()
                     );
                     current_hunks.push(Hunk {
-                        lines: std::mem::take(&mut current_hunk_lines),
+                        lines: std::mem::replace(
+                            &mut current_hunk_lines,
+                            Vec::with_capacity(HUNK_BUFFER_CAPACITY),
+                        ),
                         old_start_line: current_hunk_old_start_line,
                         new_start_line: current_hunk_new_start_line,
                     });
@@ -2975,7 +2979,10 @@ where
                     current_hunk_lines.len()
                 );
                 current_hunks.push(Hunk {
-                    lines: std::mem::take(&mut current_hunk_lines),
+                    lines: std::mem::replace(
+                        &mut current_hunk_lines,
+                        Vec::with_capacity(HUNK_BUFFER_CAPACITY),
+                    ),
                     old_start_line: current_hunk_old_start_line,
                     new_start_line: current_hunk_new_start_line,
                 });
