@@ -30,6 +30,12 @@ indoc = "2.0.7"
 tempfile = "3.23.0"
 criterion = { version = "0.5.1", features = ["html_reports"] }
 
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
 [[bin]]
 name = "mpatch"
 path = "src/main.rs"
