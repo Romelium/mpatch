@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+-   **Search:** Optimized the exact and whitespace-insensitive search logic to avoid unnecessary heap allocations (`Box<dyn Iterator>`), improving efficiency for exact matches.
+
 ## [1.3.4] - 2025-12-11
 
 ### Fixed

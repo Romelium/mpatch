@@ -4835,25 +4835,23 @@ impl<'a> DefaultHunkFinder<'a> {
         // The fastest and most reliable method.
         trace!("    Attempting exact match for hunk...");
         {
-            let exact_matches: Box<dyn Iterator<Item = usize>> =
-                if match_block.len() <= target_lines.len() {
-                    Box::new(
-                        target_lines
-                            .windows(match_block.len())
-                            .enumerate()
-                            .filter(|(_, window)| {
-                                window
-                                    .iter()
-                                    .map(|s| s.as_ref())
-                                    .eq(match_block.iter().copied())
-                            })
-                            .map(|(i, _)| i),
-                    )
-                } else {
-                    Box::new(std::iter::empty())
-                };
+            let result = if match_block.len() <= target_lines.len() {
+                let iter = target_lines
+                    .windows(match_block.len())
+                    .enumerate()
+                    .filter(|(_, window)| {
+                        window
+                            .iter()
+                            .map(|s| s.as_ref())
+                            .eq(match_block.iter().copied())
+                    })
+                    .map(|(i, _)| i);
+                Self::tie_break_with_line_number(iter, old_start_line, "exact")
+            } else {
+                Self::tie_break_with_line_number(std::iter::empty(), old_start_line, "exact")
+            };
 
-            match Self::tie_break_with_line_number(exact_matches, old_start_line, "exact") {
+            match result {
                 Ok(Some(index)) => {
                     debug!("    Found unique exact match at index {}.", index);
                     return Ok((
@@ -4883,29 +4881,31 @@ impl<'a> DefaultHunkFinder<'a> {
         trace!("    Attempting exact match (ignoring trailing whitespace)...");
         {
             let match_stripped: Vec<_> = match_block.iter().map(|s| s.trim_end()).collect();
-            let stripped_matches: Box<dyn Iterator<Item = usize>> =
-                if match_block.len() <= target_lines.len() {
-                    Box::new(
-                        target_trimmed
-                            .windows(match_block.len())
-                            .enumerate()
-                            .filter(move |(_, window)| {
-                                window
-                                    .iter()
-                                    .map(|s| s.as_str())
-                                    .eq(match_stripped.iter().copied())
-                            })
-                            .map(|(i, _)| i),
-                    )
-                } else {
-                    Box::new(std::iter::empty())
-                };
+            let result = if match_block.len() <= target_lines.len() {
+                let iter = target_trimmed
+                    .windows(match_block.len())
+                    .enumerate()
+                    .filter(|(_, window)| {
+                        window
+                            .iter()
+                            .map(|s| s.as_str())
+                            .eq(match_stripped.iter().copied())
+                    })
+                    .map(|(i, _)| i);
+                Self::tie_break_with_line_number(
+                    iter,
+                    old_start_line,
+                    "exact (ignoring whitespace)",
+                )
+            } else {
+                Self::tie_break_with_line_number(
+                    std::iter::empty(),
+                    old_start_line,
+                    "exact (ignoring whitespace)",
+                )
+            };
 
-            match Self::tie_break_with_line_number(
-                stripped_matches,
-                old_start_line,
-                "exact (ignoring whitespace)",
-            ) {
+            match result {
                 Ok(Some(index)) => {
                     debug!(
                         "    Found unique whitespace-insensitive match at index {}.",
