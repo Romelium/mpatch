@@ -19,9 +19,9 @@ You ask an AI to refactor a function. It gives you a diff. However, you modified
 **Standard `patch`:** Fails. The context lines don't match byte-for-byte.
 **`mpatch`:** Succeeds. It sees the code structure is the same and applies the fix.
 
-| Original File (Modified Locally) | AI-Generated Patch (Stale Context) | `mpatch` Result |
-| :--- | :--- | :--- |
-| <pre>fn main() {<br>    // I changed this comment<br>    println!("Hello");<br>}</pre> | <pre> fn main() {<br>     // Original comment<br>-    println!("Hello");<br>+    println!("World");<br> }</pre> | <pre>fn main() {<br>    // I changed this comment<br>    println!("World");<br>}</pre> |
+| Original File (Modified Locally) | AI-Generated Patch (Stale Context) | `patch` Result | `mpatch` Result |
+| :--- | :--- | :--- | :--- |
+| <pre>fn main() {<br>    // I changed this comment<br>    println!("Hello");<br>}</pre> | <pre> fn main() {<br>     // Original comment<br>-    println!("Hello");<br>+    println!("World");<br> }</pre> | <pre>❌ Failed<br>Hunk #1 FAILED at 1.<br>1 out of 1 hunk FAILED</pre> | <pre>fn main() {<br>    // I changed this comment<br>    println!("World");<br>}</pre> |
 
 ---
 
