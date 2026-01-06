@@ -3673,6 +3673,8 @@ pub struct HunkApplier<'a> {
     current_lines: Vec<String>,
     options: &'a ApplyOptions,
     patch_ends_with_newline: bool,
+    original_ends_with_newline: bool,
+    last_hunk_end_index: usize,
 }
 
 impl<'a> HunkApplier<'a> {
@@ -3714,6 +3716,8 @@ impl<'a> HunkApplier<'a> {
             current_lines,
             options,
             patch_ends_with_newline: patch.ends_with_newline,
+            original_ends_with_newline: true,
+            last_hunk_end_index: 0,
         }
     }
 
@@ -3748,6 +3752,52 @@ impl<'a> HunkApplier<'a> {
     /// ```
     pub fn current_lines(&self) -> &[String] {
         &self.current_lines
+    }
+
+    /// Sets whether the original content ended with a newline.
+    ///
+    /// When working with a slice of lines (e.g., `Vec<String>`), the information about
+    /// whether the original file ended with a newline character is typically lost.
+    /// This method allows you to restore that context.
+    ///
+    /// `mpatch` uses this information to determine the newline status of the final output:
+    /// 1. If a patch modifies the end of the file (i.e., the last hunk applies to the
+    ///    very end), the patch's `ends_with_newline` setting takes precedence.
+    /// 2. If the patch only modifies the middle of the file, the original newline
+    ///    status is preserved.
+    ///
+    /// By default, `HunkApplier` assumes the original content ended with a newline (`true`).
+    ///
+    /// # Arguments
+    ///
+    /// * `ends_with_newline` - `true` if the original content had a trailing newline, `false` otherwise.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use mpatch::{parse_single_patch, HunkApplier, ApplyOptions};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// // Original content: "line 1\nline 2" (No trailing newline)
+    /// let original_lines = vec!["line 1", "line 2"];
+    /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -1,1 +1,1\n-line 1\n+line one\n```";
+    /// let patch = parse_single_patch(diff)?;
+    /// let options = ApplyOptions::new();
+    ///
+    /// let mut applier = HunkApplier::new(&patch, Some(&original_lines), &options);
+    ///
+    /// // Crucial step: Tell the applier the original file didn't have a newline.
+    /// applier.set_original_newline_status(false);
+    ///
+    /// applier.next(); // Apply the hunk (modifies line 1)
+    ///
+    /// // The result should preserve the "no newline" status because the patch didn't touch EOF.
+    /// let result = applier.into_content();
+    /// assert_eq!(result, "line one\nline 2");
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn set_original_newline_status(&mut self, ends_with_newline: bool) {
+        self.original_ends_with_newline = ends_with_newline;
     }
 
     /// Consumes the applier and returns the final vector of lines.
@@ -3805,7 +3855,15 @@ impl<'a> HunkApplier<'a> {
     /// ```
     pub fn into_content(self) -> String {
         let mut new_content = self.current_lines.join("\n");
-        if self.patch_ends_with_newline && !new_content.is_empty() {
+
+        let touched_eof = self.last_hunk_end_index >= self.current_lines.len();
+        let should_have_newline = if touched_eof {
+            self.patch_ends_with_newline
+        } else {
+            self.original_ends_with_newline
+        };
+
+        if should_have_newline && !new_content.is_empty() {
             new_content.push('\n');
         }
         new_content
@@ -3844,11 +3902,16 @@ impl<'a> Iterator for HunkApplier<'a> {
     /// ```
     fn next(&mut self) -> Option<Self::Item> {
         let hunk = self.hunks.next()?;
-        Some(apply_hunk_to_lines(
-            hunk,
-            &mut self.current_lines,
-            self.options,
-        ))
+        let old_len = self.current_lines.len();
+        let status = apply_hunk_to_lines(hunk, &mut self.current_lines, self.options);
+
+        if let HunkApplyStatus::Applied { location, .. } = &status {
+            let new_len = self.current_lines.len();
+            let delta = (new_len as isize) - (old_len as isize);
+            let inserted_len = (location.length as isize + delta) as usize;
+            self.last_hunk_end_index = location.start_index + inserted_len;
+        }
+        Some(status)
     }
 }
 
@@ -3906,12 +3969,22 @@ pub fn apply_patch_to_lines<T: AsRef<str>>(
     original_lines: Option<&[T]>,
     options: &ApplyOptions,
 ) -> InMemoryResult {
+    apply_patch_to_lines_internal(patch, original_lines, options, true)
+}
+
+fn apply_patch_to_lines_internal<T: AsRef<str>>(
+    patch: &Patch,
+    original_lines: Option<&[T]>,
+    options: &ApplyOptions,
+    original_ends_with_newline: bool,
+) -> InMemoryResult {
     trace!(
         "  apply_patch_to_lines called with {} lines of original content.",
         original_lines.map_or(0, |l| l.len())
     );
 
     let mut applier = HunkApplier::new(patch, original_lines, options);
+    applier.set_original_newline_status(original_ends_with_newline);
     let total_hunks = patch.hunks.len();
 
     // Drive the iterator to completion, logging progress along the way.
@@ -4089,7 +4162,19 @@ pub fn apply_patch_to_content(
 ) -> InMemoryResult {
     let original_lines: Option<Vec<String>> =
         original_content.map(|c| c.lines().map(String::from).collect());
-    apply_patch_to_lines(patch, original_lines.as_deref(), options)
+    let original_ends_with_newline = original_content.is_none_or(|s| {
+        if s.is_empty() {
+            false
+        } else {
+            s.ends_with('\n')
+        }
+    });
+    apply_patch_to_lines_internal(
+        patch,
+        original_lines.as_deref(),
+        options,
+        original_ends_with_newline,
+    )
 }
 
 /// A strict variant of [`apply_patch_to_content()`] that treats partial applications as an error.

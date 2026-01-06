@@ -1115,6 +1115,53 @@ fn test_no_newline_at_end_of_file() {
 }
 
 #[test]
+fn test_preserves_no_newline_when_patch_does_not_touch_eof() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("start_only.txt");
+    // File has 2 lines, no trailing newline
+    fs::write(&file_path, "line 1\nline 2").unwrap();
+
+    // Patch modifies line 1
+    let diff = indoc! {r#"
+        ```diff
+        --- a/start_only.txt
+        +++ b/start_only.txt
+        @@ -1 +1 @@
+        -line 1
+        +line one
+        ```
+    "#};
+    let patch = &parse_diffs(diff).unwrap()[0];
+    let options = ApplyOptions::exact();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
+
+    assert!(result.report.all_applied_cleanly());
+    let content = fs::read_to_string(file_path).unwrap();
+    assert_eq!(
+        content, "line one\nline 2",
+        "Should preserve existing no-newline state if patch doesn't touch EOF"
+    );
+}
+
+#[test]
+fn test_patch_content_str_preserves_no_newline_on_partial_patch() {
+    let original = "line 1\nline 2";
+    let diff = indoc! {r#"
+        ```diff
+        --- a/file
+        +++ b/file
+        @@ -1 +1 @@
+        -line 1
+        +line one
+        ```
+    "#};
+    let options = ApplyOptions::new();
+    let result = patch_content_str(diff, Some(original), &options).unwrap();
+    assert_eq!(result, "line one\nline 2");
+}
+
+#[test]
 fn test_fuzzy_match_succeeds() {
     let _ = env_logger::builder().is_test(true).try_init();
     let dir = tempdir().unwrap();

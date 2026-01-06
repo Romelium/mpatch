@@ -14,11 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+-   **Patch Application:** Fixed a bug where a trailing newline was incorrectly added to files lacking one, even if the patch only modified lines at the beginning or middle of the file. The original newline status is now preserved unless the patch explicitly modifies the end of the file.
 -   **Parser:** Fixed handling of the `\ No newline at end of file` marker. It now correctly verifies that the marker immediately follows a context or addition line.
 -   **Parser:** Fixed parsing of empty hunks (e.g., `@@ -0,0 +0,0 @@`) which were previously ignored.
 
 ### Added
 
+-   **API:** Added `HunkApplier::set_original_newline_status` to manually control the expected newline behavior when using the line-based API.
 -   **API:** Derived `PartialEq` for `ApplyOptions`.
 
 ### Changed
