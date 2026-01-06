@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+-   **Patch Creation:** Optimized `Patch::from_texts` to construct hunks directly from diff operations, avoiding the overhead of generating and re-parsing a unified diff string.
+-   **Formatting:** Optimized `Hunk::fmt` to calculate line counts in a single pass.
+
+### Fixed
+
+-   **Parser:** Fixed handling of the `\ No newline at end of file` marker. It now correctly verifies that the marker immediately follows a context or addition line.
+
+### Added
+
+-   **API:** Derived `PartialEq` for `ApplyOptions`.
+
 ## [1.3.5] - 2025-12-28
 
 ### Performance

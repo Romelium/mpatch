@@ -818,7 +818,7 @@ pub enum HunkApplyStatus {
 ///     .with_fuzz_factor(0.5);
 /// assert_eq!(fluent_options.fuzz_factor, 0.5);
 /// ```
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ApplyOptions {
     /// If `true`, no files will be modified. Instead, a diff of the proposed
     /// changes will be generated and returned in [`PatchResult`].
@@ -1885,8 +1885,15 @@ impl std::fmt::Display for Hunk {
     /// assert_eq!(hunk.to_string(), expected_str);
     /// ```
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let old_len = self.lines.iter().filter(|l| !l.starts_with('+')).count();
-        let new_len = self.lines.iter().filter(|l| !l.starts_with('-')).count();
+        let (old_len, new_len) = self.lines.iter().fold((0, 0), |(old, new), line| {
+            if line.starts_with('+') {
+                (old, new + 1)
+            } else if line.starts_with('-') {
+                (old + 1, new)
+            } else {
+                (old + 1, new + 1)
+            }
+        });
         let old_start = self.old_start_line.unwrap_or(1);
         let new_start = self.new_start_line.unwrap_or(1);
 
@@ -2079,40 +2086,78 @@ impl Patch {
         context_len: usize,
     ) -> Result<Self, ParseError> {
         let path = file_path.into();
-        let path_str = path.to_string_lossy();
-
-        let old_header = format!("a/{}", path_str);
-        let new_header = format!("b/{}", path_str);
         let diff = TextDiff::from_lines(old_text, new_text);
-        let diff_text = format!(
-            "{}",
-            diff.unified_diff()
-                .context_radius(context_len)
-                .header(&old_header, &new_header)
-        );
+        let mut hunks = Vec::new();
 
-        // If there's no difference, the text will be empty.
-        if diff_text.trim().is_empty() {
-            return Ok(Patch {
-                file_path: path,
-                hunks: vec![],
-                ends_with_newline: new_text.ends_with('\n') || new_text.is_empty(),
+        for group in diff.grouped_ops(context_len) {
+            let mut lines = Vec::new();
+            let mut old_start = None;
+            let mut new_start = None;
+
+            if let Some(first_op) = group.first() {
+                old_start = Some(first_op.old_range().start + 1);
+                new_start = Some(first_op.new_range().start + 1);
+            }
+
+            for op in group {
+                match op {
+                    similar::DiffOp::Equal { old_index, len, .. } => {
+                        for i in 0..len {
+                            let line =
+                                diff.old_slices()[old_index + i].trim_end_matches(['\r', '\n']);
+                            lines.push(format!(" {}", line));
+                        }
+                    }
+                    similar::DiffOp::Delete {
+                        old_index, old_len, ..
+                    } => {
+                        for i in 0..old_len {
+                            let line =
+                                diff.old_slices()[old_index + i].trim_end_matches(['\r', '\n']);
+                            lines.push(format!("-{}", line));
+                        }
+                    }
+                    similar::DiffOp::Insert {
+                        new_index, new_len, ..
+                    } => {
+                        for i in 0..new_len {
+                            let line =
+                                diff.new_slices()[new_index + i].trim_end_matches(['\r', '\n']);
+                            lines.push(format!("+{}", line));
+                        }
+                    }
+                    similar::DiffOp::Replace {
+                        old_index,
+                        old_len,
+                        new_index,
+                        new_len,
+                    } => {
+                        for i in 0..old_len {
+                            let line =
+                                diff.old_slices()[old_index + i].trim_end_matches(['\r', '\n']);
+                            lines.push(format!("-{}", line));
+                        }
+                        for i in 0..new_len {
+                            let line =
+                                diff.new_slices()[new_index + i].trim_end_matches(['\r', '\n']);
+                            lines.push(format!("+{}", line));
+                        }
+                    }
+                }
+            }
+
+            hunks.push(Hunk {
+                lines,
+                old_start_line: old_start,
+                new_start_line: new_start,
             });
         }
 
-        // Parse the raw diff directly
-        let patches = parse_patches(diff_text.trim())?;
-
-        if let Some(patch) = patches.into_iter().next() {
-            Ok(patch)
-        } else {
-            // This should not happen if diff_text was not empty, but as a safeguard:
-            Ok(Patch {
-                file_path: path,
-                hunks: vec![],
-                ends_with_newline: new_text.ends_with('\n') || new_text.is_empty(),
-            })
-        }
+        Ok(Patch {
+            file_path: path,
+            hunks,
+            ends_with_newline: new_text.ends_with('\n') || new_text.is_empty(),
+        })
     }
 
     /// Creates a new `Patch` that reverses the changes in this one.
@@ -3004,7 +3049,11 @@ where
             // This line only makes sense inside a hunk.
             if current_hunk_old_start_line.is_some() {
                 trace!("  Found '\\ No newline at end of file' marker.");
-                ends_with_newline_for_section = false;
+                if let Some(last_line) = current_hunk_lines.last() {
+                    if last_line.starts_with('+') || last_line.starts_with(' ') {
+                        ends_with_newline_for_section = false;
+                    }
+                }
             }
         } else if is_git_header_line(line) {
             trace!("  Ignoring Git header line: '{}'", line.trim_end());
@@ -4874,7 +4923,7 @@ impl<'a> DefaultHunkFinder<'a> {
             }
         }
 
-        // Optimization: Pre-calculate trimmed lines for subsequent strategies.
+        // Pre-calculate trimmed lines for subsequent strategies.
         // This avoids repeated allocation and trimming in loops.
         let target_trimmed: Vec<String> = target_lines
             .iter()
