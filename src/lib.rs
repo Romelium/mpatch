@@ -133,7 +133,7 @@
 //!   ideal for processing multi-file diffs.
 //! - [`apply_patch_to_file()`]: The most convenient function for applying a single
 //!   patch to a file. It handles reading the original file and writing the new content
-//!   back to disk.
+//!   back to disk. If the patch results in empty content, the file is deleted.
 //! - [`apply_patch_to_content()`]: A pure function for in-memory operations. It takes
 //!   the original content as a string and returns the new content.
 //!
@@ -1999,7 +1999,8 @@ impl std::fmt::Display for HunkLocation {
 ///
 /// A `Patch` contains a target file path and a list of [`Hunk`]s. It is typically
 /// created by parsing a diff string (Unified Diff, Markdown block, or Conflict Markers)
-/// using functions like [`parse_auto()`] or [`parse_diffs()`].
+/// using functions like [`parse_auto()`] or [`parse_diffs()`]. It can represent
+/// file modifications, creations, or deletions.
 ///
 /// It is the primary unit of work for the `apply` functions.
 ///
@@ -2963,7 +2964,7 @@ where
             // A `---` line always signals a new file section.
             // Finalize the previous file's patch section if it exists.
             if let Some(existing_file) = &current_file {
-                if !current_hunk_lines.is_empty() {
+                if current_hunk_old_start_line.is_some() {
                     trace!(
                         "    Finalizing previous hunk with {} lines.",
                         current_hunk_lines.len()
@@ -3018,7 +3019,7 @@ where
             }
         } else if line.starts_with("@@") {
             trace!("  Found hunk header: '{}'", line);
-            if !current_hunk_lines.is_empty() {
+            if current_hunk_old_start_line.is_some() {
                 trace!(
                     "    Finalizing previous hunk with {} lines.",
                     current_hunk_lines.len()
@@ -3068,7 +3069,7 @@ where
 
     // Finalize the last hunk and patch section after the loop.
     debug!("  End of diff block. Finalizing last hunk and patch section.");
-    if !current_hunk_lines.is_empty() {
+    if current_hunk_old_start_line.is_some() {
         trace!(
             "    Finalizing final hunk with {} lines.",
             current_hunk_lines.len()
@@ -3288,7 +3289,8 @@ pub fn ensure_path_is_safe(base_dir: &Path, relative_path: &Path) -> Result<Path
 /// This is a high-level convenience function that iterates through a list of
 /// patches and applies each one to the filesystem using [`apply_patch_to_file()`].
 /// It aggregates the results, including both successful applications and any
-/// "hard" errors encountered (like I/O errors).
+/// "hard" errors encountered (like I/O errors). Files resulting in empty content
+/// will be deleted.
 ///
 /// This function will continue applying patches even if some fail.
 ///
@@ -3349,6 +3351,7 @@ pub fn apply_patches_to_dir(
 /// This function orchestrates the patching process for a single file. It handles
 /// filesystem interactions like reading the original file and writing the new
 /// content, while delegating the core patching logic to [`apply_patch_to_content()`].
+/// If the patch results in empty content, the target file is deleted.
 ///
 /// # Arguments
 ///
@@ -3482,23 +3485,51 @@ pub fn apply_patch_to_file(
         // Write the modified content to the file system.
         // The parent directory might have been created by `ensure_path_is_safe`
         // for a new file, but we ensure it again just in case.
-        if let Some(parent) = safe_target_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| map_io_error(parent.to_path_buf(), e))?;
-        }
-        trace!(
-            "  Writing {} bytes to '{}'",
-            new_content.len(),
-            safe_target_path.display()
-        );
-        fs::write(&safe_target_path, new_content)
-            .map_err(|e| map_io_error(safe_target_path.clone(), e))?;
-        if apply_result.all_applied_cleanly() {
-            info!(
-                "  Successfully wrote changes to '{}'",
-                patch.file_path.display()
-            );
+        if new_content.is_empty() {
+            if safe_target_path.exists() {
+                info!(
+                    "  Resulting content is empty. Removing file '{}'",
+                    patch.file_path.display()
+                );
+                fs::remove_file(&safe_target_path)
+                    .map_err(|e| map_io_error(safe_target_path.clone(), e))?;
+            } else {
+                info!(
+                    "  Resulting content is empty. Skipping creation of '{}'",
+                    patch.file_path.display()
+                );
+            }
+
+            if apply_result.all_applied_cleanly() {
+                info!(
+                    "  Successfully processed deletion/empty-result for '{}'",
+                    patch.file_path.display()
+                );
+            } else {
+                warn!(
+                    "  Partial application resulted in empty content for '{}'",
+                    patch.file_path.display()
+                );
+            }
         } else {
-            warn!("  Wrote partial changes to '{}'", patch.file_path.display());
+            if let Some(parent) = safe_target_path.parent() {
+                fs::create_dir_all(parent).map_err(|e| map_io_error(parent.to_path_buf(), e))?;
+            }
+            trace!(
+                "  Writing {} bytes to '{}'",
+                new_content.len(),
+                safe_target_path.display()
+            );
+            fs::write(&safe_target_path, new_content)
+                .map_err(|e| map_io_error(safe_target_path.clone(), e))?;
+            if apply_result.all_applied_cleanly() {
+                info!(
+                    "  Successfully wrote changes to '{}'",
+                    patch.file_path.display()
+                );
+            } else {
+                warn!("  Wrote partial changes to '{}'", patch.file_path.display());
+            }
         }
     }
 

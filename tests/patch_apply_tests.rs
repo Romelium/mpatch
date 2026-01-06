@@ -977,8 +977,114 @@ fn test_file_deletion_by_removing_all_content() {
 
     assert!(result.report.all_applied_cleanly());
     assert!(result.diff.is_none());
-    let content = fs::read_to_string(file_path).unwrap();
-    assert_eq!(content, ""); // The file is now empty
+    assert!(
+        !file_path.exists(),
+        "File should be deleted when content becomes empty"
+    );
+}
+
+#[test]
+fn test_file_creation_empty_content_does_not_create_file() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("empty_create.txt");
+
+    // Manually construct a patch that is a "creation" (empty match block)
+    // but adds nothing (empty replace block).
+    let patch = Patch {
+        file_path: std::path::PathBuf::from("empty_create.txt"),
+        hunks: vec![Hunk {
+            lines: vec![], // No lines = empty match, empty replace
+            old_start_line: Some(0),
+            new_start_line: Some(0),
+        }],
+        ends_with_newline: false,
+    };
+
+    let options = ApplyOptions::exact();
+    let result = apply_patch_to_file(&patch, dir.path(), options).unwrap();
+
+    assert!(result.report.all_applied_cleanly());
+    assert!(!file_path.exists(), "Empty file should not be created");
+}
+
+#[test]
+fn test_dry_run_deletion_preserves_file() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("preserve_me.txt");
+    fs::write(&file_path, "content\n").unwrap();
+
+    let diff = indoc! {r#"
+        ```diff
+        --- a/preserve_me.txt
+        +++ b/preserve_me.txt
+        @@ -1 +0,0 @@
+        -content
+        ```
+    "#};
+    let patch = &parse_diffs(diff).unwrap()[0];
+    let options = ApplyOptions::dry_run();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
+
+    assert!(result.report.all_applied_cleanly());
+    assert!(file_path.exists(), "Dry run should not delete the file");
+    let content = fs::read_to_string(&file_path).unwrap();
+    assert_eq!(content, "content\n");
+}
+
+#[test]
+fn test_fuzzy_deletion_removes_file() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("fuzzy_delete.txt");
+    // File has slightly different content than patch expects
+    fs::write(&file_path, "content modified\n").unwrap();
+
+    let diff = indoc! {r#"
+        ```diff
+        --- a/fuzzy_delete.txt
+        +++ b/fuzzy_delete.txt
+        @@ -1 +0,0 @@
+        -content original
+        ```
+    "#};
+    let patch = &parse_diffs(diff).unwrap()[0];
+    let options = ApplyOptions {
+        dry_run: false,
+        fuzz_factor: 0.3,
+    };
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
+
+    assert!(result.report.all_applied_cleanly());
+    assert!(
+        !file_path.exists(),
+        "File should be deleted even via fuzzy match if result is empty"
+    );
+}
+
+#[test]
+fn test_creation_of_empty_file_is_skipped() {
+    // If we try to create a file with empty content, and it doesn't exist,
+    // it should just log "Skipping creation" and succeed.
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("ghost.txt");
+
+    // A creation patch that adds nothing
+    let diff = indoc! {r#"
+        ```diff
+        --- /dev/null
+        +++ b/ghost.txt
+        @@ -0,0 +0,0 @@
+        ```
+    "#};
+    let patch = &parse_diffs(diff).unwrap()[0];
+    let options = ApplyOptions::exact();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
+
+    assert!(result.report.all_applied_cleanly());
+    assert!(!file_path.exists());
 }
 
 #[test]

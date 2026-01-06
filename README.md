@@ -32,6 +32,7 @@ You ask an AI to refactor a function. It gives you a diff. However, you modified
     *   **Markdown** code blocks (standard AI output).
     *   **Raw Unified Diffs** (`git diff` output).
 *   **✨ Smart Indentation:** Automatically adjusts the indentation of added lines to match the target file. Perfect for applying patches that were nested inside Markdown lists or have different tab/space styles.
+*   **🗑️ File Deletion:** Automatically deletes the target file if the patch results in empty content.
 *   **🛡️ Secure:** Built-in path traversal protection prevents malicious patches from writing outside the target directory (`../../etc/passwd`).
 *   **⚡ High Performance:** Fuzzy searching is computationally expensive, so `mpatch` parallelizes the search across all CPU cores using `rayon`.
 *   **🔍 Dry Run:** Preview changes with `--dry-run` before touching your filesystem.

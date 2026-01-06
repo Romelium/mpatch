@@ -15,10 +15,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 -   **Parser:** Fixed handling of the `\ No newline at end of file` marker. It now correctly verifies that the marker immediately follows a context or addition line.
+-   **Parser:** Fixed parsing of empty hunks (e.g., `@@ -0,0 +0,0 @@`) which were previously ignored.
 
 ### Added
 
 -   **API:** Derived `PartialEq` for `ApplyOptions`.
+
+### Changed
+
+-   **Patch Application:** Files are now automatically deleted if the patch application results in empty content.
 
 ## [1.3.5] - 2025-12-28
 
