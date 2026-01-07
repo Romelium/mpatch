@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+-   **CLI:** Added `-R` / `--reverse` flag to reverse patches before applying them (useful for undoing changes).
+-   **API:** Added `mpatch::invert_patches` helper function to programmatically invert a list of patches.
 -   **API:** Added `HunkApplier::set_original_newline_status` to manually control the expected newline behavior when using the line-based API.
 -   **API:** Derived `PartialEq` for `ApplyOptions`.
 

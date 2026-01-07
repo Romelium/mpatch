@@ -141,6 +141,10 @@
 //! that treats partial applications as an error, simplifying the common apply-or-fail
 //! workflow.
 //!
+//! You can also manipulate patches before application:
+//!
+//! - [`invert_patches()`]: Reverses a list of patches (swapping additions and deletions).
+//!
 //! ### Core Data Structures
 //!
 //! - [`Patch`]: Represents all the changes for a single file. It contains the
@@ -3344,6 +3348,29 @@ pub fn apply_patches_to_dir(
         .collect();
 
     BatchResult { results }
+}
+
+/// Inverts a list of patches.
+///
+/// This is a convenience function that calls [`Patch::invert()`] on every patch
+/// in the provided slice. It is useful when you want to reverse the effect of
+/// a multi-file diff (e.g., "un-applying" a set of changes).
+///
+/// # Example
+///
+/// ```
+/// # use mpatch::{parse_auto, invert_patches};
+/// let diff = "--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new";
+/// let patches = parse_auto(diff).unwrap();
+///
+/// let reversed = invert_patches(&patches);
+/// let hunk = &reversed[0].hunks[0];
+///
+/// assert_eq!(hunk.removed_lines(), vec!["new"]);
+/// assert_eq!(hunk.added_lines(), vec!["old"]);
+/// ```
+pub fn invert_patches(patches: &[Patch]) -> Vec<Patch> {
+    patches.iter().map(|p| p.invert()).collect()
 }
 
 /// A convenience function that applies a single [`Patch`] to the filesystem.

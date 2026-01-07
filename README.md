@@ -119,6 +119,13 @@ mpatch --fuzz-factor 0.9 changes.md ./src
 mpatch --fuzz-factor 0.0 changes.md ./src
 ```
 
+### Reversing a Patch
+Undo a previously applied patch (swaps additions and deletions).
+
+```bash
+mpatch -R changes.md ./src
+```
+
 ### Debugging
 If a patch fails, generate a comprehensive debug report (includes file states, logs, and diffs) to analyze why.
 
@@ -196,6 +203,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+```
+
+### 3. Reversing Patches
+Programmatically invert patches (additions become deletions and vice versa).
+
+```rust
+use mpatch::{parse_auto, invert_patches};
+
+let patches = parse_auto(diff_content)?;
+let reversed = invert_patches(&patches);
+
+// Now apply `reversed` to undo changes
 ```
 
 ---

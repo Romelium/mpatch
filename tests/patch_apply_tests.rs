@@ -5,7 +5,7 @@ use mpatch::{
     parse_patches, parse_patches_from_lines, patch_content_str, try_apply_patch_to_content,
     try_apply_patch_to_file, try_apply_patch_to_lines, ApplyOptions, DefaultHunkFinder, Hunk,
     HunkApplyError, HunkApplyStatus, HunkFinder, HunkLocation, MatchType, ParseError, Patch,
-    PatchError, PatchFormat, StrictApplyError,
+    PatchError, PatchFormat, StrictApplyError, invert_patches,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -5588,4 +5588,276 @@ fn test_fuzzy_indentation_drift() {
         content, expected,
         "Indentation should be dynamically adjusted based on local context"
     );
+}
+
+#[test]
+fn test_invert_simple_modification() {
+    let diff = indoc! {r#"
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1 +1 @@
+        -old
+        +new
+    "#};
+
+    let patches = parse_auto(diff).unwrap();
+    let inverted = invert_patches(&patches);
+
+    assert_eq!(inverted.len(), 1);
+    let hunk = &inverted[0].hunks[0];
+
+    // Original: -old, +new
+    // Inverted: -new, +old
+    assert_eq!(hunk.removed_lines(), vec!["new"]);
+    assert_eq!(hunk.added_lines(), vec!["old"]);
+}
+
+#[test]
+fn test_invert_creation_becomes_deletion() {
+    let diff = indoc! {r#"
+        --- /dev/null
+        +++ b/new.txt
+        @@ -0,0 +1 @@
+        +content
+    "#};
+
+    let patches = parse_auto(diff).unwrap();
+    assert!(patches[0].is_creation());
+
+    let inverted = invert_patches(&patches);
+    assert!(inverted[0].is_deletion());
+
+    let hunk = &inverted[0].hunks[0];
+    assert_eq!(hunk.removed_lines(), vec!["content"]);
+    assert!(hunk.added_lines().is_empty());
+}
+
+#[test]
+fn test_invert_deletion_becomes_creation() {
+    let diff = indoc! {r#"
+        --- a/old.txt
+        +++ /dev/null
+        @@ -1 +0,0 @@
+        -content
+    "#};
+
+    let patches = parse_auto(diff).unwrap();
+    assert!(patches[0].is_deletion());
+
+    let inverted = invert_patches(&patches);
+    assert!(inverted[0].is_creation());
+
+    let hunk = &inverted[0].hunks[0];
+    assert!(hunk.removed_lines().is_empty());
+    assert_eq!(hunk.added_lines(), vec!["content"]);
+}
+
+#[test]
+fn test_double_inversion_is_identity() {
+    let diff = indoc! {r#"
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1,3 +1,3 @@
+         ctx
+        -old
+        +new
+    "#};
+
+    let original = parse_auto(diff).unwrap();
+    let once = invert_patches(&original);
+    let twice = invert_patches(&once);
+
+    // Compare hunks content
+    assert_eq!(original[0].hunks[0].lines, twice[0].hunks[0].lines);
+}
+
+#[test]
+fn test_apply_inverted_patch_undoes_changes() {
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("file.txt");
+
+    // Scenario: We have a file that *already* has the "new" content.
+    // We want to apply the patch in reverse to go back to "old".
+    fs::write(&file_path, "context\nnew value\n").unwrap();
+
+    // The patch describes going from Old -> New
+    let diff = indoc! {r#"
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1,2 +1,2 @@
+         context
+        -old value
+        +new value
+    "#};
+
+    let patches = parse_auto(diff).unwrap();
+
+    // Invert: Now describes going from New -> Old
+    let reversed_patches = invert_patches(&patches);
+
+    let options = ApplyOptions::exact();
+    let result = apply_patch_to_file(&reversed_patches[0], dir.path(), options).unwrap();
+
+    assert!(result.report.all_applied_cleanly());
+
+    let content = fs::read_to_string(&file_path).unwrap();
+    assert_eq!(content, "context\nold value\n");
+}
+
+#[test]
+fn test_invert_multiple_files() {
+    let diff = indoc! {r#"
+        --- a/f1
+        +++ b/f1
+        @@ -1 +1 @@
+        -a
+        +b
+        --- a/f2
+        +++ b/f2
+        @@ -1 +1 @@
+        -c
+        +d
+    "#};
+
+    let patches = parse_auto(diff).unwrap();
+    let inverted = invert_patches(&patches);
+
+    assert_eq!(inverted.len(), 2);
+
+    // Check f1
+    assert_eq!(inverted[0].hunks[0].removed_lines(), vec!["b"]);
+    assert_eq!(inverted[0].hunks[0].added_lines(), vec!["a"]);
+
+    // Check f2
+    assert_eq!(inverted[1].hunks[0].removed_lines(), vec!["d"]);
+    assert_eq!(inverted[1].hunks[0].added_lines(), vec!["c"]);
+}
+
+#[test]
+fn test_invert_conflict_markers() {
+    // Conflict markers: <<<< (Old) ==== (New) >>>>
+    let diff = indoc! {r#"
+        <<<<
+        old
+        ====
+        new
+        >>>>
+    "#};
+
+    let patches = parse_auto(diff).unwrap();
+    // Original: -old, +new
+
+    let inverted = invert_patches(&patches);
+    // Inverted: -new, +old
+
+    let hunk = &inverted[0].hunks[0];
+    assert_eq!(hunk.removed_lines(), vec!["new"]);
+    assert_eq!(hunk.added_lines(), vec!["old"]);
+}
+
+#[test]
+fn test_invert_mixed_hunk() {
+    // A hunk with context, additions, and deletions mixed
+    let diff = indoc! {r#"
+        --- a/file
+        +++ b/file
+        @@ -1,4 +1,4 @@
+         ctx1
+        -del1
+        +add1
+         ctx2
+        -del2
+        +add2
+    "#};
+
+    let patches = parse_auto(diff).unwrap();
+    let inverted = invert_patches(&patches);
+    let hunk = &inverted[0].hunks[0];
+
+    // Expected lines in inverted hunk (simple inversion, no reordering):
+    //  ctx1
+    // +del1
+    // -add1
+    //  ctx2
+    // +del2
+    // -add2
+
+    let lines = &hunk.lines;
+    assert_eq!(lines[0], " ctx1");
+    assert_eq!(lines[1], "+del1");
+    assert_eq!(lines[2], "-add1");
+    assert_eq!(lines[3], " ctx2");
+    assert_eq!(lines[4], "+del2");
+    assert_eq!(lines[5], "-add2");
+}
+
+#[test]
+fn test_invert_empty_patch_list() {
+    let patches: Vec<Patch> = vec![];
+    let inverted = invert_patches(&patches);
+    assert!(inverted.is_empty());
+}
+
+#[test]
+fn test_complex_apply_and_reverse_cycle() {
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("complex_cycle.txt");
+
+    // 1. Setup Original Content
+    // Contains sections for Modification, Deletion, and Addition.
+    let original_content = indoc! {r#"
+        fn main() {
+            // Part 1: Modification
+            let x = 10;
+            println!("Value: {}", x);
+
+            // Part 2: Deletion
+            let unused = "delete me";
+            let unused_2 = "delete me too";
+
+            // Part 3: Addition
+            return;
+        }
+    "#};
+    fs::write(&file_path, original_content).unwrap();
+
+    // 2. Define Patch (Original -> Modified)
+    let diff = indoc! {r#"
+        --- a/complex_cycle.txt
+        +++ b/complex_cycle.txt
+        @@ -3,3 +3,3 @@
+             // Part 1: Modification
+        -    let x = 10;
+        +    let x = 20;
+             println!("Value: {}", x);
+        @@ -6,4 +6,1 @@
+         
+             // Part 2: Deletion
+        -    let unused = "delete me";
+        -    let unused_2 = "delete me too";
+        -
+             // Part 3: Addition
+        @@ -11,2 +8,3 @@
+             // Part 3: Addition
+        +    println!("Done");
+             return;
+    "#};
+
+    let patches = parse_auto(diff).unwrap();
+    let options = ApplyOptions::exact();
+
+    // 3. Apply Original Patch (Forward)
+    let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+    assert!(result.report.all_applied_cleanly(), "Forward patch failed");
+
+    // 4. Invert Patch
+    let reversed_patches = invert_patches(&patches);
+
+    // 5. Apply Reversed Patch (Backward)
+    let result_rev = apply_patch_to_file(&reversed_patches[0], dir.path(), options).unwrap();
+    assert!(result_rev.report.all_applied_cleanly(), "Reverse patch failed");
+
+    // 6. Verify Restoration
+    let restored_content = fs::read_to_string(&file_path).unwrap();
+    assert_eq!(restored_content, original_content, "Reverse patch did not restore original content exactly");
 }

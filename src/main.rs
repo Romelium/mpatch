@@ -48,7 +48,12 @@ fn run(args: Args) -> Result<()> {
     // Read the input file and pass its content to the core parsing logic from the library.
     let content = fs::read_to_string(&args.input_file)
         .with_context(|| format!("Failed to read input file '{}'", args.input_file.display()))?;
-    let all_patches = parse_auto(&content)?;
+    let mut all_patches = parse_auto(&content)?;
+
+    if args.reverse {
+        info!("Reversing {} patch(es) before application...", all_patches.len());
+        all_patches = mpatch::invert_patches(&all_patches);
+    }
 
     // --- Setup Logging and Reporting ---
     // This sets up the logger and, if needed, creates a report file.
@@ -197,6 +202,9 @@ struct Args {
     /// Higher is stricter. 0 disables fuzzy matching completely.
     #[arg(short = 'f', long, default_value_t = DEFAULT_FUZZ_THRESHOLD, help = "Similarity threshold for fuzzy matching (0.0 to 1.0). Higher is stricter. 0 disables fuzzy matching.")]
     fuzz_factor: f32,
+    /// Reverse the patch before applying (swaps additions and deletions).
+    #[arg(short = 'R', long, help = "Reverse the patch before applying.")]
+    reverse: bool,
     /// Increase logging verbosity. Can be used multiple times.
     /// -v for info, -vv for debug, -vvv for trace.
     /// -vvvv also generates a comprehensive debug report file.
