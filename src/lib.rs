@@ -2653,7 +2653,7 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
             let current_indent = line.len() - inner_trimmed.len();
             if inner_trimmed.starts_with("```")
                 && inner_trimmed.chars().take_while(|&c| c == '`').count() >= fence_len
-                && current_indent < opening_indent + 4
+                && current_indent <= opening_indent
             {
                 lines.next(); // Consume the closing fence
                 break;

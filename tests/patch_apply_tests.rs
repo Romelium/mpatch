@@ -4378,6 +4378,27 @@ fn test_parse_diff_with_nested_indented_code_block() {
 }
 
 #[test]
+fn test_parse_diff_with_fence_like_context_line() {
+    let diff = indoc! {r#"
+        ```diff
+        --- README.md
+        +++ README.md
+        @@ -1,3 +1,3 @@
+         text
+         ```
+         more text
+        ```
+    "#};
+    let patches = parse_diffs(diff).unwrap();
+    assert_eq!(patches.len(), 1);
+    let hunk = &patches[0].hunks[0];
+    assert_eq!(hunk.lines.len(), 3);
+    // The line should be preserved as a context line (space + backticks)
+    assert_eq!(hunk.lines[1], " ```");
+    assert_eq!(hunk.lines[2], " more text");
+}
+
+#[test]
 fn test_detect_markdown_patch_keyword() {
     let content = indoc! {r#"
         ```patch
