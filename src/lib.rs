@@ -355,7 +355,7 @@
 //! - **To disable this feature**, specify `default-features = false` in your `Cargo.toml`:
 //!   ```toml
 //!   [dependencies]
-//!   mpatch = { version = "1.3.5", default-features = false }
+//!   mpatch = { version = "1.4.0", default-features = false }
 //!   ```
 //!   You might want to disable this feature if you are compiling for a target that
 //!   does not support threading (like `wasm32-unknown-unknown`) or if you want to
