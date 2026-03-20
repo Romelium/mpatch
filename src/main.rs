@@ -51,7 +51,10 @@ fn run(args: Args) -> Result<()> {
     let mut all_patches = parse_auto(&content)?;
 
     if args.reverse {
-        info!("Reversing {} patch(es) before application...", all_patches.len());
+        info!(
+            "Reversing {} patch(es) before application...",
+            all_patches.len()
+        );
         all_patches = mpatch::invert_patches(&all_patches);
     }
 
@@ -125,6 +128,7 @@ fn run(args: Args) -> Result<()> {
             Err(e) => {
                 // A "hard" error occurred (e.g., I/O error, path traversal).
                 // This is fatal, so we stop and return the error.
+                finalize_report(Some(&batch_result));
                 // Since `e` is a reference from `.iter()`, we create a new error from its display representation.
                 return Err(anyhow!("{}", e)).with_context(|| {
                     format!(
@@ -138,7 +142,6 @@ fn run(args: Args) -> Result<()> {
 
     // --- Final Summary ---
     info!("\n--- Summary ---");
-    finalize_report(Some(&batch_result));
     info!("Successful operations: {}", success_count);
     info!("Failed operations:     {}", fail_count);
     if args.dry_run {
@@ -147,6 +150,7 @@ fn run(args: Args) -> Result<()> {
 
     if fail_count > 0 {
         warn!("Review the log for errors. Some files may be in a partially patched state.");
+        finalize_report(Some(&batch_result));
 
         // Return an error to set a non-zero exit code.
         return Err(anyhow!(
@@ -155,7 +159,7 @@ fn run(args: Args) -> Result<()> {
         ));
     }
 
-    finalize_report(None); // Finalize report on success if not already done
+    finalize_report(Some(&batch_result));
     Ok(())
 }
 
@@ -358,13 +362,6 @@ fn write_report_footer(
     static IS_FINALIZED: AtomicBool = AtomicBool::new(false);
     if IS_FINALIZED.swap(true, Ordering::SeqCst) {
         return;
-    }
-
-    log::logger().flush();
-
-    // Scope 1: Write initial headers and final file states
-    {
-        let _file = file_arc.lock().unwrap();
     }
 
     log::logger().flush();

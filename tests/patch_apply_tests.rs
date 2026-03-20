@@ -1,11 +1,11 @@
 use indoc::indoc;
 use mpatch::{
     apply_hunk_to_lines, apply_patch_to_file, apply_patch_to_lines, apply_patches_to_dir,
-    detect_patch, find_hunk_location, find_hunk_location_in_lines, parse_auto, parse_diffs,
-    parse_patches, parse_patches_from_lines, patch_content_str, try_apply_patch_to_content,
-    try_apply_patch_to_file, try_apply_patch_to_lines, ApplyOptions, DefaultHunkFinder, Hunk,
-    HunkApplyError, HunkApplyStatus, HunkFinder, HunkLocation, MatchType, ParseError, Patch,
-    PatchError, PatchFormat, StrictApplyError, invert_patches,
+    detect_patch, find_hunk_location, find_hunk_location_in_lines, invert_patches, parse_auto,
+    parse_diffs, parse_patches, parse_patches_from_lines, patch_content_str,
+    try_apply_patch_to_content, try_apply_patch_to_file, try_apply_patch_to_lines, ApplyOptions,
+    DefaultHunkFinder, Hunk, HunkApplyError, HunkApplyStatus, HunkFinder, HunkLocation, MatchType,
+    ParseError, Patch, PatchError, PatchFormat, StrictApplyError,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -4078,7 +4078,8 @@ fn test_conflict_markers_missing_separator() {
 
 #[test]
 fn test_conflict_markers_missing_start() {
-    // ==== without <<<< means pure addition (if we treat ==== as start of new)
+    // ==== without <<<< is not considered a valid conflict marker
+    // to prevent false positives with Markdown headers.
     let diff = indoc! {r#"
         ```diff
         ====
@@ -4087,9 +4088,7 @@ fn test_conflict_markers_missing_start() {
         ```
     "#};
     let patches = parse_diffs(diff).unwrap();
-    let hunk = &patches[0].hunks[0];
-    assert!(hunk.removed_lines().is_empty());
-    assert_eq!(hunk.added_lines(), vec!["add me"]);
+    assert!(patches.is_empty());
 }
 
 #[test]
@@ -4917,8 +4916,8 @@ mod fuzzy_logic_edge_cases {
 
         let content = fs::read_to_string(&file_path).unwrap();
         // Context lines (body {, color: red;, }) should keep tabs.
-        // The changed line comes from patch, so it will have spaces.
-        let expected = "body {\n\tcolor: red;\n    background: black;\n}\n";
+        // The changed line comes from patch, and its indentation is dynamically adjusted to match the target file (tabs).
+        let expected = "body {\n\tcolor: red;\n\tbackground: black;\n}\n";
         assert_eq!(content, expected);
     }
 
@@ -5855,9 +5854,184 @@ fn test_complex_apply_and_reverse_cycle() {
 
     // 5. Apply Reversed Patch (Backward)
     let result_rev = apply_patch_to_file(&reversed_patches[0], dir.path(), options).unwrap();
-    assert!(result_rev.report.all_applied_cleanly(), "Reverse patch failed");
+    assert!(
+        result_rev.report.all_applied_cleanly(),
+        "Reverse patch failed"
+    );
 
     // 6. Verify Restoration
     let restored_content = fs::read_to_string(&file_path).unwrap();
-    assert_eq!(restored_content, original_content, "Reverse patch did not restore original content exactly");
+    assert_eq!(
+        restored_content, original_content,
+        "Reverse patch did not restore original content exactly"
+    );
+}
+
+#[test]
+fn test_newline_only_file_preservation() {
+    // Tests the fix where a file intended to be exactly one newline
+    // was being truncated to 0 bytes.
+    let original = "content\n";
+    let diff = indoc! {r#"
+        ```diff
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1 +1 @@
+        -content
+        +
+        ```
+    "#};
+
+    let options = ApplyOptions::new();
+    let result = patch_content_str(diff, Some(original), &options).unwrap();
+
+    // Result should be exactly one newline, not an empty string.
+    assert_eq!(result, "\n");
+    assert_eq!(result.len(), 1);
+}
+
+#[test]
+fn test_conflict_marker_detection_false_positive_markdown_header() {
+    // Verifies that a Markdown H1 header (text followed by ====)
+    // is NOT detected as a conflict marker patch.
+    let content = indoc! {r#"
+        My Document Title
+        =================
+        
+        This is just a normal markdown file.
+    "#};
+
+    assert_eq!(detect_patch(content), PatchFormat::Unknown);
+
+    let patches = parse_auto(content).unwrap();
+    assert!(
+        patches.is_empty(),
+        "Should not have found patches in a standard MD header"
+    );
+}
+
+#[test]
+fn test_conflict_marker_detection_requires_start_and_end() {
+    // Verifies that we need both <<<< and (==== or >>>>) to trigger detection.
+    let only_start = "<<<< Just some text";
+    assert_eq!(detect_patch(only_start), PatchFormat::Unknown);
+
+    let valid_conflict = "<<<<\nold\n>>>>";
+    assert_eq!(detect_patch(valid_conflict), PatchFormat::Conflict);
+}
+
+#[test]
+fn test_smart_indentation_tabs_to_tabs() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("tabs.py");
+
+    // Target file uses TABS
+    let original_content = "def main():\n\tprint(\"hello\")\n";
+    fs::write(&file_path, original_content).unwrap();
+
+    // Patch uses SPACES (e.g. from an LLM or web snippet)
+    let diff = indoc! {r#"
+        ```diff
+        --- a/tabs.py
+        +++ b/tabs.py
+        @@ -1,2 +1,3 @@
+         def main():
+             print("hello")
+        +    print("world")
+        ```
+    "#};
+
+    let patches = parse_diffs(diff).unwrap();
+    let options = ApplyOptions::new();
+    apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+    let content = fs::read_to_string(&file_path).unwrap();
+
+    // The added line should have been converted to use a TAB to match the file style.
+    let expected = "def main():\n\tprint(\"hello\")\n\tprint(\"world\")\n";
+    assert_eq!(
+        content, expected,
+        "Indentation should have converted spaces to tabs"
+    );
+}
+
+#[test]
+fn test_parse_empty_hunk_header_allowed() {
+    // The changelog mentions support for empty hunks (@@ -0,0 +0,0 @@).
+    // This test ensures the parser doesn't skip them.
+    let diff = indoc! {r#"
+        --- a/empty_hunk.txt
+        +++ b/empty_hunk.txt
+        @@ -0,0 +0,0 @@
+    "#};
+
+    let patches = parse_auto(diff).unwrap();
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].hunks.len(), 1);
+    assert!(patches[0].hunks[0].lines.is_empty());
+}
+
+#[test]
+fn test_markdown_fence_indentation_strictness() {
+    // A closing fence must not be more indented than the opening fence.
+    // This prevents a context line that happens to start with ``` from
+    // prematurely closing the patch block.
+    let diff = indoc! {r#"
+        ```diff
+        --- a/code.md
+        +++ b/code.md
+        @@ -1,3 +1,3 @@
+         Some text
+             ```
+         More text
+        ```
+    "#};
+
+    let patches = parse_diffs(diff).unwrap();
+    assert_eq!(patches.len(), 1);
+    let hunk = &patches[0].hunks[0];
+
+    // The indented ``` should be treated as a context line.
+    assert!(hunk.lines.iter().any(|l| l == "     ```"));
+    assert!(hunk.lines.iter().any(|l| l == " More text"));
+}
+
+#[test]
+fn test_conflict_marker_pure_deletion_no_separator() {
+    // Tests a conflict marker block that only has <<<< and >>>> (no ====).
+    // This should be interpreted as a pure deletion.
+    let original = "line 1\nline 2\nline 3\n";
+    let diff = indoc! {r#"
+        line 1
+        <<<<
+        line 2
+        >>>>
+        line 3
+    "#};
+
+    let options = ApplyOptions::new();
+    let result = patch_content_str(diff, Some(original), &options).unwrap();
+
+    assert_eq!(result, "line 1\nline 3\n");
+}
+
+#[test]
+fn test_apply_patch_to_empty_file_resulting_in_newline() {
+    // Test creating a file that consists of exactly one newline.
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("newline.txt");
+
+    let diff = indoc! {r#"
+        --- /dev/null
+        +++ b/newline.txt
+        @@ -0,0 +1 @@
+        +
+    "#};
+
+    let patches = parse_auto(diff).unwrap();
+    apply_patch_to_file(&patches[0], dir.path(), ApplyOptions::new()).unwrap();
+
+    let content = fs::read_to_string(file_path).unwrap();
+    assert_eq!(content, "\n");
 }

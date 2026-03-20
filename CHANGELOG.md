@@ -15,9 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 -   **Patch Application:** Fixed a bug where a trailing newline was incorrectly added to files lacking one, even if the patch only modified lines at the beginning or middle of the file. The original newline status is now preserved unless the patch explicitly modifies the end of the file.
+-   **Patch Application:** Fixed a bug where files resulting in exactly one newline (e.g., replacing all content with a single empty line) were incorrectly truncated to 0 bytes.
 -   **Parser:** Fixed handling of the `\ No newline at end of file` marker. It now correctly verifies that the marker immediately follows a context or addition line.
 -   **Parser:** Fixed parsing of empty hunks (e.g., `@@ -0,0 +0,0 @@`) which were previously ignored.
 -   **Parser:** Fixed a bug where a context line in a diff that looks like a closing fence (e.g., ` ``` `) would incorrectly terminate the markdown code block. The parser now enforces that a closing fence must not be more indented than the opening fence.
+-   **Parser:** Improved Conflict Marker detection to prevent false positives from Markdown H1 headers (lines of `====`). Detection now strictly requires a start marker (`<<<<`) followed by a middle (`====`) or end (`>>>>`) marker.
+-   **CLI:** Fixed formatting in the debug report (`-vvvv`) where final summary logs were appended outside the markdown code block, breaking the report structure.
 
 ### Added
 
@@ -29,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 -   **Patch Application:** Files are now automatically deleted if the patch application results in empty content.
+-   **Internal:** Refactored debug report finalization to be more robust and prevent redundant file locking.
 
 ## [1.3.5] - 2025-12-28
 

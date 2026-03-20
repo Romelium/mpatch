@@ -2419,6 +2419,8 @@ pub fn detect_patch(content: &str) -> PatchFormat {
     let mut in_code_block = false;
     let mut current_fence_len = 0;
     let mut has_unified_headers = false;
+    let mut has_conflict_start = false;
+    let mut has_conflict_middle_or_end = false;
     let mut has_conflict_markers = false;
 
     while let Some(line) = lines.next() {
@@ -2457,11 +2459,14 @@ pub fn detect_patch(content: &str) -> PatchFormat {
 
         // Check for Conflict Markers
         let trimmed = line.trim_start();
-        let is_conflict = trimmed.starts_with("<<<<")
-            || trimmed.starts_with("====")
-            || trimmed.starts_with(">>>>");
+        if trimmed.starts_with("<<<<") {
+            has_conflict_start = true;
+        } else if (trimmed.starts_with("====") || trimmed.starts_with(">>>>")) && has_conflict_start
+        {
+            has_conflict_middle_or_end = true;
+        }
 
-        if is_conflict {
+        if has_conflict_start && has_conflict_middle_or_end {
             if in_code_block {
                 return PatchFormat::Markdown;
             }
@@ -3164,7 +3169,8 @@ where
     I: Iterator<Item = &'a str>,
 {
     let mut hunk_lines = Vec::new();
-    let mut has_markers = false;
+    let mut has_start = false;
+    let mut has_middle_or_end = false;
 
     enum State {
         Context,
@@ -3176,15 +3182,19 @@ where
     for line in lines {
         if line.trim_start().starts_with("<<<<") {
             state = State::Old;
-            has_markers = true;
+            has_start = true;
             continue;
         } else if line.trim_start().starts_with("====") {
             state = State::New;
-            has_markers = true;
+            if has_start {
+                has_middle_or_end = true;
+            }
             continue;
         } else if line.trim_start().starts_with(">>>>") {
             state = State::Context;
-            has_markers = true;
+            if has_start {
+                has_middle_or_end = true;
+            }
             continue;
         }
 
@@ -3195,7 +3205,7 @@ where
         }
     }
 
-    if !has_markers {
+    if !(has_start && has_middle_or_end) {
         return Vec::new();
     }
 
@@ -3890,7 +3900,7 @@ impl<'a> HunkApplier<'a> {
             self.original_ends_with_newline
         };
 
-        if should_have_newline && !new_content.is_empty() {
+        if should_have_newline && !self.current_lines.is_empty() {
             new_content.push('\n');
         }
         new_content
@@ -4376,7 +4386,10 @@ fn adjust_indentation(line: &str, hunk_indent: &str, target_indent: &str) -> Str
         format!("{}{}", diff, line)
     } else {
         // Indentation styles differ completely (e.g. tabs vs spaces).
-        // We cannot safely determine how to adjust without risking corruption. Return as is.
+        // If the line starts with the hunk's indentation, we can attempt a swap.
+        if !hunk_indent.is_empty() && line.starts_with(hunk_indent) {
+            return format!("{}{}", target_indent, &line[hunk_indent.len()..]);
+        }
         line.to_string()
     }
 }
