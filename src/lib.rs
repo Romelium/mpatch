@@ -2230,9 +2230,9 @@ impl Patch {
     /// assert!(patch.is_creation());
     /// ````
     pub fn is_creation(&self) -> bool {
-        self.hunks
-            .first()
-            .is_some_and(|h| h.get_match_block().is_empty())
+        self.hunks.first().is_some_and(|h| {
+            h.old_start_line == Some(0) || h.get_match_block().is_empty()
+        })
     }
 
     /// Checks if the patch represents a full file deletion.
@@ -2259,7 +2259,10 @@ impl Patch {
     /// assert!(patch.is_deletion());
     /// ````
     pub fn is_deletion(&self) -> bool {
-        !self.hunks.is_empty() && self.hunks.iter().all(|h| h.get_replace_block().is_empty())
+        !self.hunks.is_empty()
+            && self.hunks.iter().all(|h| {
+                h.new_start_line == Some(0) || h.get_replace_block().is_empty()
+            })
     }
 }
 
@@ -2967,26 +2970,40 @@ where
     let mut current_hunk_new_start_line: Option<usize> = None;
     let mut ends_with_newline_for_section = true;
 
+    macro_rules! finalize_hunk {
+        () => {
+            if current_hunk_old_start_line.is_some() {
+                trace!(
+                    "    Finalizing previous hunk with {} lines.",
+                    current_hunk_lines.len()
+                );
+                // Strip trailing empty context lines (often artifacts of spacing between diffs)
+                while let Some(last) = current_hunk_lines.last() {
+                    if last.trim().is_empty() {
+                        current_hunk_lines.pop();
+                    } else {
+                        break;
+                    }
+                }
+                current_hunks.push(Hunk {
+                    lines: std::mem::replace(
+                        &mut current_hunk_lines,
+                        Vec::with_capacity(HUNK_BUFFER_CAPACITY),
+                    ),
+                    old_start_line: current_hunk_old_start_line,
+                    new_start_line: current_hunk_new_start_line,
+                });
+            }
+        };
+    }
+
     for (line_idx, line) in lines.enumerate() {
         if let Some(stripped_line) = line.strip_prefix("--- ") {
             trace!("  Found file header line: '{}'", line);
             // A `---` line always signals a new file section.
             // Finalize the previous file's patch section if it exists.
             if let Some(existing_file) = &current_file {
-                if current_hunk_old_start_line.is_some() {
-                    trace!(
-                        "    Finalizing previous hunk with {} lines.",
-                        current_hunk_lines.len()
-                    );
-                    current_hunks.push(Hunk {
-                        lines: std::mem::replace(
-                            &mut current_hunk_lines,
-                            Vec::with_capacity(HUNK_BUFFER_CAPACITY),
-                        ),
-                        old_start_line: current_hunk_old_start_line,
-                        new_start_line: current_hunk_new_start_line,
-                    });
-                }
+                finalize_hunk!();
                 if !current_hunks.is_empty() {
                     debug!(
                         "  Finalizing patch section for '{}' with {} hunk(s).",
@@ -3028,20 +3045,7 @@ where
             }
         } else if line.starts_with("@@") {
             trace!("  Found hunk header: '{}'", line);
-            if current_hunk_old_start_line.is_some() {
-                trace!(
-                    "    Finalizing previous hunk with {} lines.",
-                    current_hunk_lines.len()
-                );
-                current_hunks.push(Hunk {
-                    lines: std::mem::replace(
-                        &mut current_hunk_lines,
-                        Vec::with_capacity(HUNK_BUFFER_CAPACITY),
-                    ),
-                    old_start_line: current_hunk_old_start_line,
-                    new_start_line: current_hunk_new_start_line,
-                });
-            }
+            finalize_hunk!();
             if first_hunk_header_line.is_none() {
                 first_hunk_header_line = Some(line_idx + 1);
             }
@@ -3078,17 +3082,7 @@ where
 
     // Finalize the last hunk and patch section after the loop.
     debug!("  End of diff block. Finalizing last hunk and patch section.");
-    if current_hunk_old_start_line.is_some() {
-        trace!(
-            "    Finalizing final hunk with {} lines.",
-            current_hunk_lines.len()
-        );
-        current_hunks.push(Hunk {
-            lines: current_hunk_lines,
-            old_start_line: current_hunk_old_start_line,
-            new_start_line: current_hunk_new_start_line,
-        });
-    }
+    finalize_hunk!();
 
     if let Some(file_path) = current_file {
         if !current_hunks.is_empty() {

@@ -2287,7 +2287,7 @@ fn test_apply_patch_at_end_of_file_with_fuzz_and_missing_context() {
         "Patch should apply via end-of-file fuzzy logic"
     );
     let content = fs::read_to_string(file_path).unwrap();
-    let expected_content = "fn main() {\n    println!(\"Hello\");\n}\n    println!(\"World\");\n\n";
+    let expected_content = "fn main() {\n    println!(\"Hello\");\n}\n    println!(\"World\");\n";
     assert_eq!(content, expected_content);
 }
 
@@ -6034,4 +6034,34 @@ fn test_apply_patch_to_empty_file_resulting_in_newline() {
 
     let content = fs::read_to_string(file_path).unwrap();
     assert_eq!(content, "\n");
+}
+
+#[test]
+fn test_multiple_file_creations_with_empty_lines_between() {
+    let diff = indoc! {r#"
+        --- /dev/null
+        +++ b/file1.txt
+        @@ -0,0 +1,2 @@
+        +content 1
+        +content 2
+
+        --- /dev/null
+        +++ b/file2.txt
+        @@ -0,0 +1,2 @@
+        +content 3
+        +content 4
+    "#};
+
+    let patches = parse_patches(diff).unwrap();
+    assert_eq!(patches.len(), 2);
+    
+    assert!(patches[0].is_creation());
+    assert_eq!(patches[0].file_path.to_str().unwrap(), "file1.txt");
+    assert_eq!(patches[0].hunks[0].added_lines(), vec!["content 1", "content 2"]);
+    // The trailing empty line should be stripped, so context_lines should be empty
+    assert!(patches[0].hunks[0].context_lines().is_empty());
+
+    assert!(patches[1].is_creation());
+    assert_eq!(patches[1].file_path.to_str().unwrap(), "file2.txt");
+    assert_eq!(patches[1].hunks[0].added_lines(), vec!["content 3", "content 4"]);
 }

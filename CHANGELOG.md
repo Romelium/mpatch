@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+-   **Parser:** Fixed a bug where empty lines between file diffs (common in LLM outputs) were incorrectly absorbed as trailing context lines, breaking file creation and deletion detection.
+-   **API:** Made `Patch::is_creation()` and `Patch::is_deletion()` more robust by checking hunk header line numbers (e.g., `@@ -0,0 ...`).
+
 ## [1.4.0] - 2026-03-20
 
 ### Performance
