@@ -2230,9 +2230,9 @@ impl Patch {
     /// assert!(patch.is_creation());
     /// ````
     pub fn is_creation(&self) -> bool {
-        self.hunks.first().is_some_and(|h| {
-            h.old_start_line == Some(0) || h.get_match_block().is_empty()
-        })
+        self.hunks
+            .first()
+            .is_some_and(|h| h.old_start_line == Some(0) || h.get_match_block().is_empty())
     }
 
     /// Checks if the patch represents a full file deletion.
@@ -2260,9 +2260,10 @@ impl Patch {
     /// ````
     pub fn is_deletion(&self) -> bool {
         !self.hunks.is_empty()
-            && self.hunks.iter().all(|h| {
-                h.new_start_line == Some(0) || h.get_replace_block().is_empty()
-            })
+            && self
+                .hunks
+                .iter()
+                .all(|h| h.new_start_line == Some(0) || h.get_replace_block().is_empty())
     }
 }
 

@@ -6054,14 +6054,20 @@ fn test_multiple_file_creations_with_empty_lines_between() {
 
     let patches = parse_patches(diff).unwrap();
     assert_eq!(patches.len(), 2);
-    
+
     assert!(patches[0].is_creation());
     assert_eq!(patches[0].file_path.to_str().unwrap(), "file1.txt");
-    assert_eq!(patches[0].hunks[0].added_lines(), vec!["content 1", "content 2"]);
+    assert_eq!(
+        patches[0].hunks[0].added_lines(),
+        vec!["content 1", "content 2"]
+    );
     // The trailing empty line should be stripped, so context_lines should be empty
     assert!(patches[0].hunks[0].context_lines().is_empty());
 
     assert!(patches[1].is_creation());
     assert_eq!(patches[1].file_path.to_str().unwrap(), "file2.txt");
-    assert_eq!(patches[1].hunks[0].added_lines(), vec!["content 3", "content 4"]);
+    assert_eq!(
+        patches[1].hunks[0].added_lines(),
+        vec!["content 3", "content 4"]
+    );
 }
