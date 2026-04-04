@@ -188,7 +188,7 @@ fn log_failed_hunks(apply_result: &mpatch::ApplyResult, patch: &Patch) {
     author,
     version,
     about = "Apply diff hunks from a file to a target directory based on context, ignoring line numbers.",
-    long_about = "Uses fuzzy matching if exact context fails. Automatically detects and parses Unified Diffs, Markdown code blocks, and Conflict Markers."
+    long_about = "A high-resilience patching tool designed for LLM-generated code. It applies changes by searching for code context rather than relying on fragile line numbers. It automatically detects Unified Diffs and Markdown blocks. Note: Conflict Markers are supported but lack file path metadata."
 )]
 struct Args {
     /// Path to the input file containing the patch (Markdown, Unified Diff, or Conflict Markers).
