@@ -24,6 +24,15 @@ You ask an AI to refactor a function. It gives you a diff. However, you modified
 | <pre>fn main() {<br>    // I changed this comment<br>    println!("Hello");<br>}</pre> | <pre> fn main() {<br>     // Original comment<br>-    println!("Hello");<br>+    println!("World");<br> }</pre> | <pre>❌ Failed<br>Hunk #1 FAILED at 1.<br>1 out of 1 hunk FAILED</pre> | <pre>fn main() {<br>    // I changed this comment<br>    println!("World");<br>}</pre> |
 
 ---
+### Supported Input Formats
+
+`mpatch` automatically detects the format. You don't need to specify flags.
+
+1.  **Markdown Code Blocks:** Standard output from LLMs. Supports ` ```diff `, ` ```rust `, or even generic blocks if they contain diff headers.
+2.  **Unified Diffs:** Standard `git diff` or `diff -u` output.
+3.  **Conflict Markers (Limited):** Git-style markers (`<<<<`, `====`, `>>>>`). **Note:** These do not contain file paths and are best used for in-memory string patching.
+
+---
 
 ## Key Features
 
@@ -219,14 +228,14 @@ let reversed = invert_patches(&patches);
 
 ---
 
-## Supported Input Formats
+## A Note on Conflict Markers
 
-`mpatch` automatically detects the format. You don't need to specify flags.
+While `mpatch` supports parsing conflict markers (`<<<<`, `====`, `>>>>`), this format **does not contain file path information**. 
 
-1.  **Markdown Code Blocks:**
-    Standard output from LLMs. Supports ` ```diff `, ` ```rust `, or even generic blocks if they contain diff headers.
-2.  **Unified Diffs:**
-    Standard `git diff` or `diff -u` output.
+*   **CLI Usage:** If an input file contains only conflict markers, `mpatch` will attempt to apply them to a file named `patch_target` by default.
+*   **Library Usage:** This format is ideal for the `patch_content_str` function where you already have the target string in memory.
+
+For multi-file changes or CLI use, **Unified Diffs** (with `---` and `+++` headers) are the recommended format.
 
 ---
 
