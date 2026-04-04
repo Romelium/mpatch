@@ -359,6 +359,23 @@
 //! # }
 //! ````
 //!
+//! ### Creating Patches
+//!
+//! You can also use `mpatch` to generate patches by comparing two strings using
+//! [`Patch::from_texts()`].
+//!
+//! ````rust
+//! use mpatch::Patch;
+//!
+//! let old_text = "fn main() { println!(\"Old\"); }";
+//! let new_text = "fn main() { println!(\"New\"); }";
+//!
+//! // Create a patch with 3 lines of context
+//! let patch = Patch::from_texts("src/main.rs", old_text, new_text, 3).unwrap();
+//!
+//! assert_eq!(patch.hunks.len(), 1);
+//! ````
+//!
 //! ## Feature Flags
 //!
 //! `mpatch` includes the following optional features:
@@ -399,7 +416,7 @@ use thiserror::Error;
 /// Note that [`parse_diffs()`] is lenient and will typically skip blocks that do
 /// not look like valid patches rather than returning this error.
 ///
-/// # Example
+/// # Examples
 ///
 /// ````rust
 /// use mpatch::{parse_patches, ParseError};
@@ -419,9 +436,26 @@ use thiserror::Error;
 pub enum ParseError {
     /// A diff block or raw patch was found, but it was missing the `--- a/path/to/file`
     /// header required to identify the target file.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mpatch::ParseError;
+    /// let err = ParseError::MissingFileHeader { line: 10 };
+    /// ```
     #[error("Diff block starting on line {line} was found without a file path header (e.g., '--- a/path/to/file')")]
     MissingFileHeader {
         /// The line number where the diff block started.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use mpatch::ParseError;
+        /// let err = ParseError::MissingFileHeader { line: 10 };
+        /// match err {
+        ///     ParseError::MissingFileHeader { line } => assert_eq!(line, 10),
+        /// }
+        /// ```
         line: usize,
     },
 }
@@ -432,7 +466,7 @@ pub enum ParseError {
 /// result in exactly one `Patch` object. It handles errors from format detection,
 /// parsing, and patch count validation.
 ///
-/// # Example
+/// # Examples
 ///
 /// ````rust
 /// use mpatch::{parse_single_patch, SingleParseError};
@@ -460,16 +494,37 @@ pub enum ParseError {
 #[non_exhaustive]
 pub enum SingleParseError {
     /// An error occurred during the underlying diff parsing.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mpatch::{SingleParseError, ParseError};
+    /// let err = SingleParseError::Parse(ParseError::MissingFileHeader { line: 1 });
+    /// ```
     #[error("Failed to parse diff content")]
     Parse(#[from] ParseError),
 
     /// The provided diff content did not contain any valid patches (Markdown blocks,
     /// Unified Diffs, or Conflict Markers).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mpatch::SingleParseError;
+    /// let err = SingleParseError::NoPatchesFound;
+    /// ```
     #[error("No patches were found in the provided diff content")]
     NoPatchesFound,
 
     /// The provided diff content contained patches for more than one file, which is not
     /// supported by this function. Use [`parse_diffs()`] for multi-file operations.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mpatch::SingleParseError;
+    /// let err = SingleParseError::MultiplePatchesFound(3);
+    /// ```
     #[error(
         "Found patches for multiple files ({0} patches), but this function only supports single-file diffs"
     )]
@@ -483,7 +538,7 @@ pub enum SingleParseError {
 /// violations like path traversal. It is distinct from a partial apply, which
 /// is handled by the result structs.
 ///
-/// # Example
+/// # Examples
 ///
 /// ````rust
 /// # use mpatch::{parse_single_patch, apply_patch_to_file, ApplyOptions, PatchError};
@@ -516,23 +571,122 @@ pub enum PatchError {
     /// The patch attempted to access a path outside the target directory.
     /// This is a security measure to prevent malicious patches from modifying
     /// unintended files (e.g., `--- a/../../etc/passwd`).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mpatch::PatchError;
+    /// use std::path::PathBuf;
+    /// let err = PatchError::PathTraversal(PathBuf::from("../../etc/passwd"));
+    /// ```
     #[error("Path '{0}' resolves outside the target directory. Aborting for security.")]
     PathTraversal(PathBuf),
     /// The target file for a patch could not be found, and the patch did not
     /// appear to be for file creation (i.e., its first hunk was not an addition-only hunk).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mpatch::PatchError;
+    /// use std::path::PathBuf;
+    /// let err = PatchError::TargetNotFound(PathBuf::from("missing.txt"));
+    /// ```
     #[error("Target file not found for patching: {0}")]
     TargetNotFound(PathBuf),
     /// The user does not have permission to read or write to the specified path.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mpatch::PatchError;
+    /// use std::path::PathBuf;
+    /// let err = PatchError::PermissionDenied { path: PathBuf::from("readonly.txt") };
+    /// ```
     #[error("Permission denied for path: {path:?}")]
-    PermissionDenied { path: PathBuf },
+    PermissionDenied {
+        /// The path that could not be accessed.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use mpatch::PatchError;
+        /// use std::path::PathBuf;
+        /// let err = PatchError::PermissionDenied { path: PathBuf::from("readonly.txt") };
+        /// match err {
+        ///     PatchError::PermissionDenied { path } => assert_eq!(path.to_str(), Some("readonly.txt")),
+        ///     _ => unreachable!(),
+        /// }
+        /// ```
+        path: PathBuf,
+    },
     /// The target path for a patch exists but is a directory, not a file.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mpatch::PatchError;
+    /// use std::path::PathBuf;
+    /// let err = PatchError::TargetIsDirectory { path: PathBuf::from("src/") };
+    /// ```
     #[error("Target path is a directory, not a file: {path:?}")]
-    TargetIsDirectory { path: PathBuf },
+    TargetIsDirectory {
+        /// The path that resolved to a directory.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use mpatch::PatchError;
+        /// use std::path::PathBuf;
+        /// let err = PatchError::TargetIsDirectory { path: PathBuf::from("src/") };
+        /// match err {
+        ///     PatchError::TargetIsDirectory { path } => assert_eq!(path.to_str(), Some("src/")),
+        ///     _ => unreachable!(),
+        /// }
+        /// ```
+        path: PathBuf,
+    },
     /// An I/O error occurred while reading or writing a file.
     /// This is a "hard" error that stops the entire process.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mpatch::PatchError;
+    /// use std::path::PathBuf;
+    /// use std::io::{Error, ErrorKind};
+    /// let err = PatchError::Io { path: PathBuf::from("file.txt"), source: Error::new(ErrorKind::Other, "oh no") };
+    /// ```
     #[error("I/O error while processing {path:?}: {source}")]
     Io {
+        /// The path associated with the I/O error.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use mpatch::PatchError;
+        /// use std::path::PathBuf;
+        /// use std::io::{Error, ErrorKind};
+        /// let err = PatchError::Io { path: PathBuf::from("file.txt"), source: Error::new(ErrorKind::Other, "oh no") };
+        /// match err {
+        ///     PatchError::Io { path, .. } => assert_eq!(path.to_str(), Some("file.txt")),
+        ///     _ => unreachable!(),
+        /// }
+        /// ```
         path: PathBuf,
+        /// The underlying I/O error.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use mpatch::PatchError;
+        /// use std::path::PathBuf;
+        /// use std::io::{Error, ErrorKind};
+        /// let err = PatchError::Io { path: PathBuf::from("file.txt"), source: Error::new(ErrorKind::Other, "oh no") };
+        /// match err {
+        ///     PatchError::Io { source, .. } => assert_eq!(source.kind(), ErrorKind::Other),
+        ///     _ => unreachable!(),
+        /// }
+        /// ```
         #[source]
         source: std::io::Error,
     },
@@ -545,7 +699,7 @@ pub enum PatchError {
 /// It consolidates hard failures ([`PatchError`]) and soft failures ([`StrictApplyError::PartialApply`])
 /// into a single error type for easier handling in apply-or-fail workflows.
 ///
-/// # Example
+/// # Examples
 ///
 /// ````rust
 /// use mpatch::{parse_single_patch, try_apply_patch_to_content, ApplyOptions, StrictApplyError};
@@ -581,13 +735,41 @@ pub enum PatchError {
 pub enum StrictApplyError {
     /// A hard error occurred during the patch operation (e.g., I/O error,
     /// file not found).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mpatch::{StrictApplyError, PatchError};
+    /// use std::path::PathBuf;
+    /// let err = StrictApplyError::Patch(PatchError::TargetNotFound(PathBuf::from("file.txt")));
+    /// ```
     #[error(transparent)]
     Patch(#[from] PatchError),
 
     /// The patch was only partially applied, with some hunks failing.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mpatch::{StrictApplyError, ApplyResult};
+    /// let report = ApplyResult { hunk_results: vec![] };
+    /// let err = StrictApplyError::PartialApply { report };
+    /// ```
     #[error("Patch applied partially. See report for details.")]
     PartialApply {
         /// The detailed report of the operation, including which hunks succeeded/failed.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use mpatch::{StrictApplyError, ApplyResult};
+        /// let report = ApplyResult { hunk_results: vec![] };
+        /// let err = StrictApplyError::PartialApply { report };
+        /// match err {
+        ///     StrictApplyError::PartialApply { report } => assert!(report.all_applied_cleanly()),
+        ///     _ => unreachable!(),
+        /// }
+        /// ```
         report: ApplyResult,
     },
 }
@@ -598,7 +780,7 @@ pub enum StrictApplyError {
 /// including parsing errors, finding the wrong number of patches, or failures
 /// during the strict application process.
 ///
-/// # Example
+/// # Examples
 ///
 /// ````rust
 /// use mpatch::{patch_content_str, ApplyOptions, OneShotError};
@@ -628,21 +810,50 @@ pub enum StrictApplyError {
 #[non_exhaustive]
 pub enum OneShotError {
     /// An error occurred while parsing the diff content.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mpatch::{OneShotError, ParseError};
+    /// let err = OneShotError::Parse(ParseError::MissingFileHeader { line: 1 });
+    /// ```
     #[error("Failed to parse diff content")]
     Parse(#[from] ParseError),
 
     /// An error occurred while applying the patch. This includes partial applications.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mpatch::{OneShotError, StrictApplyError, PatchError};
+    /// use std::path::PathBuf;
+    /// let err = OneShotError::Apply(StrictApplyError::Patch(PatchError::TargetNotFound(PathBuf::from("file.txt"))));
+    /// ```
     #[error("Failed to apply patch")]
     Apply(#[from] StrictApplyError),
 
     /// The provided diff content did not contain any valid patches (Markdown blocks,
     /// Unified Diffs, or Conflict Markers).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mpatch::OneShotError;
+    /// let err = OneShotError::NoPatchesFound;
+    /// ```
     #[error("No patches were found in the provided diff content")]
     NoPatchesFound,
 
     /// The provided diff content contained patches for more than one file, which is not
     /// supported by this simplified function. Use [`parse_diffs()`] and
     /// [`apply_patches_to_dir()`] for multi-file operations.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mpatch::OneShotError;
+    /// let err = OneShotError::MultiplePatchesFound(2);
+    /// ```
     #[error(
         "Found patches for multiple files ({0} files), but this function only supports single-file diffs"
     )]
@@ -654,7 +865,7 @@ pub enum OneShotError {
 /// This enum provides specific details about why a hunk could not be applied to the
 /// target content. It is found within the [`HunkApplyStatus::Failed`] variant.
 ///
-/// # Example
+/// # Examples
 ///
 /// ````rust
 /// use mpatch::{apply_patch_to_content, parse_single_patch, ApplyOptions, HunkApplyStatus, HunkApplyError};
@@ -687,22 +898,85 @@ pub enum OneShotError {
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum HunkApplyError {
     /// The context lines for the hunk could not be found in the target file.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mpatch::HunkApplyError;
+    /// let err = HunkApplyError::ContextNotFound;
+    /// ```
     #[error("Context not found")]
     ContextNotFound,
     /// An exact match for the hunk's context was found in multiple locations,
     /// and the ambiguity could not be resolved by the line number hint.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mpatch::HunkApplyError;
+    /// let err = HunkApplyError::AmbiguousExactMatch(vec![10, 20]);
+    /// ```
     #[error("Ambiguous exact match found at lines: {0:?}")]
     AmbiguousExactMatch(Vec<usize>),
     /// A fuzzy match for the hunk's context was found in multiple locations with
     /// the same top score, and the ambiguity could not be resolved.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mpatch::HunkApplyError;
+    /// let err = HunkApplyError::AmbiguousFuzzyMatch(vec![(5, 3), (15, 3)]);
+    /// ```
     #[error("Ambiguous fuzzy match found at locations: {0:?}")]
     AmbiguousFuzzyMatch(Vec<(usize, usize)>),
     /// The best fuzzy match found was below the required similarity threshold.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mpatch::{HunkApplyError, HunkLocation};
+    /// let err = HunkApplyError::FuzzyMatchBelowThreshold { best_score: 0.5, threshold: 0.7, location: HunkLocation { start_index: 0, length: 5 } };
+    /// ```
     #[error("Best fuzzy match at {location} (score: {best_score:.3}) was below threshold ({threshold:.3})")]
     FuzzyMatchBelowThreshold {
+        /// The similarity score of the best match found.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use mpatch::{HunkApplyError, HunkLocation};
+        /// let err = HunkApplyError::FuzzyMatchBelowThreshold { best_score: 0.5, threshold: 0.7, location: HunkLocation { start_index: 0, length: 5 } };
+        /// match err {
+        ///     HunkApplyError::FuzzyMatchBelowThreshold { best_score, .. } => assert_eq!(best_score, 0.5),
+        ///     _ => unreachable!(),
+        /// }
+        /// ```
         best_score: f64,
+        /// The minimum similarity score required for a successful match.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use mpatch::{HunkApplyError, HunkLocation};
+        /// let err = HunkApplyError::FuzzyMatchBelowThreshold { best_score: 0.5, threshold: 0.7, location: HunkLocation { start_index: 0, length: 5 } };
+        /// match err {
+        ///     HunkApplyError::FuzzyMatchBelowThreshold { threshold, .. } => assert_eq!(threshold, 0.7),
+        ///     _ => unreachable!(),
+        /// }
+        /// ```
         threshold: f32,
         /// The location of the best-scoring (but rejected) fuzzy match.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use mpatch::{HunkApplyError, HunkLocation};
+        /// let err = HunkApplyError::FuzzyMatchBelowThreshold { best_score: 0.5, threshold: 0.7, location: HunkLocation { start_index: 0, length: 5 } };
+        /// match err {
+        ///     HunkApplyError::FuzzyMatchBelowThreshold { location, .. } => assert_eq!(location.length, 5),
+        ///     _ => unreachable!(),
+        /// }
+        /// ```
         location: HunkLocation,
     },
 }
@@ -713,7 +987,7 @@ pub enum HunkApplyError {
 /// insight into how `mpatch` found the location for a hunk, which is useful for
 /// logging and diagnostics.
 ///
-/// # Example
+/// # Examples
 ///
 /// ````rust
 /// use mpatch::{apply_patch_to_content, parse_single_patch, ApplyOptions, HunkApplyStatus, MatchType};
@@ -744,12 +1018,44 @@ pub enum HunkApplyError {
 #[derive(Debug, Clone, PartialEq)]
 pub enum MatchType {
     /// An exact, character-for-character match of the context/deletion lines.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mpatch::MatchType;
+    /// let match_type = MatchType::Exact;
+    /// ```
     Exact,
     /// An exact match after ignoring trailing whitespace on each line.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mpatch::MatchType;
+    /// let match_type = MatchType::ExactIgnoringWhitespace;
+    /// ```
     ExactIgnoringWhitespace,
     /// A fuzzy match found using a similarity algorithm.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mpatch::MatchType;
+    /// let match_type = MatchType::Fuzzy { score: 0.85 };
+    /// ```
     Fuzzy {
         /// The similarity score of the match (0.0 to 1.0).
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use mpatch::MatchType;
+        /// let match_type = MatchType::Fuzzy { score: 0.85 };
+        /// match match_type {
+        ///     MatchType::Fuzzy { score } => assert_eq!(score, 0.85),
+        ///     _ => unreachable!(),
+        /// }
+        /// ```
         score: f64,
     },
 }
@@ -760,7 +1066,7 @@ pub enum MatchType {
 /// [`HunkApplier`] iterator. It provides a detailed outcome for each individual
 /// hunk within a patch.
 ///
-/// # Example
+/// # Examples
 ///
 /// ````rust
 /// use mpatch::{apply_hunk_to_lines, parse_single_patch, ApplyOptions, HunkApplyStatus, HunkApplyError};
@@ -796,17 +1102,87 @@ pub enum MatchType {
 #[derive(Debug, Clone, PartialEq)]
 pub enum HunkApplyStatus {
     /// The hunk was applied successfully.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mpatch::{HunkApplyStatus, HunkLocation, MatchType};
+    /// let status = HunkApplyStatus::Applied {
+    ///     location: HunkLocation { start_index: 0, length: 2 },
+    ///     match_type: MatchType::Exact,
+    ///     replaced_lines: vec!["old line".to_string()],
+    /// };
+    /// ```
     Applied {
         /// The location where the hunk was applied.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use mpatch::{HunkApplyStatus, HunkLocation, MatchType};
+        /// let status = HunkApplyStatus::Applied {
+        ///     location: HunkLocation { start_index: 0, length: 2 },
+        ///     match_type: MatchType::Exact,
+        ///     replaced_lines: vec!["old line".to_string()],
+        /// };
+        /// match status {
+        ///     HunkApplyStatus::Applied { location, .. } => assert_eq!(location.start_index, 0),
+        ///     _ => unreachable!(),
+        /// }
+        /// ```
         location: HunkLocation,
         /// The type of match that was used to find the location.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use mpatch::{HunkApplyStatus, HunkLocation, MatchType};
+        /// let status = HunkApplyStatus::Applied {
+        ///     location: HunkLocation { start_index: 0, length: 2 },
+        ///     match_type: MatchType::Exact,
+        ///     replaced_lines: vec!["old line".to_string()],
+        /// };
+        /// match status {
+        ///     HunkApplyStatus::Applied { match_type, .. } => assert!(matches!(match_type, MatchType::Exact)),
+        ///     _ => unreachable!(),
+        /// }
+        /// ```
         match_type: MatchType,
         /// The original lines that were replaced by the hunk.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use mpatch::{HunkApplyStatus, HunkLocation, MatchType};
+        /// let status = HunkApplyStatus::Applied {
+        ///     location: HunkLocation { start_index: 0, length: 2 },
+        ///     match_type: MatchType::Exact,
+        ///     replaced_lines: vec!["old line".to_string()],
+        /// };
+        /// match status {
+        ///     HunkApplyStatus::Applied { replaced_lines, .. } => assert_eq!(replaced_lines.len(), 1),
+        ///     _ => unreachable!(),
+        /// }
+        /// ```
         replaced_lines: Vec<String>,
     },
     /// The hunk was skipped because it contained no effective changes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mpatch::HunkApplyStatus;
+    /// let status = HunkApplyStatus::SkippedNoChanges;
+    /// ```
     SkippedNoChanges,
     /// The hunk failed to apply for the specified reason.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mpatch::{HunkApplyStatus, HunkApplyError};
+    /// let status = HunkApplyStatus::Failed(HunkApplyError::ContextNotFound);
+    /// ```
     Failed(HunkApplyError),
 }
 
@@ -821,7 +1197,7 @@ pub enum HunkApplyStatus {
 /// or the fluent [`with_dry_run()`](ApplyOptions::with_dry_run) and
 /// [`with_fuzz_factor()`](ApplyOptions::with_fuzz_factor) methods.
 ///
-/// # Example
+/// # Examples
 ///
 /// ```
 /// use mpatch::ApplyOptions;
@@ -852,7 +1228,7 @@ pub struct ApplyOptions {
     /// like [`apply_patch_to_file()`] will populate the `diff` field of the
     /// returned [`PatchResult`].
     ///
-    /// # Example
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::ApplyOptions;
@@ -867,6 +1243,17 @@ pub struct ApplyOptions {
     pub dry_run: bool,
     /// The similarity threshold for fuzzy matching (0.0 to 1.0).
     /// Higher is stricter. `0.0` disables fuzzy matching.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use mpatch::ApplyOptions;
+    /// let options = ApplyOptions {
+    ///     dry_run: false,
+    ///     fuzz_factor: 0.85,
+    /// };
+    /// assert_eq!(options.fuzz_factor, 0.85);
+    /// ```
     pub fuzz_factor: f32,
 }
 
@@ -876,7 +1263,11 @@ impl Default for ApplyOptions {
     /// This is the standard way to get a default configuration, which has `dry_run`
     /// set to `false` and `fuzz_factor` set to `0.7`.
     ///
-    /// # Example
+    /// # Returns
+    ///
+    /// A new [`ApplyOptions`] instance with default values.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::ApplyOptions;
@@ -898,7 +1289,11 @@ impl ApplyOptions {
     ///
     /// This is an alias for [`ApplyOptions::default()`].
     ///
-    /// # Example
+    /// # Returns
+    ///
+    /// A new [`ApplyOptions`] instance.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::ApplyOptions;
@@ -914,7 +1309,11 @@ impl ApplyOptions {
     ///
     /// All other options are set to their default values.
     ///
-    /// # Example
+    /// # Returns
+    ///
+    /// A new [`ApplyOptions`] instance.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::ApplyOptions;
@@ -933,7 +1332,11 @@ impl ApplyOptions {
     ///
     /// All other options are set to their default values.
     ///
-    /// # Example
+    /// # Returns
+    ///
+    /// A new [`ApplyOptions`] instance.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::ApplyOptions;
@@ -953,7 +1356,15 @@ impl ApplyOptions {
     ///
     /// This is a fluent method that allows for chaining.
     ///
-    /// # Example
+    /// # Arguments
+    ///
+    /// * `dry_run` - The boolean value to set.
+    ///
+    /// # Returns
+    ///
+    /// A new [`ApplyOptions`] instance with the updated setting.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::ApplyOptions;
@@ -972,7 +1383,15 @@ impl ApplyOptions {
     ///
     /// This is a fluent method that allows for chaining.
     ///
-    /// # Example
+    /// # Arguments
+    ///
+    /// * `fuzz_factor` - The float value to set.
+    ///
+    /// # Returns
+    ///
+    /// A new [`ApplyOptions`] instance with the updated setting.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::ApplyOptions;
@@ -993,7 +1412,11 @@ impl ApplyOptions {
     /// which can be useful when the configuration is built conditionally or comes from
     /// multiple sources.
     ///
-    /// # Example
+    /// # Returns
+    ///
+    /// A new [`ApplyOptionsBuilder`] instance.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::ApplyOptions;
@@ -1016,7 +1439,7 @@ impl ApplyOptions {
 /// which can be useful when the configuration is built conditionally or comes from
 /// multiple sources.
 ///
-/// # Example
+/// # Examples
 ///
 /// ```
 /// use mpatch::ApplyOptions;
@@ -1033,10 +1456,36 @@ impl ApplyOptions {
 /// assert_eq!(options.dry_run, true);
 /// assert_eq!(options.fuzz_factor, 0.8);
 /// ```
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct ApplyOptionsBuilder {
     dry_run: Option<bool>,
     fuzz_factor: Option<f32>,
+}
+
+impl Default for ApplyOptionsBuilder {
+    /// Creates a new, empty `ApplyOptionsBuilder`.
+    ///
+    /// All options are initially unset and will fall back to the defaults
+    /// defined in [`ApplyOptions::default()`] when `build()` is called.
+    ///
+    /// # Returns
+    ///
+    /// A new, empty [`ApplyOptionsBuilder`] instance.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mpatch::ApplyOptionsBuilder;
+    /// let builder = ApplyOptionsBuilder::default();
+    /// let options = builder.build();
+    /// assert_eq!(options.dry_run, false);
+    /// ```
+    fn default() -> Self {
+        Self {
+            dry_run: None,
+            fuzz_factor: None,
+        }
+    }
 }
 
 impl ApplyOptionsBuilder {
@@ -1046,7 +1495,15 @@ impl ApplyOptionsBuilder {
     /// changes will be generated and returned in [`PatchResult`]. This is useful
     /// for previewing changes before they are applied.
     ///
-    /// # Example
+    /// # Arguments
+    ///
+    /// * `dry_run` - The boolean value to set.
+    ///
+    /// # Returns
+    ///
+    /// The updated [`ApplyOptionsBuilder`] instance.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::ApplyOptions;
@@ -1067,7 +1524,15 @@ impl ApplyOptionsBuilder {
     /// to be considered a "fuzzy match". A higher value requires a closer match.
     /// Setting it to `0.0` disables fuzzy matching entirely, requiring an exact match.
     ///
-    /// # Example
+    /// # Arguments
+    ///
+    /// * `fuzz_factor` - The float value to set.
+    ///
+    /// # Returns
+    ///
+    /// The updated [`ApplyOptionsBuilder`] instance.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::ApplyOptions;
@@ -1086,7 +1551,11 @@ impl ApplyOptionsBuilder {
     /// Any options not explicitly set on the builder will fall back to their
     /// default values.
     ///
-    /// # Example
+    /// # Returns
+    ///
+    /// The finalized [`ApplyOptions`] instance.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::ApplyOptions;
@@ -1113,7 +1582,7 @@ impl ApplyOptionsBuilder {
 /// a detailed report of the outcome for each hunk and, if a dry run was performed,
 /// a diff of the proposed changes.
 ///
-/// # Example
+/// # Examples
 ///
 /// ````
 /// # use mpatch::{parse_single_patch, apply_patch_to_file, ApplyOptions};
@@ -1151,9 +1620,27 @@ impl ApplyOptionsBuilder {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PatchResult {
     /// Detailed results for each hunk within the patch operation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use mpatch::{PatchResult, ApplyResult};
+    /// # let result = PatchResult { report: ApplyResult { hunk_results: vec![] }, diff: None };
+    /// assert!(result.report.all_applied_cleanly());
+    /// ```
     pub report: ApplyResult,
     /// The unified diff of the proposed changes. This is only populated
     /// when `dry_run` was set to `true` in [`ApplyOptions`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use mpatch::{PatchResult, ApplyResult};
+    /// # let result = PatchResult { report: ApplyResult { hunk_results: vec![] }, diff: Some("--- a/file\n+++ b/file\n".to_string()) };
+    /// if let Some(diff_text) = &result.diff {
+    ///     println!("Proposed diff:\n{}", diff_text);
+    /// }
+    /// ```
     pub diff: Option<String>,
 }
 
@@ -1163,7 +1650,7 @@ pub struct PatchResult {
 /// [`apply_patch_to_lines()`]. It contains the newly generated content as a string,
 /// along with a detailed report of the outcome for each hunk.
 ///
-/// # Example
+/// # Examples
 ///
 /// ````rust
 /// # use mpatch::{parse_single_patch, apply_patch_to_content, ApplyOptions};
@@ -1191,8 +1678,24 @@ pub struct PatchResult {
 #[derive(Debug, Clone, PartialEq)]
 pub struct InMemoryResult {
     /// The new content after applying the patch.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use mpatch::{InMemoryResult, ApplyResult};
+    /// # let result = InMemoryResult { new_content: "new text\n".to_string(), report: ApplyResult { hunk_results: vec![] } };
+    /// assert_eq!(result.new_content, "new text\n");
+    /// ```
     pub new_content: String,
     /// Detailed results for each hunk within the patch operation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use mpatch::{InMemoryResult, ApplyResult};
+    /// # let result = InMemoryResult { new_content: String::new(), report: ApplyResult { hunk_results: vec![] } };
+    /// assert!(result.report.all_applied_cleanly());
+    /// ```
     pub report: ApplyResult,
 }
 
@@ -1203,7 +1706,7 @@ pub struct InMemoryResult {
 /// use its methods like [`all_applied_cleanly()`](Self::all_applied_cleanly) for a
 /// high-level summary or [`failures()`](Self::failures) to inspect specific issues.
 ///
-/// # Example
+/// # Examples
 ///
 /// ````rust
 /// # use mpatch::{parse_single_patch, apply_patch_to_content, ApplyOptions, HunkApplyError};
@@ -1237,6 +1740,14 @@ pub struct InMemoryResult {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ApplyResult {
     /// A list of statuses, one for each hunk in the original patch.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use mpatch::{ApplyResult, HunkApplyStatus};
+    /// # let report = ApplyResult { hunk_results: vec![HunkApplyStatus::SkippedNoChanges] };
+    /// assert_eq!(report.hunk_results.len(), 1);
+    /// ```
     pub hunk_results: Vec<HunkApplyStatus>,
 }
 
@@ -1245,7 +1756,7 @@ pub struct ApplyResult {
 /// This struct is returned by [`ApplyResult::failures()`] and provides a convenient
 /// way to inspect which hunk failed and for what reason.
 ///
-/// # Example
+    /// # Examples
 ///
 /// ````rust
 /// # use mpatch::{parse_single_patch, apply_patch_to_content, ApplyOptions, HunkApplyError, HunkFailure};
@@ -1277,8 +1788,24 @@ pub struct ApplyResult {
 #[derive(Debug, Clone, PartialEq)]
 pub struct HunkFailure {
     /// The 1-based index of the hunk that failed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use mpatch::{HunkFailure, HunkApplyError};
+    /// # let failure = HunkFailure { hunk_index: 1, reason: HunkApplyError::ContextNotFound };
+    /// assert_eq!(failure.hunk_index, 1);
+    /// ```
     pub hunk_index: usize,
     /// The reason for the failure.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use mpatch::{HunkFailure, HunkApplyError};
+    /// # let failure = HunkFailure { hunk_index: 1, reason: HunkApplyError::ContextNotFound };
+    /// assert!(matches!(failure.reason, HunkApplyError::ContextNotFound));
+    /// ```
     pub reason: HunkApplyError,
 }
 
@@ -1287,7 +1814,11 @@ impl ApplyResult {
     ///
     /// Returns `false` if any hunk failed to apply.
     ///
-    /// # Example
+    /// # Returns
+    ///
+    /// `true` if all hunks applied cleanly, `false` otherwise.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::{ApplyResult, HunkApplyStatus, HunkApplyError, HunkFailure, HunkLocation, MatchType};
@@ -1318,7 +1849,11 @@ impl ApplyResult {
     /// This provides a more convenient way to inspect failures than iterating
     /// through [`hunk_results`](Self::hunk_results) manually.
     ///
-    /// # Example
+    /// # Returns
+    ///
+    /// A vector of [`HunkFailure`] objects representing the failed hunks.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::{ApplyResult, HunkApplyStatus, HunkApplyError, HunkFailure, HunkLocation, MatchType};
@@ -1360,7 +1895,7 @@ impl ApplyResult {
 /// for each individual patch operation. It allows you to check for "hard" errors
 /// (like I/O issues) separately from "soft" errors (like a hunk failing to apply).
 ///
-/// # Example
+/// # Examples
 ///
 /// ````rust
 /// # use mpatch::{parse_auto, apply_patches_to_dir, ApplyOptions};
@@ -1409,6 +1944,14 @@ impl ApplyResult {
 pub struct BatchResult {
     /// A list of results for each patch operation attempted.
     /// Each entry is a tuple of the target file path and the result of the operation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use mpatch::BatchResult;
+    /// # let batch = BatchResult { results: vec![] };
+    /// assert!(batch.results.is_empty());
+    /// ```
     pub results: Vec<(PathBuf, Result<PatchResult, PatchError>)>,
 }
 
@@ -1417,7 +1960,11 @@ impl BatchResult {
     /// This does *not* check if all hunks were applied cleanly. For that, you must
     /// inspect the individual `PatchResult` objects.
     ///
-    /// # Example
+    /// # Returns
+    ///
+    /// `true` if all patches succeeded without hard errors, `false` otherwise.
+    ///
+    /// # Examples
     ///
     /// ````rust
     /// # use mpatch::{parse_auto, apply_patches_to_dir, ApplyOptions};
@@ -1464,7 +2011,11 @@ impl BatchResult {
     /// providing a direct way to report or handle unrecoverable problems in a batch
     /// run.
     ///
-    /// # Example
+    /// # Returns
+    ///
+    /// A vector of tuples containing the file path and the associated [`PatchError`].
+    ///
+    /// # Examples
     ///
     /// ```rust
     /// # use mpatch::{parse_auto, apply_patches_to_dir, ApplyOptions, PatchError};
@@ -1497,7 +2048,11 @@ impl ApplyResult {
     ///
     /// This is the logical opposite of [`all_applied_cleanly`](Self::all_applied_cleanly).
     ///
-    /// # Example
+    /// # Returns
+    ///
+    /// `true` if any hunk failed to apply, `false` otherwise.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::{ApplyResult, HunkApplyStatus, HunkApplyError, HunkLocation, MatchType};
@@ -1523,7 +2078,11 @@ impl ApplyResult {
     /// This is a convenience method that counts how many hunks in the `hunk_results`
     /// list have a status of [`HunkApplyStatus::Failed`].
     ///
-    /// # Example
+    /// # Returns
+    ///
+    /// The number of failed hunks.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::{ApplyResult, HunkApplyStatus, HunkApplyError, HunkLocation, MatchType};
@@ -1545,7 +2104,11 @@ impl ApplyResult {
     /// This method counts how many hunks in the `hunk_results` list have a status
     /// of either [`HunkApplyStatus::Applied`] or [`HunkApplyStatus::SkippedNoChanges`].
     ///
-    /// # Example
+    /// # Returns
+    ///
+    /// The number of successful or skipped hunks.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::{ApplyResult, HunkApplyStatus, HunkApplyError, HunkLocation, MatchType};
@@ -1580,7 +2143,7 @@ impl ApplyResult {
 ///
 /// You typically get `Hunk` objects as part of a [`Patch`] after parsing a diff.
 ///
-/// # Example
+/// # Examples
 ///
 /// ````rust
 /// # use mpatch::parse_single_patch;
@@ -1611,7 +2174,10 @@ pub struct Hunk {
     /// This vector stores the content exactly as it would appear in a Unified Diff body.
     /// Lines starting with ` ` are context, `-` are deletions, and `+` are additions.
     ///
-    /// # Example
+    /// When parsing Conflict Markers, `mpatch` synthesizes these lines: the "before"
+    /// block becomes `-` lines, and the "after" block becomes `+` lines.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::{parse_single_patch, Hunk};
@@ -1626,9 +2192,6 @@ pub struct Hunk {
     ///     }
     /// }
     /// ```
-    ///
-    /// When parsing Conflict Markers, `mpatch` synthesizes these lines: the "before"
-    /// block becomes `-` lines, and the "after" block becomes `+` lines.
     pub lines: Vec<String>,
     /// The starting line number in the original file (1-based).
     ///
@@ -1637,7 +2200,9 @@ pub struct Hunk {
     /// If the context matches in multiple places, the location closest to this line
     /// is chosen.
     ///
-    /// # Example
+    /// This may be `None` if the patch source (like Conflict Markers) did not provide line numbers.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::{Hunk};
@@ -1647,15 +2212,15 @@ pub struct Hunk {
     ///     new_start_line: Some(10),
     /// };
     /// ```
-    ///
-    /// This may be `None` if the patch source (like Conflict Markers) did not provide line numbers.
     pub old_start_line: Option<usize>,
     /// The starting line number in the new file (1-based).
     ///
     /// This corresponds to the `l` in the `@@ ... +l,s @@` header of a unified diff.
     /// It represents the intended location in the resulting file.
     ///
-    /// # Example
+    /// This may be `None` if the patch source did not provide line numbers.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::{Hunk};
@@ -1665,8 +2230,6 @@ pub struct Hunk {
     ///     new_start_line: Some(12), // Lines shifted down by 2
     /// };
     /// ```
-    ///
-    /// This may be `None` if the patch source did not provide line numbers.
     pub new_start_line: Option<usize>,
 }
 
@@ -1676,7 +2239,11 @@ impl Hunk {
     /// Additions become deletions, and deletions become additions. Context lines
     /// remain unchanged. The old and new line number hints are swapped.
     ///
-    /// # Example
+    /// # Returns
+    ///
+    /// A new [`Hunk`] with additions and deletions swapped.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::Hunk;
@@ -1726,7 +2293,11 @@ impl Hunk {
     /// (starting with '-'). The leading character is stripped. These lines form
     /// the "search pattern" that `mpatch` looks for in the target file.
     ///
-    /// # Example
+    /// # Returns
+    ///
+    /// A vector of string slices representing the match block.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::Hunk;
@@ -1755,7 +2326,11 @@ impl Hunk {
     /// (starting with '+'). The leading character is stripped. This is the
     /// content that will be "spliced" into the file.
     ///
-    /// # Example
+    /// # Returns
+    ///
+    /// A vector of string slices representing the replace block.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::Hunk;
@@ -1782,7 +2357,11 @@ impl Hunk {
     ///
     /// These are lines that start with ' ' and are stripped of the prefix.
     ///
-    /// # Example
+    /// # Returns
+    ///
+    /// A vector of string slices representing the context lines.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::Hunk;
@@ -1809,7 +2388,11 @@ impl Hunk {
     ///
     /// These are lines that start with '+' and are stripped of the prefix.
     ///
-    /// # Example
+    /// # Returns
+    ///
+    /// A vector of string slices representing the added lines.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::Hunk;
@@ -1836,7 +2419,11 @@ impl Hunk {
     ///
     /// These are lines that start with '-' and are stripped of the prefix.
     ///
-    /// # Example
+    /// # Returns
+    ///
+    /// A vector of string slices representing the removed lines.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::Hunk;
@@ -1862,6 +2449,10 @@ impl Hunk {
     /// Checks if the hunk contains any effective changes (additions or deletions).
     ///
     /// A hunk with only context lines has no changes and can be skipped.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the hunk has additions or deletions, `false` otherwise.
     ///
     /// # Examples
     ///
@@ -1895,7 +2486,19 @@ impl std::fmt::Display for Hunk {
     ///
     /// If `old_start_line` or `new_start_line` are `None`, they default to `1` in the output.
     ///
-    /// # Example
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write the output to.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the formatting was successful.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(std::fmt::Error)` if writing to the formatter fails.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::Hunk;
@@ -1942,7 +2545,7 @@ impl std::fmt::Display for Hunk {
 /// This is returned by [`find_hunk_location()`] and provides the necessary
 /// information to manually apply a patch to a slice of lines.
 ///
-/// # Example
+/// # Examples
 ///
 /// ````rust
 /// # use mpatch::{find_hunk_location, parse_single_patch, ApplyOptions, HunkLocation, MatchType};
@@ -1978,7 +2581,7 @@ pub struct HunkLocation {
     /// will be replaced by the hunk's changes. You can use this along with the
     /// `length` field to understand the exact range of lines affected by the patch.
     ///
-    /// # Example
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::{HunkLocation};
@@ -1996,26 +2599,46 @@ pub struct HunkLocation {
     /// The number of lines in the target content that will be replaced. This may
     /// differ from the number of lines in the hunk's "match block" when a fuzzy
     /// match is found.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use mpatch::HunkLocation;
+    /// let location = HunkLocation { start_index: 0, length: 5 };
+    /// assert_eq!(location.length, 5);
+    /// ```
     pub length: usize,
 }
 
-/// Formats the location for display, showing a user-friendly 1-based line number.
-///
-/// This implementation provides a more intuitive, human-readable representation of the
-/// hunk's location. It converts the internal 0-based `start_index` into a 1-based
-/// line number (e.g., index `9` becomes `"line 10"`), which is the standard
-/// convention in text editors and log messages. This makes it easy to use
-/// `HunkLocation` directly in formatted strings for clear diagnostic output.
-///
-/// # Example
-///
-/// ```
-/// # use mpatch::HunkLocation;
-/// let location = HunkLocation { start_index: 9, length: 3 };
-/// assert_eq!(location.to_string(), "line 10");
-/// assert_eq!(format!("Hunk applied at {}", location), "Hunk applied at line 10");
-/// ```
 impl std::fmt::Display for HunkLocation {
+    /// Formats the location for display, showing a user-friendly 1-based line number.
+    ///
+    /// This implementation provides a more intuitive, human-readable representation of the
+    /// hunk's location. It converts the internal 0-based `start_index` into a 1-based
+    /// line number (e.g., index `9` becomes `"line 10"`), which is the standard
+    /// convention in text editors and log messages. This makes it easy to use
+    /// `HunkLocation` directly in formatted strings for clear diagnostic output.
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write the output to.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the formatting was successful.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(std::fmt::Error)` if writing to the formatter fails.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use mpatch::HunkLocation;
+    /// let location = HunkLocation { start_index: 9, length: 3 };
+    /// assert_eq!(location.to_string(), "line 10");
+    /// assert_eq!(format!("Hunk applied at {}", location), "Hunk applied at line 10");
+    /// ```
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Adding 1 to start_index for a more user-friendly 1-based line number.
         write!(f, "line {}", self.start_index + 1)
@@ -2031,7 +2654,7 @@ impl std::fmt::Display for HunkLocation {
 ///
 /// It is the primary unit of work for the `apply` functions.
 ///
-/// # Example
+/// # Examples
 ///
 /// ````rust
 /// # use mpatch::parse_single_patch;
@@ -2060,7 +2683,7 @@ pub struct Patch {
     /// It's a `PathBuf`, so you can use it directly with filesystem operations
     /// or convert it to a string for display.
     ///
-    /// # Example
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::parse_single_patch;
@@ -2072,10 +2695,26 @@ pub struct Patch {
     /// ```
     pub file_path: PathBuf,
     /// A list of hunks to be applied to the file.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use mpatch::Patch;
+    /// # let patch = Patch { file_path: std::path::PathBuf::from("f"), hunks: vec![], ends_with_newline: true };
+    /// assert!(patch.hunks.is_empty());
+    /// ```
     pub hunks: Vec<Hunk>,
     /// Indicates whether the file should end with a newline.
     /// This is determined by the presence of `\ No newline at end of file`
     /// in the diff.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use mpatch::Patch;
+    /// # let patch = Patch { file_path: std::path::PathBuf::from("f"), hunks: vec![], ends_with_newline: false };
+    /// assert_eq!(patch.ends_with_newline, false);
+    /// ```
     pub ends_with_newline: bool,
 }
 
@@ -2093,7 +2732,15 @@ impl Patch {
     /// * `new_text` - The new, modified text content.
     /// * `context_len` - The number of context lines to include around changes.
     ///
-    /// # Example
+    /// # Returns
+    ///
+    /// A new [`Patch`] object.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(`[`ParseError`]`)` if the diff cannot be parsed.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::Patch;
@@ -2196,7 +2843,11 @@ impl Patch {
     /// **Note:** The `ends_with_newline` status of the reversed patch is ambiguous
     /// in the unified diff format, so it defaults to `true`.
     ///
-    /// # Example
+    /// # Returns
+    ///
+    /// A new [`Patch`] object with all hunks inverted.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::{Patch, Hunk};
@@ -2236,7 +2887,11 @@ impl Patch {
     /// A patch is considered a creation if its first hunk is an addition-only
     /// hunk that applies to an empty file (i.e., its "match block" is empty).
     ///
-    /// # Example
+    /// # Returns
+    ///
+    /// `true` if the patch represents a file creation, `false` otherwise.
+    ///
+    /// # Examples
     ///
     /// ````
     /// # use mpatch::parse_single_patch;
@@ -2265,7 +2920,11 @@ impl Patch {
     /// (i.e., their "replace blocks" are empty). This is typical for a diff
     /// that empties a file.
     ///
-    /// # Example
+    /// # Returns
+    ///
+    /// `true` if the patch represents a file deletion, `false` otherwise.
+    ///
+    /// # Examples
     ///
     /// ````
     /// # use mpatch::parse_single_patch;
@@ -2301,7 +2960,19 @@ impl std::fmt::Display for Patch {
     /// This is useful for logging, debugging, or serializing a `Patch` object
     /// back to its original text format.
     ///
-    /// # Example
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write the output to.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the formatting was successful.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(std::fmt::Error)` if writing to the formatter fails.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::{Patch, Hunk};
@@ -2355,6 +3026,15 @@ impl std::fmt::Display for Patch {
 /// It distinguishes between raw diffs (commonly output by `git diff`), diffs wrapped
 /// in Markdown code blocks (commonly output by LLMs), and conflict marker blocks
 /// (used in merge conflicts or specific AI suggestions).
+///
+/// # Examples
+///
+/// ```
+/// use mpatch::{detect_patch, PatchFormat};
+///
+/// let content = "--- a/file\n+++ b/file\n@@ -1 +1 @@\n-a\n+b";
+/// assert_eq!(detect_patch(content), PatchFormat::Unified);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PatchFormat {
@@ -2363,7 +3043,7 @@ pub enum PatchFormat {
     /// This format is characterized by file headers starting with `---` and `+++`,
     /// or hunk headers starting with `@@`.
     ///
-    /// # Example
+    /// # Examples
     /// ```text
     /// --- a/file.rs
     /// +++ b/file.rs
@@ -2380,7 +3060,7 @@ pub enum PatchFormat {
     /// This format is characterized by the presence of code fences (e.g., ` ```diff `)
     /// containing patch data. `mpatch` will extract and parse the content inside these blocks.
     ///
-    /// # Example
+    /// # Examples
     /// ````text
     /// Here is the fix for your issue:
     ///
@@ -2400,7 +3080,7 @@ pub enum PatchFormat {
     /// It is commonly found in Git merge conflicts or AI code suggestions that use
     /// this format to denote "before" and "after" states without full diff headers.
     ///
-    /// # Example
+    /// # Examples
     /// ```text
     /// fn calculate() {
     /// <<<<
@@ -2416,6 +3096,14 @@ pub enum PatchFormat {
     ///
     /// The content did not contain any recognizable signatures (such as diff headers,
     /// markdown fences, or conflict markers).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mpatch::{detect_patch, PatchFormat};
+    /// let content = "Just some random text.";
+    /// assert_eq!(detect_patch(content), PatchFormat::Unknown);
+    /// ```
     Unknown,
 }
 
@@ -2425,13 +3113,22 @@ pub enum PatchFormat {
 /// to determine if it contains Markdown code blocks, standard unified diff headers,
 /// or conflict markers.
 ///
-/// # Priority
+/// ## Behavior
+///
+/// The detection follows this priority:
 /// 1. **Markdown**: If code fences (3+ backticks) are found containing diff signatures, it is treated as Markdown.
 /// 2. **Unified**: If `--- a/` or `diff --git` headers are found, it is treated as a Unified Diff.
 /// 3. **Conflict**: If `<<<<` markers are found, it is treated as Conflict Markers.
 ///
-/// # Example
+/// # Arguments
 ///
+/// * `content` - A string slice containing the patch data to analyze.
+///
+/// # Returns
+///
+/// The detected [`PatchFormat`].
+///
+/// # Examples
 /// ```rust
 /// use mpatch::{detect_patch, PatchFormat};
 ///
@@ -2516,7 +3213,7 @@ pub fn detect_patch(content: &str) -> PatchFormat {
 /// the various ways diffs are commonly presented (e.g., inside Markdown code blocks
 /// from LLMs, as raw output from `git diff`, or as conflict markers in source files).
 ///
-/// # Supported Formats
+/// ## Supported Formats
 ///
 /// 1.  **Markdown:** Code blocks fenced with backticks (e.g., ` ```diff `) containing
 ///     diff content. This is the standard output format for AI coding assistants.
@@ -2524,7 +3221,7 @@ pub fn detect_patch(content: &str) -> PatchFormat {
 /// 3.  **Conflict Markers:** Blocks delimited by `<<<<`, `====`, and `>>>>`. These are
 ///     parsed into patches where the "old" content is removed and the "new" content is added.
 ///
-/// # Behavior
+/// ## Behavior
 ///
 /// The function first attempts to detect the format using lightweight heuristics
 /// (see [`detect_patch`]).
@@ -2535,6 +3232,19 @@ pub fn detect_patch(content: &str) -> PatchFormat {
 /// - If the format is **Unknown**, it attempts to parse the content as a raw diff
 ///   as a fallback. This allows parsing fragments that might lack full file headers
 ///   but contain valid hunks.
+///
+/// # Arguments
+///
+/// * `content` - A string slice containing the patch data to analyze.
+///
+/// # Returns
+///
+/// A `Result` containing a vector of [`Patch`] objects on success.
+///
+/// # Errors
+///
+/// Returns `Err(`[`ParseError`]`)` if the content is detected as a format but fails to parse
+/// (e.g., a unified diff missing file headers).
 ///
 /// # Examples
 ///
@@ -2629,14 +3339,18 @@ pub fn parse_auto(content: &str) -> Result<Vec<Patch>, ParseError> {
 ///
 /// # Arguments
 ///
-/// * `content` - A string slice containing the text to parse.
+/// * `content` - A string slice containing the markdown content to parse.
+///
+/// # Returns
+///
+/// A `Result` containing a vector of [`Patch`] objects on success.
 ///
 /// # Errors
 ///
 /// Returns `Err(`[`ParseError`]`)` if a block looks like a patch (e.g. has `--- a/file`) but fails
 /// to parse correctly. Blocks that simply lack headers are ignored.
 ///
-/// # Example
+/// # Examples
 ///
 /// ````rust
 /// use mpatch::parse_diffs;
@@ -2807,6 +3521,10 @@ fn parse_generic_block_lines(
 /// * `content` - A string slice containing the text to parse. This can be a raw
 ///   Unified Diff, a Markdown block, or a set of Conflict Markers.
 ///
+/// # Returns
+///
+/// A single [`Patch`] object on success.
+///
 /// # Errors
 ///
 /// Returns a [`SingleParseError`] if:
@@ -2814,7 +3532,7 @@ fn parse_generic_block_lines(
 /// - No patches are found in the content.
 /// - More than one patch is found in the content.
 ///
-/// # Example
+/// # Examples
 ///
 /// ````rust
 /// # use mpatch::{parse_single_patch, SingleParseError};
@@ -2873,14 +3591,18 @@ pub fn parse_single_patch(content: &str) -> Result<Patch, SingleParseError> {
 ///
 /// # Arguments
 ///
-/// * `content` - A string slice containing the raw unified diff to parse.
+/// * `content` - A string slice containing the raw unified diff content.
+///
+/// # Returns
+///
+/// A `Result` containing a vector of [`Patch`] objects on success.
 ///
 /// # Errors
 ///
 /// Returns `Err(`[`ParseError::MissingFileHeader`]`)` if the content contains patch
 /// hunks but no `--- a/path/to/file` header.
 ///
-/// # Example
+/// # Examples
 ///
 /// ```rust
 /// use mpatch::parse_patches;
@@ -2919,7 +3641,15 @@ pub fn parse_patches(content: &str) -> Result<Vec<Patch>, ParseError> {
 ///
 /// For automatic format detection, use [`parse_auto()`].
 ///
-/// # Example
+/// # Arguments
+///
+/// * `content` - A string slice containing the conflict marker content.
+///
+/// # Returns
+///
+/// A vector of [`Patch`] objects parsed from the conflict markers.
+///
+/// # Examples
 ///
 /// ```rust
 /// use mpatch::parse_conflict_markers;
@@ -2957,13 +3687,17 @@ pub fn parse_conflict_markers(content: &str) -> Vec<Patch> {
 ///
 /// * `lines` - An iterator that yields string slices, where each slice is a line of the diff.
 ///
+/// # Returns
+///
+/// A `Result` containing a vector of [`Patch`] objects on success.
+///
 /// # Errors
 ///
 /// Returns `Err(`[`ParseError::MissingFileHeader`]`)` if the content contains patch
 /// hunks but no `--- a/path/to/file` header. The `line` number in the error will
 /// correspond to the first hunk header (e.g., `@@ ... @@`) found.
 ///
-/// # Example
+/// # Examples
 ///
 /// ```rust
 /// use mpatch::parse_patches_from_lines;
@@ -3272,11 +4006,14 @@ fn map_io_error(path: PathBuf, e: std::io::Error) -> PatchError {
 ///
 /// # Returns
 ///
-/// - `Ok(PathBuf)`: The safe, canonicalized, absolute path of the target if validation succeeds.
-/// - `Err(`[`PatchError::PathTraversal`]`)`: If the path resolves outside the `base_dir`.
-/// - `Err(`[`PatchError::Io`]`)`: If an I/O error occurs during path canonicalization (e.g., `base_dir` does not exist).
+/// The safe, canonicalized, absolute path of the target if validation succeeds.
 ///
-/// # Example
+/// # Errors
+///
+/// - Returns `Err(`[`PatchError::PathTraversal`]`)` if the path resolves outside the `base_dir`.
+/// - Returns `Err(`[`PatchError::Io`]`)` if an I/O error occurs during path canonicalization (e.g., `base_dir` does not exist).
+///
+/// # Examples
 ///
 /// ```rust
 /// # use mpatch::{ensure_path_is_safe, PatchError};
@@ -3330,7 +4067,17 @@ pub fn ensure_path_is_safe(base_dir: &Path, relative_path: &Path) -> Result<Path
 ///
 /// This function will continue applying patches even if some fail.
 ///
-/// # Example
+/// # Arguments
+///
+/// * `patches` - A slice of [`Patch`] objects to apply.
+/// * `target_dir` - The base directory where the patches should be applied.
+/// * `options` - Configuration for the patch operation.
+///
+/// # Returns
+///
+/// A [`BatchResult`] containing the results of each individual patch operation.
+///
+/// # Examples
 ///
 /// ````
 /// # use mpatch::{parse_auto, apply_patches_to_dir, ApplyOptions};
@@ -3388,7 +4135,15 @@ pub fn apply_patches_to_dir(
 /// in the provided slice. It is useful when you want to reverse the effect of
 /// a multi-file diff (e.g., "un-applying" a set of changes).
 ///
-/// # Example
+/// # Arguments
+///
+/// * `patches` - A slice of [`Patch`] objects to invert.
+///
+/// # Returns
+///
+/// A new vector of [`Patch`] objects with their changes reversed.
+///
+/// # Examples
 ///
 /// ```
 /// # use mpatch::{parse_auto, invert_patches};
@@ -3422,14 +4177,17 @@ pub fn invert_patches(patches: &[Patch]) -> Vec<Patch> {
 ///
 /// # Returns
 ///
-/// - `Ok(`[`PatchResult`]`)` on success. The `PatchResult` contains a detailed report
-///   for each hunk and, if `dry_run` was enabled, a diff of the proposed changes.
-///   If some hunks failed, the file may be in a partially patched state (unless
-///   in dry-run mode).
-/// - `Err(`[`PatchError`]`)` for "hard" errors like I/O problems, path traversal violations,
-///   or a missing target file.
+/// A [`PatchResult`] on success. The `PatchResult` contains a detailed report
+/// for each hunk and, if `dry_run` was enabled, a diff of the proposed changes.
+/// If some hunks failed, the file may be in a partially patched state (unless
+/// in dry-run mode).
 ///
-/// # Example
+/// # Errors
+///
+/// Returns `Err(`[`PatchError`]`)` for "hard" errors like I/O problems, path traversal violations,
+/// or a missing target file.
+///
+/// # Examples
 ///
 /// ````
 /// # use mpatch::{parse_single_patch, apply_patch_to_file, ApplyOptions};
@@ -3603,15 +4361,24 @@ pub fn apply_patch_to_file(
 /// This function provides a simpler error handling model for workflows where any
 /// failed hunk should be considered a failure for the entire operation.
 ///
+/// # Arguments
+///
+/// * `patch` - The [`Patch`] object to apply.
+/// * `target_dir` - The base directory where the patch should be applied.
+/// * `options` - Configuration for the patch operation.
+///
 /// # Returns
 ///
-/// - `Ok(`[`PatchResult`]`)`: If all hunks were applied successfully.
-/// - `Err(`[`StrictApplyError::PartialApply`]`)`: If some hunks failed to apply. The file may
+/// A [`PatchResult`] if all hunks were applied successfully.
+///
+/// # Errors
+///
+/// - Returns `Err(`[`StrictApplyError::PartialApply`]`)` if some hunks failed to apply. The file may
 ///   be in a partially patched state (unless in dry-run mode). The `report` within
 ///   the error contains the detailed results.
-/// - `Err(`[`StrictApplyError::Patch`]`)`: For "hard" errors like I/O problems or a missing target file.
+/// - Returns `Err(`[`StrictApplyError::Patch`]`)` for "hard" errors like I/O problems or a missing target file.
 ///
-/// # Example
+/// # Examples
 ///
 /// ````rust
 /// use mpatch::{parse_single_patch, try_apply_patch_to_file, ApplyOptions, StrictApplyError};
@@ -3690,7 +4457,7 @@ pub fn try_apply_patch_to_file(
 ///
 /// The iterator yields a [`HunkApplyStatus`] for each hunk in the patch.
 ///
-/// # Example
+/// # Examples
 ///
 /// ````rust
 /// use mpatch::{parse_single_patch, HunkApplier, HunkApplyStatus, ApplyOptions};
@@ -3744,7 +4511,17 @@ impl<'a> HunkApplier<'a> {
     /// allowing for both file modifications (`Some(lines)`) and file creations (`None`).
     /// The applier can then be used as an iterator to apply hunks one by one.
     ///
-    /// # Example
+    /// # Arguments
+    ///
+    /// * `patch` - The [`Patch`] to apply.
+    /// * `original_lines` - An optional slice of strings representing the original content.
+    /// * `options` - Configuration for the patch operation.
+    ///
+    /// # Returns
+    ///
+    /// A new `HunkApplier` instance.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::{parse_single_patch, HunkApplier, ApplyOptions};
@@ -3786,7 +4563,11 @@ impl<'a> HunkApplier<'a> {
     /// content being patched. It is useful for inspecting the content between
     /// applying hunks with the `HunkApplier` iterator.
     ///
-    /// # Example
+    /// # Returns
+    ///
+    /// A slice of strings representing the current state of the content.
+    ///
+    /// # Examples
     ///
     /// ```rust
     /// # use mpatch::{parse_single_patch, HunkApplier, ApplyOptions};
@@ -3831,7 +4612,11 @@ impl<'a> HunkApplier<'a> {
     ///
     /// * `ends_with_newline` - `true` if the original content had a trailing newline, `false` otherwise.
     ///
-    /// # Example
+    /// # Returns
+    ///
+    /// None.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::{parse_single_patch, HunkApplier, ApplyOptions};
@@ -3865,7 +4650,11 @@ impl<'a> HunkApplier<'a> {
     /// this method can be called to take ownership of the final, modified vector
     /// of strings.
     ///
-    /// # Example
+    /// # Returns
+    ///
+    /// A vector of strings representing the final content.
+    ///
+    /// # Examples
     ///
     /// ```rust
     /// # use mpatch::{parse_single_patch, HunkApplier, ApplyOptions};
@@ -3894,7 +4683,11 @@ impl<'a> HunkApplier<'a> {
     /// property. It is the most common way to get the final result from a
     /// `HunkApplier`.
     ///
-    /// # Example
+    /// # Returns
+    ///
+    /// A single string representing the final content.
+    ///
+    /// # Examples
     ///
     /// ```rust
     /// # use mpatch::{parse_single_patch, HunkApplier, ApplyOptions};
@@ -3938,7 +4731,11 @@ impl<'a> Iterator for HunkApplier<'a> {
     /// of the `HunkApplier`. It returns `Some(`[`HunkApplyStatus`]`)` for each hunk in
     /// the patch, and `None` when all hunks have been processed.
     ///
-    /// # Example
+    /// # Returns
+    ///
+    /// An `Option` containing the [`HunkApplyStatus`] of the applied hunk, or `None` if there are no more hunks.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::{parse_single_patch, HunkApplier, ApplyOptions, HunkApplyStatus};
@@ -3992,7 +4789,7 @@ impl<'a> Iterator for HunkApplier<'a> {
 ///
 /// An [`InMemoryResult`] containing the new content and a detailed report.
 ///
-/// # Example
+/// # Examples
 ///
 /// ```rust
 /// # use mpatch::{parse_single_patch, apply_patch_to_lines, ApplyOptions};
@@ -4094,13 +4891,22 @@ fn apply_patch_to_lines_internal<T: AsRef<str>>(
 /// This function provides a simpler error handling model for workflows where any
 /// failed hunk should be considered a failure for the entire operation.
 ///
+/// # Arguments
+///
+/// * `patch` - The [`Patch`] object to apply.
+/// * `original_lines` - An `Option` containing a slice of strings representing the file's content.
+/// * `options` - Configuration for the patch operation.
+///
 /// # Returns
 ///
-/// - `Ok(`[`InMemoryResult`]`)`: If all hunks were applied successfully.
-/// - `Err(`[`StrictApplyError::PartialApply`]`)`: If some hunks failed to apply. The returned
-///   `report` within the error contains the detailed results.
+/// An [`InMemoryResult`] if all hunks were applied successfully.
 ///
-/// # Example
+/// # Errors
+///
+/// Returns `Err(`[`StrictApplyError::PartialApply`]`)` if some hunks failed to apply. The returned
+/// `report` within the error contains the detailed results.
+///
+/// # Examples
 ///
 /// ````rust
 /// use mpatch::{parse_single_patch, try_apply_patch_to_lines, ApplyOptions, StrictApplyError};
@@ -4183,7 +4989,7 @@ pub fn try_apply_patch_to_lines<T: AsRef<str>>(
 ///
 /// An [`InMemoryResult`] containing the new content and a detailed report.
 ///
-/// # Example
+/// # Examples
 ///
 /// ```rust
 /// # use mpatch::{parse_single_patch, apply_patch_to_content, ApplyOptions};
@@ -4241,13 +5047,22 @@ pub fn apply_patch_to_content(
 /// This function provides a simpler error handling model for workflows where any
 /// failed hunk should be considered a failure for the entire operation.
 ///
+/// # Arguments
+///
+/// * `patch` - The [`Patch`] object to apply.
+/// * `original_content` - An `Option<&str>` representing the file's content.
+/// * `options` - Configuration for the patch operation.
+///
 /// # Returns
 ///
-/// - `Ok(`[`InMemoryResult`]`)`: If all hunks were applied successfully.
-/// - `Err(`[`StrictApplyError::PartialApply`]`)`: If some hunks failed to apply. The returned
-///   `report` within the error contains the detailed results.
+/// An [`InMemoryResult`] if all hunks were applied successfully.
 ///
-/// # Example
+/// # Errors
+///
+/// Returns `Err(`[`StrictApplyError::PartialApply`]`)` if some hunks failed to apply. The returned
+/// `report` within the error contains the detailed results.
+///
+/// # Examples
 ///
 /// ````rust
 /// use mpatch::{parse_single_patch, try_apply_patch_to_content, ApplyOptions, StrictApplyError};
@@ -4333,12 +5148,15 @@ pub fn try_apply_patch_to_content(
 ///
 /// # Returns
 ///
-/// - `Ok(String)`: The new, patched content if the patch applied cleanly.
-/// - `Err(`[`OneShotError`]`)`: If any step fails, including parsing errors, finding
-///   the wrong number of patches, or if the patch does not apply cleanly (i.e.,
-///   any hunk fails).
+/// The new, patched content as a `String` if the patch applied cleanly.
 ///
-/// # Example
+/// # Errors
+///
+/// Returns `Err(`[`OneShotError`]`)` if any step fails, including parsing errors, finding
+/// the wrong number of patches, or if the patch does not apply cleanly (i.e.,
+/// any hunk fails).
+///
+/// # Examples
 ///
 /// ````rust
 /// # use mpatch::{patch_content_str, ApplyOptions, OneShotError};
@@ -4441,7 +5259,7 @@ fn get_indent(line: &str) -> &str {
 /// - [`HunkApplyStatus::SkippedNoChanges`]: The hunk contained only context lines and was skipped.
 /// - [`HunkApplyStatus::Failed`]: The hunk could not be applied. The reason is provided in the associated [`HunkApplyError`].
 ///
-/// # Example
+/// # Examples
 ///
 /// ```rust
 /// # use mpatch::{parse_single_patch, apply_hunk_to_lines, ApplyOptions, HunkApplyStatus, HunkLocation, MatchType};
@@ -4783,7 +5601,20 @@ pub fn apply_hunk_to_lines(
 /// The library provides a robust [`DefaultHunkFinder`] that should be sufficient
 /// for most use cases.
 ///
-/// # Example
+/// # Arguments
+///
+/// * `hunk` - The hunk to locate.
+/// * `target_lines` - The content to search within.
+///
+/// # Returns
+///
+/// A tuple containing the [`HunkLocation`] and the [`MatchType`] on success.
+///
+/// # Errors
+///
+/// Returns `Err(`[`HunkApplyError`]`)` if no suitable location could be found.
+///
+/// # Examples
 ///
 /// This example shows a hypothetical, simplified implementation of a `HunkFinder`
 /// that only performs an exact match search.
@@ -4826,7 +5657,20 @@ pub trait HunkFinder {
     /// within the target content. Implementations should return the location and the
     /// type of match found, or an error if no suitable location can be determined.
     ///
-    /// # Example
+    /// # Arguments
+    ///
+    /// * `hunk` - The [`Hunk`] to locate.
+    /// * `target_lines` - A slice of strings representing the content to search within.
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing the [`HunkLocation`] and the [`MatchType`] on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(`[`HunkApplyError`]`)` if no suitable location could be found.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::{parse_single_patch, DefaultHunkFinder, HunkFinder, ApplyOptions, HunkLocation, MatchType};
@@ -4849,16 +5693,6 @@ pub trait HunkFinder {
     /// # Ok(())
     /// # }
     /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `hunk` - The hunk to locate.
-    /// * `target_lines` - The content to search within.
-    ///
-    /// # Returns
-    ///
-    /// - `Ok((`[`HunkLocation`]`, `[`MatchType`]`))` on success.
-    /// - `Err(`[`HunkApplyError`]`)` if no suitable location could be found.
     fn find_location<T: AsRef<str> + Sync>(
         &self,
         hunk: &Hunk,
@@ -4877,7 +5711,7 @@ pub trait HunkFinder {
 /// While you can use this struct directly, it's typically used internally by
 /// functions like [`find_hunk_location_in_lines()`].
 ///
-/// # Example
+/// # Examples
 ///
 /// ````rust
 /// # use mpatch::{parse_single_patch, DefaultHunkFinder, HunkFinder, ApplyOptions, HunkLocation, MatchType};
@@ -4919,7 +5753,15 @@ impl<'a> DefaultHunkFinder<'a> {
     /// [`ApplyOptions`] will control the behavior of the finder, particularly the
     /// `fuzz_factor` which determines the threshold for fuzzy matching.
     ///
-    /// # Example
+    /// # Arguments
+    ///
+    /// * `options` - Configuration for the patch operation.
+    ///
+    /// # Returns
+    ///
+    /// A new `DefaultHunkFinder` instance.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use mpatch::{DefaultHunkFinder, ApplyOptions};
@@ -5704,6 +6546,40 @@ impl<'a> DefaultHunkFinder<'a> {
 }
 
 impl<'a> HunkFinder for DefaultHunkFinder<'a> {
+    /// Finds the location to apply a hunk to a slice of lines.
+    ///
+    /// This implementation uses a hierarchical approach: exact match, exact match
+    /// ignoring trailing whitespace, and finally a flexible fuzzy match.
+    ///
+    /// # Arguments
+    ///
+    /// * `hunk` - The [`Hunk`] to locate.
+    /// * `target_lines` - A slice of strings representing the content to search within.
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing the [`HunkLocation`] and the [`MatchType`] on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(`[`HunkApplyError`]`)` if no suitable location could be found.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use mpatch::{parse_single_patch, DefaultHunkFinder, HunkFinder, ApplyOptions, HunkLocation, MatchType};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -1,2 +1,2\n line 1\n-line 2\n+line two\n```";
+    /// let hunk = parse_single_patch(diff)?.hunks.remove(0);
+    /// let target_lines = vec!["line 1", "line 2"];
+    /// let options = ApplyOptions::new();
+    /// let finder = DefaultHunkFinder::new(&options);
+    /// let (location, match_type) = finder.find_location(&hunk, &target_lines)?;
+    /// assert_eq!(location, HunkLocation { start_index: 0, length: 2 });
+    /// assert!(matches!(match_type, MatchType::Exact));
+    /// # Ok(())
+    /// # }
+    /// ```
     fn find_location<T: AsRef<str> + Sync>(
         &self,
         hunk: &Hunk,
@@ -5734,12 +6610,14 @@ impl<'a> HunkFinder for DefaultHunkFinder<'a> {
 ///
 /// # Returns
 ///
-/// - `Ok((`[`HunkLocation`]`, `[`MatchType`]`))` on success, containing the location and the
-///   type of match that was found.
-/// - `Err(`[`HunkApplyError`]`)` if no suitable location could be found, with a reason
-///   for the failure (e.g., context not found, ambiguous match).
+/// A tuple containing the [`HunkLocation`] and the [`MatchType`] on success.
 ///
-/// # Example
+/// # Errors
+///
+/// Returns `Err(`[`HunkApplyError`]`)` if no suitable location could be found, with a reason
+/// for the failure (e.g., context not found, ambiguous match).
+///
+/// # Examples
 ///
 /// ````rust
 /// # use mpatch::{parse_single_patch, find_hunk_location, HunkLocation, ApplyOptions, MatchType};
@@ -5793,11 +6671,13 @@ pub fn find_hunk_location(
 ///
 /// # Returns
 ///
-/// - `Ok((`[`HunkLocation`]`, `[`MatchType`]`))` on success, containing the location and the
-///   type of match that was found.
-/// - `Err(`[`HunkApplyError`]`)` if no suitable location could be found.
+/// A tuple containing the [`HunkLocation`] and the [`MatchType`] on success.
 ///
-/// # Example
+/// # Errors
+///
+/// Returns `Err(`[`HunkApplyError`]`)` if no suitable location could be found.
+///
+/// # Examples
 ///
 /// ````rust
 /// # use mpatch::{parse_single_patch, find_hunk_location_in_lines, HunkLocation, ApplyOptions, MatchType};

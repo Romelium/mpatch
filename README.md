@@ -220,10 +220,48 @@ Programmatically invert patches (additions become deletions and vice versa).
 ```rust
 use mpatch::{parse_auto, invert_patches};
 
+let diff_content = "--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new";
 let patches = parse_auto(diff_content)?;
 let reversed = invert_patches(&patches);
 
 // Now apply `reversed` to undo changes
+```
+
+### 4. Strict Apply-or-Fail Workflow
+If you want to treat partial applications (where some hunks fail) as an error, use the `try_` variants.
+
+```rust
+use mpatch::{parse_single_patch, try_apply_patch_to_content, ApplyOptions, StrictApplyError};
+
+let original_content = "fn main() { println!(\"Old\"); }";
+let diff_content = "--- a/main.rs\n+++ b/main.rs\n@@ -1 +1 @@\n-fn main() { println!(\"Old\"); }\n+fn main() { println!(\"New\"); }";
+
+let patch = parse_single_patch(diff_content)?;
+let options = ApplyOptions::exact();
+
+// Returns an Err if any hunk fails to apply
+match try_apply_patch_to_content(&patch, Some(original_content), &options) {
+    Ok(result) => println!("Success: {}", result.new_content),
+    Err(StrictApplyError::PartialApply { report }) => {
+        eprintln!("Patch partially applied. {} hunks failed.", report.failure_count());
+    }
+    Err(e) => eprintln!("Hard error: {}", e),
+}
+```
+
+### 5. Creating Patches
+You can also use `mpatch` to generate patches by comparing two strings.
+
+```rust
+use mpatch::Patch;
+
+let old_text = "fn main() { println!(\"Old\"); }";
+let new_text = "fn main() { println!(\"New\"); }";
+
+// Create a patch with 3 lines of context
+let patch = Patch::from_texts("src/main.rs", old_text, new_text, 3).unwrap();
+
+println!("{}", patch);
 ```
 
 ---
