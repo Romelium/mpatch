@@ -5115,6 +5115,63 @@ mod fuzzy_logic_edge_cases {
         let file_content = fs::read_to_string(&file_path).unwrap();
         assert!(file_content.ends_with("hit\n"));
     }
+
+    #[test]
+    fn test_fuzzy_anchor_indentation_drift_with_coincidental_match() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("anchor_drift.rs");
+
+        let mut original_content = String::new();
+        // 1. Noise
+        for i in 0..50 {
+            original_content.push_str(&format!("// noise A {}\n", i));
+        }
+        // 2. Incorrect location: Has the exact indentation the patch expects (8 spaces),
+        // but is missing the surrounding context.
+        original_content.push_str("        println!(\"My unique anchor line\");\n");
+
+        // 3. More noise to separate the windows (search radius is ~15 lines)
+        for i in 0..50 {
+            original_content.push_str(&format!("// noise B {}\n", i));
+        }
+
+        // 4. Correct location: Has different indentation (4 spaces), but correct context.
+        original_content.push_str("    let x = 1;\n");
+        original_content.push_str("    println!(\"My unique anchor line\");\n");
+        original_content.push_str("    let y = 2;\n");
+
+        // 5. Trailing noise
+        for i in 0..50 {
+            original_content.push_str(&format!("// noise C {}\n", i));
+        }
+
+        fs::write(&file_path, &original_content).unwrap();
+
+        // Patch expects 8 spaces of indentation
+        let diff = indoc! {r#"
+            ```diff
+            --- a/anchor_drift.rs
+            +++ b/anchor_drift.rs
+            @@ -100,3 +100,3 @@
+                     let x = 1;
+                     println!("My unique anchor line");
+            -        let y = 2;
+            +        let y = 3;
+            ```
+        "#};
+
+        let patches = parse_diffs(diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(
+            result.report.all_applied_cleanly(),
+            "Patch should apply cleanly by finding the anchor despite indentation drift"
+        );
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("    let y = 3;\n"));
+    }
 }
 
 mod extended_stress_tests {

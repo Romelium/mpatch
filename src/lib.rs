@@ -4937,9 +4937,9 @@ impl<'a> DefaultHunkFinder<'a> {
                         continue;
                     }
 
-                    let anchor_line = match_block[line_idx].trim_end();
+                    let anchor_line = match_block[line_idx].trim();
                     // Ignore short or empty lines as they are poor anchors.
-                    if anchor_line.trim().len() < MIN_ANCHOR_LEN {
+                    if anchor_line.len() < MIN_ANCHOR_LEN {
                         continue;
                     }
 
@@ -4947,7 +4947,7 @@ impl<'a> DefaultHunkFinder<'a> {
                     let occurrences: Vec<_> = target_lines
                         .iter()
                         .enumerate()
-                        .filter(|(_, l)| l.as_ref().trim_end() == anchor_line)
+                        .filter(|(_, l)| l.as_ref().trim() == anchor_line)
                         .map(|(i, _)| i)
                         .collect();
 
@@ -4957,7 +4957,7 @@ impl<'a> DefaultHunkFinder<'a> {
                             "      Found good anchor line (hunk line {}) with {} occurrences: '{}'",
                             line_idx + 1,
                             occurrences.len(),
-                            anchor_line.trim()
+                            anchor_line
                         );
                         let mut ranges = Vec::new();
                         let search_radius =

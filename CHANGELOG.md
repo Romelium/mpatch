@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 -   **Parser:** Fixed a bug where empty lines between file diffs (common in LLM outputs) were incorrectly absorbed as trailing context lines, breaking file creation and deletion detection.
 -   **API:** Made `Patch::is_creation()` and `Patch::is_deletion()` more robust by checking hunk header line numbers (e.g., `@@ -0,0 ...`).
+-   **Fuzzy Matching:** Fixed a bug in the search optimization heuristic where indentation differences between the patch and the target file would cause the fuzzy search to fail or look in the wrong location. The anchor line search now correctly ignores leading whitespace.
 
 ## [1.4.0] - 2026-03-20
 
