@@ -1501,7 +1501,7 @@ impl ApplyResult {
     /// Returns the number of hunks that failed to apply.
     ///
     /// This is a convenience method that counts how many hunks in the `hunk_results`
-    /// list have a status of `HunkApplyStatus::Failed`.
+    /// list have a status of [`HunkApplyStatus::Failed`].
     ///
     /// # Example
     ///
@@ -1523,7 +1523,7 @@ impl ApplyResult {
     /// Returns the number of hunks that were applied successfully or skipped.
     ///
     /// This method counts how many hunks in the `hunk_results` list have a status
-    /// of either `HunkApplyStatus::Applied` or `HunkApplyStatus::SkippedNoChanges`.
+    /// of either [`HunkApplyStatus::Applied`] or [`HunkApplyStatus::SkippedNoChanges`].
     ///
     /// # Example
     ///
@@ -2610,7 +2610,7 @@ pub fn parse_auto(content: &str) -> Result<Vec<Patch>, ParseError> {
 ///
 /// # Errors
 ///
-/// Returns `Err(ParseError)` if a block looks like a patch (e.g. has `--- a/file`) but fails
+/// Returns `Err(`[`ParseError`]`)` if a block looks like a patch (e.g. has `--- a/file`) but fails
 /// to parse correctly. Blocks that simply lack headers are ignored.
 ///
 /// # Example
@@ -2854,7 +2854,7 @@ pub fn parse_single_patch(content: &str) -> Result<Patch, SingleParseError> {
 ///
 /// # Errors
 ///
-/// Returns `Err(ParseError::MissingFileHeader)` if the content contains patch
+/// Returns `Err(`[`ParseError::MissingFileHeader`]`)` if the content contains patch
 /// hunks but no `--- a/path/to/file` header.
 ///
 /// # Example
@@ -2932,7 +2932,7 @@ pub fn parse_conflict_markers(content: &str) -> Vec<Patch> {
 ///
 /// # Errors
 ///
-/// Returns `Err(ParseError::MissingFileHeader)` if the content contains patch
+/// Returns `Err(`[`ParseError::MissingFileHeader`]`)` if the content contains patch
 /// hunks but no `--- a/path/to/file` header. The `line` number in the error will
 /// correspond to the first hunk header (e.g., `@@ ... @@`) found.
 ///
@@ -3246,8 +3246,8 @@ fn map_io_error(path: PathBuf, e: std::io::Error) -> PatchError {
 /// # Returns
 ///
 /// - `Ok(PathBuf)`: The safe, canonicalized, absolute path of the target if validation succeeds.
-/// - `Err(PatchError::PathTraversal)`: If the path resolves outside the `base_dir`.
-/// - `Err(PatchError::Io)`: If an I/O error occurs during path canonicalization (e.g., `base_dir` does not exist).
+/// - `Err(`[`PatchError::PathTraversal`]`)`: If the path resolves outside the `base_dir`.
+/// - `Err(`[`PatchError::Io`]`)`: If an I/O error occurs during path canonicalization (e.g., `base_dir` does not exist).
 ///
 /// # Example
 ///
@@ -3395,11 +3395,11 @@ pub fn invert_patches(patches: &[Patch]) -> Vec<Patch> {
 ///
 /// # Returns
 ///
-/// - `Ok(PatchResult)` on success. The `PatchResult` contains a detailed report
+/// - `Ok(`[`PatchResult`]`)` on success. The `PatchResult` contains a detailed report
 ///   for each hunk and, if `dry_run` was enabled, a diff of the proposed changes.
 ///   If some hunks failed, the file may be in a partially patched state (unless
 ///   in dry-run mode).
-/// - `Err(PatchError)` for "hard" errors like I/O problems, path traversal violations,
+/// - `Err(`[`PatchError`]`)` for "hard" errors like I/O problems, path traversal violations,
 ///   or a missing target file.
 ///
 /// # Example
@@ -3578,11 +3578,11 @@ pub fn apply_patch_to_file(
 ///
 /// # Returns
 ///
-/// - `Ok(PatchResult)`: If all hunks were applied successfully.
-/// - `Err(StrictApplyError::PartialApply)`: If some hunks failed to apply. The file may
+/// - `Ok(`[`PatchResult`]`)`: If all hunks were applied successfully.
+/// - `Err(`[`StrictApplyError::PartialApply`]`)`: If some hunks failed to apply. The file may
 ///   be in a partially patched state (unless in dry-run mode). The `report` within
 ///   the error contains the detailed results.
-/// - `Err([`StrictApplyError::Patch`])`: For "hard" errors like I/O problems or a missing target file.
+/// - `Err(`[`StrictApplyError::Patch`]`)`: For "hard" errors like I/O problems or a missing target file.
 ///
 /// # Example
 ///
@@ -3908,7 +3908,7 @@ impl<'a> Iterator for HunkApplier<'a> {
     /// Applies the next hunk in the patch and returns its status.
     ///
     /// This method advances the iterator, applying one hunk to the internal state
-    /// of the `HunkApplier`. It returns `Some(HunkApplyStatus)` for each hunk in
+    /// of the `HunkApplier`. It returns `Some(`[`HunkApplyStatus`]`)` for each hunk in
     /// the patch, and `None` when all hunks have been processed.
     ///
     /// # Example
@@ -4069,8 +4069,8 @@ fn apply_patch_to_lines_internal<T: AsRef<str>>(
 ///
 /// # Returns
 ///
-/// - `Ok(InMemoryResult)`: If all hunks were applied successfully.
-/// - `Err(StrictApplyError::PartialApply)`: If some hunks failed to apply. The returned
+/// - `Ok(`[`InMemoryResult`]`)`: If all hunks were applied successfully.
+/// - `Err(`[`StrictApplyError::PartialApply`]`)`: If some hunks failed to apply. The returned
 ///   `report` within the error contains the detailed results.
 ///
 /// # Example
@@ -4216,8 +4216,8 @@ pub fn apply_patch_to_content(
 ///
 /// # Returns
 ///
-/// - `Ok(InMemoryResult)`: If all hunks were applied successfully.
-/// - `Err(StrictApplyError::PartialApply)`: If some hunks failed to apply. The returned
+/// - `Ok(`[`InMemoryResult`]`)`: If all hunks were applied successfully.
+/// - `Err(`[`StrictApplyError::PartialApply`]`)`: If some hunks failed to apply. The returned
 ///   `report` within the error contains the detailed results.
 ///
 /// # Example
@@ -4307,7 +4307,7 @@ pub fn try_apply_patch_to_content(
 /// # Returns
 ///
 /// - `Ok(String)`: The new, patched content if the patch applied cleanly.
-/// - `Err(OneShotError)`: If any step fails, including parsing errors, finding
+/// - `Err(`[`OneShotError`]`)`: If any step fails, including parsing errors, finding
 ///   the wrong number of patches, or if the patch does not apply cleanly (i.e.,
 ///   any hunk fails).
 ///
@@ -4830,8 +4830,8 @@ pub trait HunkFinder {
     ///
     /// # Returns
     ///
-    /// - `Ok((HunkLocation, MatchType))` on success.
-    /// - `Err(HunkApplyError)` if no suitable location could be found.
+    /// - `Ok((`[`HunkLocation`]`, `[`MatchType`]`))` on success.
+    /// - `Err(`[`HunkApplyError`]`)` if no suitable location could be found.
     fn find_location<T: AsRef<str> + Sync>(
         &self,
         hunk: &Hunk,
@@ -5707,9 +5707,9 @@ impl<'a> HunkFinder for DefaultHunkFinder<'a> {
 ///
 /// # Returns
 ///
-/// - `Ok((HunkLocation, MatchType))` on success, containing the location and the
+/// - `Ok((`[`HunkLocation`]`, `[`MatchType`]`))` on success, containing the location and the
 ///   type of match that was found.
-/// - `Err(HunkApplyError)` if no suitable location could be found, with a reason
+/// - `Err(`[`HunkApplyError`]`)` if no suitable location could be found, with a reason
 ///   for the failure (e.g., context not found, ambiguous match).
 ///
 /// # Example
@@ -5766,9 +5766,9 @@ pub fn find_hunk_location(
 ///
 /// # Returns
 ///
-/// - `Ok((HunkLocation, MatchType))` on success, containing the location and the
+/// - `Ok((`[`HunkLocation`]`, `[`MatchType`]`))` on success, containing the location and the
 ///   type of match that was found.
-/// - `Err(HunkApplyError)` if no suitable location could be found.
+/// - `Err(`[`HunkApplyError`]`)` if no suitable location could be found.
 ///
 /// # Example
 ///
