@@ -551,12 +551,20 @@ fn compare_patches(original: &Patch, recreated: &Patch) -> bool {
     if original.hunks.len() != recreated.hunks.len() {
         return false;
     }
-    for (h1, h2) in original.hunks.iter().zip(recreated.hunks.iter()) {
-        // Compare the actual changes, ignoring context lines.
-        if h1.added_lines() != h2.added_lines() {
-            return false;
-        }
-        if h1.removed_lines() != h2.removed_lines() {
+
+    let mut recreated_hunks = recreated.hunks.clone();
+
+    for h1 in &original.hunks {
+        let added1 = h1.added_lines();
+        let removed1 = h1.removed_lines();
+
+        let match_idx = recreated_hunks.iter().position(|h2| {
+            h2.added_lines() == added1 && h2.removed_lines() == removed1
+        });
+
+        if let Some(idx) = match_idx {
+            recreated_hunks.remove(idx);
+        } else {
             return false;
         }
     }
