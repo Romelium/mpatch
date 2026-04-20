@@ -558,9 +558,9 @@ fn compare_patches(original: &Patch, recreated: &Patch) -> bool {
         let added1 = h1.added_lines();
         let removed1 = h1.removed_lines();
 
-        let match_idx = recreated_hunks.iter().position(|h2| {
-            h2.added_lines() == added1 && h2.removed_lines() == removed1
-        });
+        let match_idx = recreated_hunks
+            .iter()
+            .position(|h2| h2.added_lines() == added1 && h2.removed_lines() == removed1);
 
         if let Some(idx) = match_idx {
             recreated_hunks.remove(idx);

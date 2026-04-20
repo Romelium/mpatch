@@ -11,22 +11,22 @@
 //!
 //! ## Why mpatch?
 //!
-//! Standard patching tools are fragile. They rely on exact line numbers and 
-//! byte-for-byte context matches. In a modern workflow involving LLMs, code 
+//! Standard patching tools are fragile. They rely on exact line numbers and
+//! byte-for-byte context matches. In a modern workflow involving LLMs, code
 //! often drifts quickly. `mpatch` solves this by:
 //!
-//! - **Flexible Anchoring**: Searching for the best fit in a file, even if the 
+//! - **Flexible Anchoring**: Searching for the best fit in a file, even if the
 //!   target has moved dozens of lines.
-//! - **Fuzzy Similarity**: Accepting matches that are "close enough" (e.g., 
+//! - **Fuzzy Similarity**: Accepting matches that are "close enough" (e.g.,
 //!   modified comments or minor whitespace changes).
-//! - **Indentation Awareness**: Dynamically re-aligning the indentation of 
+//! - **Indentation Awareness**: Dynamically re-aligning the indentation of
 //!   injected code to match the target file's style.
 //!
 //! ## Format Support & Limitations
 //!
-//! `mpatch` handles Unified Diffs and Markdown blocks natively. It also supports 
-//! **Conflict Markers** (`<<<<`, `====`, `>>>>`), but with a significant caveat: 
-//! conflict markers do not encode the target file path. When parsed, they default 
+//! `mpatch` handles Unified Diffs and Markdown blocks natively. It also supports
+//! **Conflict Markers** (`<<<<`, `====`, `>>>>`), but with a significant caveat:
+//! conflict markers do not encode the target file path. When parsed, they default
 //! to a placeholder path (`patch_target`).
 //!
 //! ## Getting Started
@@ -1756,7 +1756,7 @@ pub struct ApplyResult {
 /// This struct is returned by [`ApplyResult::failures()`] and provides a convenient
 /// way to inspect which hunk failed and for what reason.
 ///
-    /// # Examples
+/// # Examples
 ///
 /// ````rust
 /// # use mpatch::{parse_single_patch, apply_patch_to_content, ApplyOptions, HunkApplyError, HunkFailure};
@@ -2132,9 +2132,9 @@ impl ApplyResult {
 ///
 /// Structurally, this models a hunk from a Unified Diff (the `@@ ... @@` blocks),
 /// storing lines prefixed with `+`, `-`, or space. However, it serves as the
-/// universal internal representation for all patch formats in `mpatch`. This 
-/// abstraction allows the matching engine to operate identically regardless 
-/// of whether the input was a formal `.patch` file or a snippet of 
+/// universal internal representation for all patch formats in `mpatch`. This
+/// abstraction allows the matching engine to operate identically regardless
+/// of whether the input was a formal `.patch` file or a snippet of
 /// conflict markers.
 ///
 /// - **Unified Diffs:** Parsed directly.
@@ -3631,9 +3631,9 @@ pub fn parse_patches(content: &str) -> Result<Vec<Patch>, ParseError> {
 /// This format is common in Git merge conflicts or AI-generated code suggestions.
 /// Since this format typically lacks file headers, the resulting [`Patch`] objects
 /// will have a generic file path (`patch_target`).
-/// 
-/// **Warning:** Because this format lacks target file information, it is 
-/// generally unsuitable for batch-applying patches to a directory unless 
+///
+/// **Warning:** Because this format lacks target file information, it is
+/// generally unsuitable for batch-applying patches to a directory unless
 /// the target file is manually specified or renamed.
 ///
 /// This function treats text outside the markers as context lines, text between
