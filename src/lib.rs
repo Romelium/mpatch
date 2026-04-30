@@ -5223,7 +5223,7 @@ fn adjust_indentation(line: &str, hunk_indent: &str, target_indent: &str) -> Str
         let target_is_tabs = target_indent.chars().all(|c| c == '\t');
 
         if hunk_is_spaces && target_is_tabs {
-            let spaces_per_tab = if hunk_indent.len() % target_indent.len() == 0
+            let spaces_per_tab = if hunk_indent.len().is_multiple_of(target_indent.len())
                 && hunk_indent.len() / target_indent.len() <= 4
             {
                 hunk_indent.len() / target_indent.len()
@@ -5257,7 +5257,7 @@ fn adjust_indentation(line: &str, hunk_indent: &str, target_indent: &str) -> Str
         let target_is_spaces = target_indent.chars().all(|c| c == ' ');
 
         if hunk_is_tabs && target_is_spaces {
-            let spaces_per_tab = if target_indent.len() % hunk_indent.len() == 0
+            let spaces_per_tab = if target_indent.len().is_multiple_of(hunk_indent.len())
                 && target_indent.len() / hunk_indent.len() <= 4
             {
                 target_indent.len() / hunk_indent.len()
@@ -5286,8 +5286,8 @@ fn adjust_indentation(line: &str, hunk_indent: &str, target_indent: &str) -> Str
     }
 
     // If the line starts with the hunk's indentation, we can simply replace it with the target's indentation.
-    if line.starts_with(hunk_indent) {
-        return format!("{}{}", target_indent, &line[hunk_indent.len()..]);
+    if let Some(stripped) = line.strip_prefix(hunk_indent) {
+        return format!("{}{}", target_indent, stripped);
     }
 
     // Fallback for lines that are outdented relative to the hunk's context.
@@ -5301,7 +5301,7 @@ fn adjust_indentation(line: &str, hunk_indent: &str, target_indent: &str) -> Str
                 break;
             }
         }
-        return format!("{}{}", new_indent, &line[line_indent.len()..]);
+        format!("{}{}", new_indent, &line[line_indent.len()..])
     } else if let Some(diff) = target_indent.strip_prefix(hunk_indent) {
         // Target is more indented than hunk.
         // We need to add `diff` to the start of `line`.
