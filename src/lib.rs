@@ -5286,11 +5286,16 @@ fn adjust_indentation(line: &str, hunk_indent: &str, target_indent: &str) -> Str
 
     // Fallback for lines that are outdented relative to the hunk's context.
     if let Some(diff) = hunk_indent.strip_prefix(target_indent) {
-        // Hunk is more indented than target. Try to strip the difference.
-        if let Some(stripped) = line.strip_prefix(diff) {
-            return stripped.to_string();
+        // Hunk is more indented than target. Try to strip the difference from the end of line_indent.
+        let mut new_indent = line_indent.to_string();
+        for c in diff.chars().rev() {
+            if new_indent.ends_with(c) {
+                new_indent.pop();
+            } else {
+                break;
+            }
         }
-        line.to_string()
+        return format!("{}{}", new_indent, &line[line_indent.len()..]);
     } else if let Some(diff) = target_indent.strip_prefix(hunk_indent) {
         // Target is more indented than hunk.
         // We need to add `diff` to the start of `line`.

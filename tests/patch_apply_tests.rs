@@ -6316,3 +6316,43 @@ fn test_multiple_file_creations_with_empty_lines_between() {
         vec!["content 3", "content 4"]
     );
 }
+
+#[test]
+fn test_smart_indentation_outdented_added_line_fallback() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("outdent.rs");
+
+    // Target file has 0-space indentation
+    let original_content = indoc! {r#"
+        println!("Hello");
+    "#};
+    fs::write(&file_path, original_content).unwrap();
+
+    // Patch has 8-space indentation for context, and adds lines with 4 and 0 spaces.
+    let diff = indoc! {r#"
+        ```diff
+        --- a/outdent.rs
+        +++ b/outdent.rs
+        @@ -1,1 +1,3 @@
+                 println!("Hello");
+        +    }
+        +}
+        ```
+    "#};
+
+    let patches = parse_diffs(diff).unwrap();
+    let options = ApplyOptions::new();
+    apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+    let content = fs::read_to_string(&file_path).unwrap();
+
+    // Without the fix, the first added line would incorrectly retain 4 spaces: `    }`
+    // With the fix, it correctly strips the remaining spaces to reach 0 indentation: `}`
+    let expected = indoc! {r#"
+        println!("Hello");
+        }
+        }
+    "#};
+    assert_eq!(content, expected);
+}

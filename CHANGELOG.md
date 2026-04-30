@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 -   **Patch Application:** Fixed smart indentation adjustment to correctly translate multiple levels of indentation between spaces and tabs, making it robust against nested patches (e.g., inside markdown lists) by defaulting to 4 spaces per tab if the ratio is skewed. Also fixed an issue where empty lines (or lines with only whitespace) would result in trailing whitespace being added.
 -   **Patch Application:** Fixed a bug where the auto-indentation logic would lose track of the target file's indentation style (e.g., tabs vs. spaces) when encountering unindented lines within the patch context.
--   **Patch Application:** Fixed a bug in the fallback logic for adjusting indentation of lines that are outdented relative to the hunk's context.
+-   **Patch Application:** Fixed a bug in the fallback logic for adjusting indentation of lines that are outdented relative to the hunk's context. The logic now correctly strips the indentation difference from the end of the line's actual indentation.
 -   **CLI:** Fixed a bug in the debug report's discrepancy check (`-vvvv`) where patches that created or deleted files were skipped. The check now correctly treats non-existent files as empty strings, allowing verification to proceed.
 -   **CLI:** Fixed a false positive in the debug report's discrepancy check (`-vvvv`) where patches with out-of-order hunks were incorrectly flagged as failures. The check now correctly verifies hunks regardless of their order.
 
