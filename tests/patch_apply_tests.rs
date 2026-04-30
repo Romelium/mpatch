@@ -2618,7 +2618,8 @@ fn test_smart_indentation_preserved_across_unindented_lines() {
     let file_path = dir.path().join("unindented.py");
 
     // Target file uses TABS
-    let original_content = "class Foo:\n\tdef __init__(self):\n\t\tpass\n\ndef main():\n\tprint(\"hello\")\n";
+    let original_content =
+        "class Foo:\n\tdef __init__(self):\n\t\tpass\n\ndef main():\n\tprint(\"hello\")\n";
     fs::write(&file_path, original_content).unwrap();
 
     // Patch uses SPACES

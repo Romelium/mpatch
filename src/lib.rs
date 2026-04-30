@@ -5221,9 +5221,11 @@ fn adjust_indentation(line: &str, hunk_indent: &str, target_indent: &str) -> Str
     if !hunk_indent.is_empty() && !target_indent.is_empty() {
         let hunk_is_spaces = hunk_indent.chars().all(|c| c == ' ');
         let target_is_tabs = target_indent.chars().all(|c| c == '\t');
-        
+
         if hunk_is_spaces && target_is_tabs {
-            let spaces_per_tab = if hunk_indent.len() % target_indent.len() == 0 && hunk_indent.len() / target_indent.len() <= 4 {
+            let spaces_per_tab = if hunk_indent.len() % target_indent.len() == 0
+                && hunk_indent.len() / target_indent.len() <= 4
+            {
                 hunk_indent.len() / target_indent.len()
             } else {
                 4
@@ -5238,22 +5240,26 @@ fn adjust_indentation(line: &str, hunk_indent: &str, target_indent: &str) -> Str
 
                 if line_tabs >= hunk_tabs {
                     let new_tabs = target_tabs + (line_tabs - hunk_tabs);
-                    let new_indent = format!("{}{}", "\t".repeat(new_tabs), " ".repeat(line_spaces));
+                    let new_indent =
+                        format!("{}{}", "\t".repeat(new_tabs), " ".repeat(line_spaces));
                     return format!("{}{}", new_indent, &line[line_indent.len()..]);
                 } else {
                     let outdent = hunk_tabs - line_tabs;
                     let new_tabs = target_tabs.saturating_sub(outdent);
-                    let new_indent = format!("{}{}", "\t".repeat(new_tabs), " ".repeat(line_spaces));
+                    let new_indent =
+                        format!("{}{}", "\t".repeat(new_tabs), " ".repeat(line_spaces));
                     return format!("{}{}", new_indent, &line[line_indent.len()..]);
                 }
             }
         }
-        
+
         let hunk_is_tabs = hunk_indent.chars().all(|c| c == '\t');
         let target_is_spaces = target_indent.chars().all(|c| c == ' ');
-        
+
         if hunk_is_tabs && target_is_spaces {
-            let spaces_per_tab = if target_indent.len() % hunk_indent.len() == 0 && target_indent.len() / hunk_indent.len() <= 4 {
+            let spaces_per_tab = if target_indent.len() % hunk_indent.len() == 0
+                && target_indent.len() / hunk_indent.len() <= 4
+            {
                 target_indent.len() / hunk_indent.len()
             } else {
                 4
