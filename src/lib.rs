@@ -5208,7 +5208,10 @@ pub fn patch_content_str(
 /// If `target_indent` is shorter than `hunk_indent`, we strip the difference from `line`.
 /// If `target_indent` is longer, we prepend the difference.
 fn adjust_indentation(line: &str, hunk_indent: &str, target_indent: &str) -> String {
-    if line.is_empty() || hunk_indent == target_indent {
+    if line.trim().is_empty() {
+        return String::new();
+    }
+    if hunk_indent == target_indent {
         return line.to_string();
     }
 
@@ -5220,12 +5223,27 @@ fn adjust_indentation(line: &str, hunk_indent: &str, target_indent: &str) -> Str
         let target_is_tabs = target_indent.chars().all(|c| c == '\t');
         
         if hunk_is_spaces && target_is_tabs {
-            let spaces_per_tab = hunk_indent.len() / target_indent.len();
-            if spaces_per_tab > 0 && hunk_indent.len() % target_indent.len() == 0 {
-                if line_indent.chars().all(|c| c == ' ') {
-                    let tabs = line_indent.len() / spaces_per_tab;
-                    let spaces = line_indent.len() % spaces_per_tab;
-                    let new_indent = format!("{}{}", "\t".repeat(tabs), " ".repeat(spaces));
+            let spaces_per_tab = if hunk_indent.len() % target_indent.len() == 0 && hunk_indent.len() / target_indent.len() <= 4 {
+                hunk_indent.len() / target_indent.len()
+            } else {
+                4
+            };
+
+            if line_indent.chars().all(|c| c == ' ') {
+                let hunk_tabs = hunk_indent.len() / spaces_per_tab;
+                let line_tabs = line_indent.len() / spaces_per_tab;
+                let line_spaces = line_indent.len() % spaces_per_tab;
+
+                let target_tabs = target_indent.len();
+
+                if line_tabs >= hunk_tabs {
+                    let new_tabs = target_tabs + (line_tabs - hunk_tabs);
+                    let new_indent = format!("{}{}", "\t".repeat(new_tabs), " ".repeat(line_spaces));
+                    return format!("{}{}", new_indent, &line[line_indent.len()..]);
+                } else {
+                    let outdent = hunk_tabs - line_tabs;
+                    let new_tabs = target_tabs.saturating_sub(outdent);
+                    let new_indent = format!("{}{}", "\t".repeat(new_tabs), " ".repeat(line_spaces));
                     return format!("{}{}", new_indent, &line[line_indent.len()..]);
                 }
             }
@@ -5235,11 +5253,26 @@ fn adjust_indentation(line: &str, hunk_indent: &str, target_indent: &str) -> Str
         let target_is_spaces = target_indent.chars().all(|c| c == ' ');
         
         if hunk_is_tabs && target_is_spaces {
-            let spaces_per_tab = target_indent.len() / hunk_indent.len();
-            if spaces_per_tab > 0 && target_indent.len() % hunk_indent.len() == 0 {
-                if line_indent.chars().all(|c| c == '\t') {
-                    let spaces = line_indent.len() * spaces_per_tab;
-                    let new_indent = " ".repeat(spaces);
+            let spaces_per_tab = if target_indent.len() % hunk_indent.len() == 0 && target_indent.len() / hunk_indent.len() <= 4 {
+                target_indent.len() / hunk_indent.len()
+            } else {
+                4
+            };
+
+            if line_indent.chars().all(|c| c == '\t') {
+                let hunk_tabs = hunk_indent.len();
+                let line_tabs = line_indent.len();
+
+                let target_spaces = target_indent.len();
+
+                if line_tabs >= hunk_tabs {
+                    let new_spaces = target_spaces + (line_tabs - hunk_tabs) * spaces_per_tab;
+                    let new_indent = " ".repeat(new_spaces);
+                    return format!("{}{}", new_indent, &line[line_indent.len()..]);
+                } else {
+                    let outdent_spaces = (hunk_tabs - line_tabs) * spaces_per_tab;
+                    let new_spaces = target_spaces.saturating_sub(outdent_spaces);
+                    let new_indent = " ".repeat(new_spaces);
                     return format!("{}{}", new_indent, &line[line_indent.len()..]);
                 }
             }
@@ -5351,7 +5384,13 @@ pub fn apply_hunk_to_lines(
                 trace!("    Applying hunk via exact logic.");
                 hunk.get_replace_block()
                     .iter()
-                    .map(|s| s.to_string())
+                    .map(|s| {
+                        if s.trim().is_empty() {
+                            String::new()
+                        } else {
+                            s.to_string()
+                        }
+                    })
                     .collect()
             } else {
                 // For Fuzzy and ExactIgnoringWhitespace, indentation might mismatch or drift.
@@ -5586,6 +5625,13 @@ pub fn apply_hunk_to_lines(
                                     let old_idx = old_index + i;
                                     let new_idx = new_index + i;
                                     let (is_removal, additions) = &match_lines_meta[old_idx];
+
+                                    let h_line = match_block_content[old_idx];
+                                    let t_line = &file_matched_lines[new_idx];
+                                    if !h_line.trim().is_empty() && !t_line.trim().is_empty() {
+                                        current_hunk_indent = get_indent(h_line);
+                                        current_target_indent = get_indent(t_line);
+                                    }
 
                                     if !*is_removal {
                                         final_lines.push(file_matched_lines[new_idx].clone());

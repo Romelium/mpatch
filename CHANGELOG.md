@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
--   **Patch Application:** Fixed smart indentation adjustment to correctly translate multiple levels of indentation between spaces and tabs (e.g., 8 spaces to 2 tabs). Also fixed an issue where empty lines in the context would disrupt indentation tracking for subsequent additions.
+-   **Patch Application:** Fixed smart indentation adjustment to correctly translate multiple levels of indentation between spaces and tabs, making it robust against nested patches (e.g., inside markdown lists) by defaulting to 4 spaces per tab if the ratio is skewed. Also fixed an issue where empty lines (or lines with only whitespace) would result in trailing whitespace being added.
 -   **CLI:** Fixed a bug in the debug report's discrepancy check (`-vvvv`) where patches that created or deleted files were skipped. The check now correctly treats non-existent files as empty strings, allowing verification to proceed.
 -   **CLI:** Fixed a false positive in the debug report's discrepancy check (`-vvvv`) where patches with out-of-order hunks were incorrectly flagged as failures. The check now correctly verifies hunks regardless of their order.
 

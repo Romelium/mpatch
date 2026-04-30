@@ -2549,6 +2549,69 @@ fn test_smart_indentation_after_empty_line() {
 }
 
 #[test]
+fn test_smart_indentation_empty_lines_stripped() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("empty_lines.py");
+
+    let original_content = "def main():\n    print(\"hello\")\n";
+    fs::write(&file_path, original_content).unwrap();
+
+    // Patch adds an empty line with spaces, and another print
+    let diff = format!(
+        "```diff\n--- a/empty_lines.py\n+++ b/empty_lines.py\n@@ -1,2 +1,4 @@\n def main():\n     print(\"hello\")\n+{spaces}\n+    print(\"world\")\n```",
+        spaces = "    "
+    );
+
+    let patches = parse_diffs(&diff).unwrap();
+    let options = ApplyOptions::new();
+    apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+    let content = fs::read_to_string(&file_path).unwrap();
+
+    // The empty line should be completely empty, no trailing spaces
+    let expected = "def main():\n    print(\"hello\")\n\n    print(\"world\")\n";
+    assert_eq!(content, expected);
+}
+
+#[test]
+fn test_smart_indentation_nested_markdown_list_spaces_to_tabs() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("nested_tabs.py");
+
+    // Target file uses TABS
+    let original_content = "def main():\n\tprint(\"hello\")\n";
+    fs::write(&file_path, original_content).unwrap();
+
+    // Patch uses SPACES, but is nested in a markdown list, so it has extra indentation.
+    // Target indent: 1 tab. Hunk indent: 6 spaces (e.g., 2 spaces for list + 4 spaces for code).
+    let diff = format!(
+        "```diff\n--- a/nested_tabs.py\n+++ b/nested_tabs.py\n@@ -1,2 +1,4 @@\n{s3}def main():\n{s7}print(\"hello\")\n+{s6}if True:\n+{s10}print(\"world\")\n```",
+        s3 = "   ",
+        s7 = "       ",
+        s6 = "      ",
+        s10 = "          "
+    );
+
+    let patches = parse_diffs(&diff).unwrap();
+    let options = ApplyOptions::new();
+    apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+    let content = fs::read_to_string(&file_path).unwrap();
+
+    // With the new logic, spaces_per_tab falls back to 4.
+    // hunk_indent = 6 spaces. target_indent = 1 tab.
+    // line_indent = 6 spaces for `if True:`, 10 spaces for `print("world")`.
+    // For `if True:`: hunk_tabs = 1, line_tabs = 1, line_spaces = 2.
+    // new_tabs = 1 + (1 - 1) = 1. new_indent = \t + 2 spaces.
+    // For `print("world")`: hunk_tabs = 1, line_tabs = 2, line_spaces = 2.
+    // new_tabs = 1 + (2 - 1) = 2. new_indent = \t\t + 2 spaces.
+    let expected = "def main():\n\tprint(\"hello\")\n\t  if True:\n\t\t  print(\"world\")\n";
+    assert_eq!(content, expected);
+}
+
+#[test]
 fn test_fuzzy_match_with_insertion_at_hunk_end() {
     let _ = env_logger::builder().is_test(true).try_init();
     let dir = tempdir().unwrap();
