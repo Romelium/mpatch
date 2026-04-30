@@ -2482,6 +2482,73 @@ fn test_fuzzy_match_with_insertion_at_hunk_start() {
 }
 
 #[test]
+fn test_smart_indentation_tabs_to_tabs_multiple_levels() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("tabs_multi.py");
+
+    // Target file uses TABS
+    let original_content = "def main():\n\tif True:\n\t\tprint(\"hello\")\n";
+    fs::write(&file_path, original_content).unwrap();
+
+    // Patch uses SPACES
+    let diff = indoc! {r#"
+        ```diff
+        --- a/tabs_multi.py
+        +++ b/tabs_multi.py
+        @@ -1,3 +1,4 @@
+         def main():
+             if True:
+                 print("hello")
+        +        print("world")
+        ```
+    "#};
+
+    let patches = parse_diffs(diff).unwrap();
+    let options = ApplyOptions::new();
+    apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+    let content = fs::read_to_string(&file_path).unwrap();
+
+    let expected = "def main():\n\tif True:\n\t\tprint(\"hello\")\n\t\tprint(\"world\")\n";
+    assert_eq!(content, expected);
+}
+
+#[test]
+fn test_smart_indentation_after_empty_line() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("empty_line.py");
+
+    // Target file uses TABS
+    let original_content = "def main():\n\tprint(\"hello\")\n\n\tprint(\"world\")\n";
+    fs::write(&file_path, original_content).unwrap();
+
+    // Patch uses SPACES and adds a line after the empty line
+    let diff = indoc! {r#"
+        ```diff
+        --- a/empty_line.py
+        +++ b/empty_line.py
+        @@ -1,4 +1,5 @@
+         def main():
+             print("hello")
+         
+        +    print("inserted")
+             print("world")
+        ```
+    "#};
+
+    let patches = parse_diffs(diff).unwrap();
+    let options = ApplyOptions::new();
+    apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+    let content = fs::read_to_string(&file_path).unwrap();
+
+    let expected = "def main():\n\tprint(\"hello\")\n\n\tprint(\"inserted\")\n\tprint(\"world\")\n";
+    assert_eq!(content, expected);
+}
+
+#[test]
 fn test_fuzzy_match_with_insertion_at_hunk_end() {
     let _ = env_logger::builder().is_test(true).try_init();
     let dir = tempdir().unwrap();

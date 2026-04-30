@@ -5208,8 +5208,42 @@ pub fn patch_content_str(
 /// If `target_indent` is shorter than `hunk_indent`, we strip the difference from `line`.
 /// If `target_indent` is longer, we prepend the difference.
 fn adjust_indentation(line: &str, hunk_indent: &str, target_indent: &str) -> String {
-    if hunk_indent == target_indent {
+    if line.is_empty() || hunk_indent == target_indent {
         return line.to_string();
+    }
+
+    let line_indent = get_indent(line);
+
+    // Check for pure spaces to pure tabs translation (or vice versa)
+    if !hunk_indent.is_empty() && !target_indent.is_empty() {
+        let hunk_is_spaces = hunk_indent.chars().all(|c| c == ' ');
+        let target_is_tabs = target_indent.chars().all(|c| c == '\t');
+        
+        if hunk_is_spaces && target_is_tabs {
+            let spaces_per_tab = hunk_indent.len() / target_indent.len();
+            if spaces_per_tab > 0 && hunk_indent.len() % target_indent.len() == 0 {
+                if line_indent.chars().all(|c| c == ' ') {
+                    let tabs = line_indent.len() / spaces_per_tab;
+                    let spaces = line_indent.len() % spaces_per_tab;
+                    let new_indent = format!("{}{}", "\t".repeat(tabs), " ".repeat(spaces));
+                    return format!("{}{}", new_indent, &line[line_indent.len()..]);
+                }
+            }
+        }
+        
+        let hunk_is_tabs = hunk_indent.chars().all(|c| c == '\t');
+        let target_is_spaces = target_indent.chars().all(|c| c == ' ');
+        
+        if hunk_is_tabs && target_is_spaces {
+            let spaces_per_tab = target_indent.len() / hunk_indent.len();
+            if spaces_per_tab > 0 && target_indent.len() % hunk_indent.len() == 0 {
+                if line_indent.chars().all(|c| c == '\t') {
+                    let spaces = line_indent.len() * spaces_per_tab;
+                    let new_indent = " ".repeat(spaces);
+                    return format!("{}{}", new_indent, &line[line_indent.len()..]);
+                }
+            }
+        }
     }
 
     if let Some(diff) = hunk_indent.strip_prefix(target_indent) {
@@ -5390,25 +5424,47 @@ pub fn apply_hunk_to_lines(
                 let mut current_target_indent = "";
 
                 for op in diff.ops() {
+                    let mut found = false;
                     match op {
                         similar::DiffOp::Equal {
                             old_index,
                             new_index,
-                            ..
+                            len,
+                        } => {
+                            // Use the first non-empty line of the block to gauge indentation
+                            for i in 0..*len {
+                                let h_line = match_block_content[*old_index + i];
+                                let t_line = file_block_content[*new_index + i];
+                                if !h_line.trim().is_empty() && !t_line.trim().is_empty() {
+                                    current_hunk_indent = get_indent(h_line);
+                                    current_target_indent = get_indent(t_line);
+                                    found = true;
+                                    break;
+                                }
+                            }
                         }
-                        | similar::DiffOp::Replace {
+                        similar::DiffOp::Replace {
                             old_index,
                             new_index,
-                            ..
+                            old_len,
+                            new_len,
                         } => {
-                            // Use the first line of the block to gauge indentation
-                            let h_line = match_block_content[*old_index];
-                            let t_line = file_block_content[*new_index];
-                            current_hunk_indent = get_indent(h_line);
-                            current_target_indent = get_indent(t_line);
-                            break;
+                            let min_len = std::cmp::min(*old_len, *new_len);
+                            for i in 0..min_len {
+                                let h_line = match_block_content[*old_index + i];
+                                let t_line = file_block_content[*new_index + i];
+                                if !h_line.trim().is_empty() && !t_line.trim().is_empty() {
+                                    current_hunk_indent = get_indent(h_line);
+                                    current_target_indent = get_indent(t_line);
+                                    found = true;
+                                    break;
+                                }
+                            }
                         }
                         _ => {}
+                    }
+                    if found {
+                        break;
                     }
                 }
 
@@ -5443,8 +5499,10 @@ pub fn apply_hunk_to_lines(
                                 // Update indentation context dynamically based on this matching line
                                 let h_line = match_block_content[old_idx];
                                 let t_line = &file_matched_lines[new_idx];
-                                current_hunk_indent = get_indent(h_line);
-                                current_target_indent = get_indent(t_line);
+                                if !h_line.trim().is_empty() && !t_line.trim().is_empty() {
+                                    current_hunk_indent = get_indent(h_line);
+                                    current_target_indent = get_indent(t_line);
+                                }
 
                                 // If it's not a removal, keep the file's version of the line (preserves local edits)
                                 if !*is_removal {
@@ -5508,12 +5566,18 @@ pub fn apply_hunk_to_lines(
                             new_len,
                         } => {
                             // A region where the file differs significantly from the hunk.
-                            // Try to update indentation from the first line of the replacement block
+                            // Try to update indentation from the first non-empty line of the replacement block
                             if *old_len > 0 && *new_len > 0 {
-                                let h_line = match_block_content[*old_index];
-                                let t_line = &file_matched_lines[*new_index];
-                                current_hunk_indent = get_indent(h_line);
-                                current_target_indent = get_indent(t_line);
+                                let min_len = std::cmp::min(*old_len, *new_len);
+                                for i in 0..min_len {
+                                    let h_line = match_block_content[*old_index + i];
+                                    let t_line = &file_matched_lines[*new_index + i];
+                                    if !h_line.trim().is_empty() && !t_line.trim().is_empty() {
+                                        current_hunk_indent = get_indent(h_line);
+                                        current_target_indent = get_indent(t_line);
+                                        break;
+                                    }
+                                }
                             }
 
                             // If lengths match, we assume a 1-to-1 correspondence (e.g. whitespace changes).
