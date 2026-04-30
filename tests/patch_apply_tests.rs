@@ -2612,6 +2612,64 @@ fn test_smart_indentation_nested_markdown_list_spaces_to_tabs() {
 }
 
 #[test]
+fn test_smart_indentation_preserved_across_unindented_lines() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("unindented.py");
+
+    // Target file uses TABS
+    let original_content = "class Foo:\n\tdef __init__(self):\n\t\tpass\n\ndef main():\n\tprint(\"hello\")\n";
+    fs::write(&file_path, original_content).unwrap();
+
+    // Patch uses SPACES
+    let diff = indoc! {r#"
+        ```diff
+        --- a/unindented.py
+        +++ b/unindented.py
+        @@ -2,4 +2,5 @@
+             def __init__(self):
+                 pass
+         
+         def main():
+        +    print("setup")
+             print("hello")
+        ```
+    "#};
+
+    let patches = parse_diffs(diff).unwrap();
+    let options = ApplyOptions::new();
+    apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+    let content = fs::read_to_string(&file_path).unwrap();
+
+    let expected = "class Foo:\n\tdef __init__(self):\n\t\tpass\n\ndef main():\n\tprint(\"setup\")\n\tprint(\"hello\")\n";
+    assert_eq!(content, expected);
+}
+
+#[test]
+fn test_smart_indentation_mixed_style_fallback() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("mixed.py");
+
+    // Target file uses 1 tab
+    let original_content = "def main():\n\tprint(\"hello\")\n";
+    fs::write(&file_path, original_content).unwrap();
+
+    // Patch uses 1 tab + 4 spaces for context, and adds a line with 1 tab + 8 spaces
+    let diff = "```diff\n--- a/mixed.py\n+++ b/mixed.py\n@@ -1,2 +1,3 @@\n def main():\n \t    print(\"hello\")\n+\t        print(\"world\")\n```";
+
+    let patches = parse_diffs(diff).unwrap();
+    let options = ApplyOptions::new();
+    apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+    let content = fs::read_to_string(&file_path).unwrap();
+
+    let expected = "def main():\n\tprint(\"hello\")\n\t    print(\"world\")\n";
+    assert_eq!(content, expected);
+}
+
+#[test]
 fn test_fuzzy_match_with_insertion_at_hunk_end() {
     let _ = env_logger::builder().is_test(true).try_init();
     let dir = tempdir().unwrap();

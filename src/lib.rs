@@ -5279,24 +5279,23 @@ fn adjust_indentation(line: &str, hunk_indent: &str, target_indent: &str) -> Str
         }
     }
 
+    // If the line starts with the hunk's indentation, we can simply replace it with the target's indentation.
+    if line.starts_with(hunk_indent) {
+        return format!("{}{}", target_indent, &line[hunk_indent.len()..]);
+    }
+
+    // Fallback for lines that are outdented relative to the hunk's context.
     if let Some(diff) = hunk_indent.strip_prefix(target_indent) {
-        // Hunk is more indented than target (e.g. nested in markdown list).
-        // We need to strip `diff` from the start of `line`.
+        // Hunk is more indented than target. Try to strip the difference.
         if let Some(stripped) = line.strip_prefix(diff) {
             return stripped.to_string();
         }
-        // If line doesn't start with the indent (e.g. empty line), return as is.
         line.to_string()
     } else if let Some(diff) = target_indent.strip_prefix(hunk_indent) {
         // Target is more indented than hunk.
         // We need to add `diff` to the start of `line`.
         format!("{}{}", diff, line)
     } else {
-        // Indentation styles differ completely (e.g. tabs vs spaces).
-        // If the line starts with the hunk's indentation, we can attempt a swap.
-        if !hunk_indent.is_empty() && line.starts_with(hunk_indent) {
-            return format!("{}{}", target_indent, &line[hunk_indent.len()..]);
-        }
         line.to_string()
     }
 }
@@ -5474,9 +5473,11 @@ pub fn apply_hunk_to_lines(
                             for i in 0..*len {
                                 let h_line = match_block_content[*old_index + i];
                                 let t_line = file_block_content[*new_index + i];
-                                if !h_line.trim().is_empty() && !t_line.trim().is_empty() {
-                                    current_hunk_indent = get_indent(h_line);
-                                    current_target_indent = get_indent(t_line);
+                                let h_ind = get_indent(h_line);
+                                let t_ind = get_indent(t_line);
+                                if !h_ind.is_empty() || !t_ind.is_empty() {
+                                    current_hunk_indent = h_ind;
+                                    current_target_indent = t_ind;
                                     found = true;
                                     break;
                                 }
@@ -5492,9 +5493,11 @@ pub fn apply_hunk_to_lines(
                             for i in 0..min_len {
                                 let h_line = match_block_content[*old_index + i];
                                 let t_line = file_block_content[*new_index + i];
-                                if !h_line.trim().is_empty() && !t_line.trim().is_empty() {
-                                    current_hunk_indent = get_indent(h_line);
-                                    current_target_indent = get_indent(t_line);
+                                let h_ind = get_indent(h_line);
+                                let t_ind = get_indent(t_line);
+                                if !h_ind.is_empty() || !t_ind.is_empty() {
+                                    current_hunk_indent = h_ind;
+                                    current_target_indent = t_ind;
                                     found = true;
                                     break;
                                 }
@@ -5538,9 +5541,11 @@ pub fn apply_hunk_to_lines(
                                 // Update indentation context dynamically based on this matching line
                                 let h_line = match_block_content[old_idx];
                                 let t_line = &file_matched_lines[new_idx];
-                                if !h_line.trim().is_empty() && !t_line.trim().is_empty() {
-                                    current_hunk_indent = get_indent(h_line);
-                                    current_target_indent = get_indent(t_line);
+                                let h_ind = get_indent(h_line);
+                                let t_ind = get_indent(t_line);
+                                if !h_ind.is_empty() || !t_ind.is_empty() {
+                                    current_hunk_indent = h_ind;
+                                    current_target_indent = t_ind;
                                 }
 
                                 // If it's not a removal, keep the file's version of the line (preserves local edits)
@@ -5611,9 +5616,11 @@ pub fn apply_hunk_to_lines(
                                 for i in 0..min_len {
                                     let h_line = match_block_content[*old_index + i];
                                     let t_line = &file_matched_lines[*new_index + i];
-                                    if !h_line.trim().is_empty() && !t_line.trim().is_empty() {
-                                        current_hunk_indent = get_indent(h_line);
-                                        current_target_indent = get_indent(t_line);
+                                    let h_ind = get_indent(h_line);
+                                    let t_ind = get_indent(t_line);
+                                    if !h_ind.is_empty() || !t_ind.is_empty() {
+                                        current_hunk_indent = h_ind;
+                                        current_target_indent = t_ind;
                                         break;
                                     }
                                 }
@@ -5628,9 +5635,11 @@ pub fn apply_hunk_to_lines(
 
                                     let h_line = match_block_content[old_idx];
                                     let t_line = &file_matched_lines[new_idx];
-                                    if !h_line.trim().is_empty() && !t_line.trim().is_empty() {
-                                        current_hunk_indent = get_indent(h_line);
-                                        current_target_indent = get_indent(t_line);
+                                    let h_ind = get_indent(h_line);
+                                    let t_ind = get_indent(t_line);
+                                    if !h_ind.is_empty() || !t_ind.is_empty() {
+                                        current_hunk_indent = h_ind;
+                                        current_target_indent = t_ind;
                                     }
 
                                     if !*is_removal {
