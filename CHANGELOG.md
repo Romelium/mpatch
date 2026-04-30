@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+-   **CLI:** Fixed a bug in the debug report's discrepancy check (`-vvvv`) where patches that created or deleted files were skipped. The check now correctly treats non-existent files as empty strings, allowing verification to proceed.
 -   **CLI:** Fixed a false positive in the debug report's discrepancy check (`-vvvv`) where patches with out-of-order hunks were incorrectly flagged as failures. The check now correctly verifies hunks regardless of their order.
 
 ## [1.4.1] - 2026-04-04

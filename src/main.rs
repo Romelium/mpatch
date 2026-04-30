@@ -336,6 +336,7 @@ fn create_report_file(args: &Args, patch_content: &str, patches: &[Patch]) -> Re
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 writeln!(file, "*File does not exist.*")?;
+                original_contents.insert(patch.file_path.clone(), String::new());
             }
             Err(e) => writeln!(file, "*Error reading file: {}*", e)?,
         }
@@ -445,11 +446,14 @@ fn write_report_footer(
                     continue;
                 };
 
-                let new_content_res = fs::read_to_string(args.target_dir.join(path));
-                let Ok(new_content) = new_content_res else {
-                    let mut file = file_arc.lock().unwrap();
-                    let _ = writeln!(file, "\n- **Result:** <span style='color:orange;'>SKIPPED</span> (Could not read new file content after patching).");
-                    continue;
+                let new_content = match fs::read_to_string(args.target_dir.join(path)) {
+                    Ok(content) => content,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+                    Err(_) => {
+                        let mut file = file_arc.lock().unwrap();
+                        let _ = writeln!(file, "\n- **Result:** <span style='color:orange;'>SKIPPED</span> (Could not read new file content after patching).");
+                        continue;
+                    }
                 };
 
                 // Re-create a patch from the before/after state.
