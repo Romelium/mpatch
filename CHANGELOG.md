@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.2] - 2026-04-30
+
 ### Fixed
 
 -   **Patch Application:** Fixed smart indentation adjustment to correctly translate multiple levels of indentation between spaces and tabs, making it robust against nested patches (e.g., inside markdown lists) by defaulting to 4 spaces per tab if the ratio is skewed. Also fixed an issue where empty lines (or lines with only whitespace) would result in trailing whitespace being added.
