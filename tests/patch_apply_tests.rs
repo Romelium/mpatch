@@ -5361,6 +5361,75 @@ mod fuzzy_logic_edge_cases {
         let content = fs::read_to_string(&file_path).unwrap();
         assert!(content.contains("    let y = 3;\n"));
     }
+
+    #[test]
+    fn test_fuzzy_reconstruction_misalignment_bug() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("model.py");
+
+        // Target file (4 and 8 spaces indent)
+        let original_content = [
+            "        yins[t] = 1",
+            "        ",
+            "    age_series = 1",
+            "    yin_series = 1",
+            "    ",
+            "    age_norm = 1",
+            "    yin_norm = 1",
+            "    ",
+            "    self.dynamic = 1",
+        ]
+        .join("\n")
+            + "\n";
+        fs::write(&file_path, original_content).unwrap();
+
+        // Patch (8 and 12 spaces indent)
+        let diff = [
+            "```diff",
+            "--- a/model.py",
+            "+++ b/model.py",
+            "@@ -1,9 +1,9 @@",
+            "             yins[t] = 1",
+            "             ",
+            "-        age_series = 1",
+            "-        yin_series = 1",
+            "+        age_series = 2",
+            "+        yin_series = 2",
+            "         ",
+            "-        age_norm = 1",
+            "-        yin_norm = 1",
+            "+        age_norm = 2",
+            "+        yin_norm = 2",
+            "         ",
+            "         self.dynamic = 1",
+            "```",
+        ]
+        .join("\n")
+            + "\n";
+
+        let patches = parse_diffs(&diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(result.report.all_applied_cleanly());
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        let expected = [
+            "        yins[t] = 1",
+            "        ",
+            "    age_series = 2",
+            "    yin_series = 2",
+            "    ",
+            "    age_norm = 2",
+            "    yin_norm = 2",
+            "    ",
+            "    self.dynamic = 1",
+        ]
+        .join("\n")
+            + "\n";
+
+        assert_eq!(content, expected);
+    }
 }
 
 mod extended_stress_tests {

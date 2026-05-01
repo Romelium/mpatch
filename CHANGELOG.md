@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+-   **Patch Application:** Fixed a critical bug in the fuzzy matching reconstruction logic where differing indentation levels between the patch and the target file could cause the internal alignment to scramble (often anchoring incorrectly on empty lines). The alignment is now based on trimmed lines, ensuring semantic correctness while still dynamically adjusting indentation during application.
+
 ## [1.4.2] - 2026-04-30
 
 ### Fixed

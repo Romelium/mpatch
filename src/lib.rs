@@ -5462,9 +5462,14 @@ pub fn apply_hunk_to_lines(
                 let file_block_content: Vec<&str> =
                     file_matched_lines.iter().map(|s| s.as_str()).collect();
 
+                let match_block_trimmed: Vec<&str> =
+                    match_block_content.iter().map(|s| s.trim()).collect();
+                let file_block_trimmed: Vec<&str> =
+                    file_block_content.iter().map(|s| s.trim()).collect();
+
                 // 3. Diff
                 let diff =
-                    similar::TextDiff::from_slices(&match_block_content, &file_block_content);
+                    similar::TextDiff::from_slices(&match_block_trimmed, &file_block_trimmed);
 
                 // 4. Determine Initial Indentation Context
                 // We scan the diff ops to find the first aligned line (Equal or Replace)
