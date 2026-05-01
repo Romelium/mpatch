@@ -4971,6 +4971,194 @@ fn test_patch_from_texts_uses_raw_parser() {
     assert_eq!(patch.hunks[0].added_lines(), vec!["line modified"]);
 }
 
+#[test]
+fn test_apply_patch_to_hard_link() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let target_path = dir.path().join("target.txt");
+    let link_path = dir.path().join("link.txt");
+
+    fs::write(&target_path, "line 1\nline 2\n").unwrap();
+    fs::hard_link(&target_path, &link_path).unwrap();
+
+    let diff = indoc! {"
+        ```diff
+        --- a/link.txt
+        +++ b/link.txt
+        @@ -1,2 +1,2 @@
+         line 1
+        -line 2
+        +line two
+        ```
+    "};
+    let patch = &parse_diffs(diff).unwrap()[0];
+    let options = ApplyOptions::exact();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
+
+    assert!(result.report.all_applied_cleanly());
+    assert!(result.diff.is_none());
+
+    let link_content = fs::read_to_string(&link_path).unwrap();
+    assert_eq!(link_content, "line 1\nline two\n");
+
+    let target_content = fs::read_to_string(&target_path).unwrap();
+    assert_eq!(target_content, "line 1\nline two\n");
+}
+
+#[test]
+#[cfg(unix)]
+fn test_apply_patch_to_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let target_path = dir.path().join("target.txt");
+    let link_path = dir.path().join("link.txt");
+
+    fs::write(&target_path, "line 1\nline 2\n").unwrap();
+    symlink(&target_path, &link_path).unwrap();
+
+    let diff = indoc! {"
+        ```diff
+        --- a/link.txt
+        +++ b/link.txt
+        @@ -1,2 +1,2 @@
+         line 1
+        -line 2
+        +line two
+        ```
+    "};
+    let patch = &parse_diffs(diff).unwrap()[0];
+    let options = ApplyOptions::exact();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
+
+    assert!(result.report.all_applied_cleanly());
+    assert!(result.diff.is_none());
+
+    let target_content = fs::read_to_string(&target_path).unwrap();
+    assert_eq!(target_content, "line 1\nline two\n");
+
+    let metadata = fs::symlink_metadata(&link_path).unwrap();
+    assert!(metadata.file_type().is_symlink());
+}
+
+#[test]
+#[cfg(unix)]
+fn test_apply_patch_to_symlink_preserves_link() {
+    use std::os::unix::fs::symlink;
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+
+    let target_file = dir.path().join("target.txt");
+    fs::write(&target_file, "original content\n").unwrap();
+
+    let symlink_path = dir.path().join("link.txt");
+    symlink("target.txt", &symlink_path).unwrap();
+
+    let diff = indoc! {"
+        ```diff
+        --- a/link.txt
+        +++ b/link.txt
+        @@ -1 +1 @@
+        -original content
+        +patched content
+        ```
+    "};
+
+    let patch = &parse_diffs(diff).unwrap()[0];
+    let options = ApplyOptions::exact();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
+
+    assert!(result.report.all_applied_cleanly());
+
+    // Verify symlink is still a symlink
+    let metadata = fs::symlink_metadata(&symlink_path).unwrap();
+    assert!(metadata.file_type().is_symlink());
+
+    // Verify target file was updated
+    let content = fs::read_to_string(&target_file).unwrap();
+    assert_eq!(content, "patched content\n");
+}
+
+#[test]
+fn test_apply_patch_to_hardlink_preserves_link() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+
+    let target_file = dir.path().join("target.txt");
+    fs::write(&target_file, "original content\n").unwrap();
+
+    let hardlink_path = dir.path().join("link.txt");
+    fs::hard_link(&target_file, &hardlink_path).unwrap();
+
+    let diff = indoc! {"
+        ```diff
+        --- a/link.txt
+        +++ b/link.txt
+        @@ -1 +1 @@
+        -original content
+        +patched content
+        ```
+    "};
+
+    let patch = &parse_diffs(diff).unwrap()[0];
+    let options = ApplyOptions::exact();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
+
+    assert!(result.report.all_applied_cleanly());
+
+    // Verify target file was updated (since hardlink was patched)
+    let content = fs::read_to_string(&target_file).unwrap();
+    assert_eq!(content, "patched content\n");
+
+    // Verify hardlink still has the same content
+    let link_content = fs::read_to_string(&hardlink_path).unwrap();
+    assert_eq!(link_content, "patched content\n");
+
+    // Verify they are still hardlinked (modifying one modifies the other)
+    fs::write(&target_file, "modified again\n").unwrap();
+    let link_content_after = fs::read_to_string(&hardlink_path).unwrap();
+    assert_eq!(link_content_after, "modified again\n");
+}
+
+#[test]
+#[cfg(unix)]
+fn test_apply_patch_to_symlink_deletion() {
+    use std::os::unix::fs::symlink;
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+
+    let target_file = dir.path().join("target.txt");
+    fs::write(&target_file, "original content\n").unwrap();
+
+    let symlink_path = dir.path().join("link.txt");
+    symlink("target.txt", &symlink_path).unwrap();
+
+    let diff = indoc! {"
+        ```diff
+        --- a/link.txt
+        +++ b/link.txt
+        @@ -1 +0,0 @@
+        -original content
+        ```
+    "};
+
+    let patch = &parse_diffs(diff).unwrap()[0];
+    let options = ApplyOptions::exact();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
+
+    assert!(result.report.all_applied_cleanly());
+
+    // Verify symlink is deleted
+    assert!(!symlink_path.exists());
+    assert!(fs::symlink_metadata(&symlink_path).is_err());
+
+    // Verify target file is NOT deleted
+    assert!(target_file.exists());
+    let content = fs::read_to_string(&target_file).unwrap();
+    assert_eq!(content, "original content\n");
+}
+
 mod fuzzy_logic_edge_cases {
     use indoc::indoc;
     use mpatch::{apply_patch_to_file, parse_auto, parse_diffs, ApplyOptions};
