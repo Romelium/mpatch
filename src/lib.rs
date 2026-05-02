@@ -156,6 +156,8 @@
 //!   back to disk. If the patch results in empty content, the file is deleted.
 //! - [`apply_patch_to_content()`]: A pure function for in-memory operations. It takes
 //!   the original content as a string and returns the new content.
+//! - [`apply_patch_to_lines()`]: Similar to `apply_patch_to_content()`, but operates
+//!   directly on a slice of lines, avoiding string allocations.
 //!
 //! Each of these also has a "strict" `try_` variant (e.g., [`try_apply_patch_to_file()`])
 //! that treats partial applications as an error, simplifying the common apply-or-fail
@@ -164,6 +166,12 @@
 //! You can also manipulate patches before application:
 //!
 //! - [`invert_patches()`]: Reverses a list of patches (swapping additions and deletions).
+//!
+//! ### Granular Application
+//!
+//! - [`apply_hunk_to_lines()`]: Applies a single hunk to a mutable vector of lines in-place.
+//! - [`find_hunk_location()`]: Finds the location to apply a hunk to a given text content without modifying it.
+//! - [`find_hunk_location_in_lines()`]: Finds the location to apply a hunk to a slice of lines without modifying it.
 //!
 //! ### Core Data Structures
 //!
@@ -1703,8 +1711,8 @@ pub struct InMemoryResult {
 ///
 /// This struct provides a granular report on the outcome of a patch application.
 /// It is a key component of both [`PatchResult`] and [`InMemoryResult`]. You can
-/// use its methods like [`all_applied_cleanly()`](Self::all_applied_cleanly) for a
-/// high-level summary or [`failures()`](Self::failures) to inspect specific issues.
+/// use its methods like [`all_applied_cleanly()`](ApplyResult::all_applied_cleanly) for a
+/// high-level summary or [`failures()`](ApplyResult::failures) to inspect specific issues.
 ///
 /// # Examples
 ///
@@ -1847,7 +1855,7 @@ impl ApplyResult {
     /// Returns a list of all hunks that failed to apply, along with their index.
     ///
     /// This provides a more convenient way to inspect failures than iterating
-    /// through [`hunk_results`](Self::hunk_results) manually.
+    /// through [`hunk_results`](ApplyResult::hunk_results) manually.
     ///
     /// # Returns
     ///
@@ -2046,7 +2054,7 @@ impl BatchResult {
 impl ApplyResult {
     /// Checks if any hunk in the patch failed to apply.
     ///
-    /// This is the logical opposite of [`all_applied_cleanly`](Self::all_applied_cleanly).
+    /// This is the logical opposite of [`all_applied_cleanly`](ApplyResult::all_applied_cleanly).
     ///
     /// # Returns
     ///
