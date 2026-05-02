@@ -3279,6 +3279,34 @@ mod ensure_path_is_safe_tests {
         let resolved = result.unwrap();
         assert!(resolved.ends_with("main.rs"));
     }
+
+    #[test]
+    fn test_path_traversal_does_not_create_directories() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let base_dir = dir.path().join("base");
+        fs::create_dir(&base_dir).unwrap();
+
+        let diff = indoc::indoc! {"
+            ```diff
+            --- a/../evil_dir/evil.txt
+            +++ b/../evil_dir/evil.txt
+            @@ -0,0 +1 @@
+            +hacked
+            ```
+        "};
+        let patch = &mpatch::parse_diffs(diff).unwrap()[0];
+        let options = mpatch::ApplyOptions::exact();
+        let result = mpatch::apply_patch_to_file(patch, &base_dir, options);
+
+        assert!(matches!(result, Err(PatchError::PathTraversal(_))));
+
+        let evil_dir = dir.path().join("evil_dir");
+        assert!(
+            !evil_dir.exists(),
+            "VULNERABILITY: Directory was created outside base_dir!"
+        );
+    }
 }
 
 mod hunk_finder_tests {

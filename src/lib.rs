@@ -4053,12 +4053,36 @@ pub fn ensure_path_is_safe(base_dir: &Path, relative_path: &Path) -> Result<Path
     );
     let base_path =
         fs::canonicalize(base_dir).map_err(|e| map_io_error(base_dir.to_path_buf(), e))?;
-    let target_file_path = base_dir.join(relative_path);
-    let parent = target_file_path.parent().unwrap_or(Path::new(""));
+
+    // Lexical check to prevent arbitrary directory creation outside base_dir
+    let mut virtual_path = base_path.clone();
+    for component in relative_path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                if !virtual_path.pop() {
+                    return Err(PatchError::PathTraversal(relative_path.to_path_buf()));
+                }
+                if !virtual_path.starts_with(&base_path) {
+                    return Err(PatchError::PathTraversal(relative_path.to_path_buf()));
+                }
+            }
+            std::path::Component::Normal(c) => {
+                virtual_path.push(c);
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Err(PatchError::PathTraversal(relative_path.to_path_buf()));
+            }
+        }
+    }
+
+    let parent = virtual_path.parent().unwrap_or(Path::new(""));
     fs::create_dir_all(parent).map_err(|e| map_io_error(parent.to_path_buf(), e))?;
+
     let final_path = fs::canonicalize(parent)
         .map_err(|e| map_io_error(parent.to_path_buf(), e))?
-        .join(target_file_path.file_name().unwrap_or_default());
+        .join(virtual_path.file_name().unwrap_or_default());
+
     if !final_path.starts_with(&base_path) {
         return Err(PatchError::PathTraversal(relative_path.to_path_buf()));
     }

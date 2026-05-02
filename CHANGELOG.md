@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+-   **Path Validation:** Fixed a directory traversal vulnerability in `ensure_path_is_safe` where parent directories of a patch target were created on the filesystem *before* the path was validated. The function now performs a lexical path validation to ensure the path does not escape the base directory before interacting with the filesystem, preventing arbitrary directory creation.
+
 ### Fixed
 
 -   **Patch Application:** Fixed a bug in the smart indentation adjustment where empty lines containing trailing whitespace were incorrectly used to calculate indentation drift. The logic now strictly requires both the patch line and the target line to contain non-whitespace characters before updating the indentation context.
