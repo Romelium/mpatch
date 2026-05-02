@@ -5818,6 +5818,30 @@ fn test_smart_indentation_adjustment() {
 }
 
 #[test]
+fn test_smart_indentation_ignores_empty_lines_with_trailing_whitespace() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("empty_whitespace.py");
+
+    // Target file has an empty line with 12 spaces of trailing whitespace
+    let original_content = "def main():\n    print(\"hello\")\n            \n    # Validation Loop\n";
+    fs::write(&file_path, original_content).unwrap();
+
+    // Patch adds a line after the empty line
+    let diff = "```diff\n--- a/empty_whitespace.py\n+++ b/empty_whitespace.py\n@@ -1,4 +1,6 @@\n def main():\n     print(\"hello\")\n \n+    print(\"inserted\")\n+\n     # Validation Loop\n```";
+
+    let patches = parse_diffs(diff).unwrap();
+    let options = ApplyOptions::new();
+    apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+    let content = fs::read_to_string(&file_path).unwrap();
+
+    // The inserted line should have 4 spaces, not 4 + 12 = 16 spaces.
+    let expected = "def main():\n    print(\"hello\")\n            \n    print(\"inserted\")\n\n    # Validation Loop\n";
+    assert_eq!(content, expected);
+}
+
+#[test]
 fn test_fuzzy_match_ignores_indentation() {
     // This tests the "Robust Fuzzy Matching" feature.
     // The patch is heavily indented, the file is not.

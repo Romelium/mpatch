@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+-   **Patch Application:** Fixed a bug in the smart indentation adjustment where empty lines containing trailing whitespace were incorrectly used to calculate indentation drift. The logic now strictly requires both the patch line and the target line to contain non-whitespace characters before updating the indentation context.
+
 ## [1.4.3] - 2026-05-01
 
 ### Fixed
