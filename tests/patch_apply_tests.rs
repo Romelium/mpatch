@@ -5824,7 +5824,8 @@ fn test_smart_indentation_ignores_empty_lines_with_trailing_whitespace() {
     let file_path = dir.path().join("empty_whitespace.py");
 
     // Target file has an empty line with 12 spaces of trailing whitespace
-    let original_content = "def main():\n    print(\"hello\")\n            \n    # Validation Loop\n";
+    let original_content =
+        "def main():\n    print(\"hello\")\n            \n    # Validation Loop\n";
     fs::write(&file_path, original_content).unwrap();
 
     // Patch adds a line after the empty line

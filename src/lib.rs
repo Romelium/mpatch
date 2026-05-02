@@ -5491,7 +5491,10 @@ pub fn apply_hunk_to_lines(
                                 let t_line = file_block_content[*new_index + i];
                                 let h_ind = get_indent(h_line);
                                 let t_ind = get_indent(t_line);
-                                if (!h_ind.is_empty() || !t_ind.is_empty()) && !h_line.trim().is_empty() && !t_line.trim().is_empty() {
+                                if (!h_ind.is_empty() || !t_ind.is_empty())
+                                    && !h_line.trim().is_empty()
+                                    && !t_line.trim().is_empty()
+                                {
                                     current_hunk_indent = h_ind;
                                     current_target_indent = t_ind;
                                     found = true;
@@ -5511,7 +5514,10 @@ pub fn apply_hunk_to_lines(
                                 let t_line = file_block_content[*new_index + i];
                                 let h_ind = get_indent(h_line);
                                 let t_ind = get_indent(t_line);
-                                if (!h_ind.is_empty() || !t_ind.is_empty()) && !h_line.trim().is_empty() && !t_line.trim().is_empty() {
+                                if (!h_ind.is_empty() || !t_ind.is_empty())
+                                    && !h_line.trim().is_empty()
+                                    && !t_line.trim().is_empty()
+                                {
                                     current_hunk_indent = h_ind;
                                     current_target_indent = t_ind;
                                     found = true;
@@ -5559,7 +5565,10 @@ pub fn apply_hunk_to_lines(
                                 let t_line = &file_matched_lines[new_idx];
                                 let h_ind = get_indent(h_line);
                                 let t_ind = get_indent(t_line);
-                                if (!h_ind.is_empty() || !t_ind.is_empty()) && !h_line.trim().is_empty() && !t_line.trim().is_empty() {
+                                if (!h_ind.is_empty() || !t_ind.is_empty())
+                                    && !h_line.trim().is_empty()
+                                    && !t_line.trim().is_empty()
+                                {
                                     current_hunk_indent = h_ind;
                                     current_target_indent = t_ind;
                                 }
@@ -5634,7 +5643,10 @@ pub fn apply_hunk_to_lines(
                                     let t_line = &file_matched_lines[*new_index + i];
                                     let h_ind = get_indent(h_line);
                                     let t_ind = get_indent(t_line);
-                                    if (!h_ind.is_empty() || !t_ind.is_empty()) && !h_line.trim().is_empty() && !t_line.trim().is_empty() {
+                                    if (!h_ind.is_empty() || !t_ind.is_empty())
+                                        && !h_line.trim().is_empty()
+                                        && !t_line.trim().is_empty()
+                                    {
                                         current_hunk_indent = h_ind;
                                         current_target_indent = t_ind;
                                         break;
@@ -5653,7 +5665,10 @@ pub fn apply_hunk_to_lines(
                                     let t_line = &file_matched_lines[new_idx];
                                     let h_ind = get_indent(h_line);
                                     let t_ind = get_indent(t_line);
-                                    if (!h_ind.is_empty() || !t_ind.is_empty()) && !h_line.trim().is_empty() && !t_line.trim().is_empty() {
+                                    if (!h_ind.is_empty() || !t_ind.is_empty())
+                                        && !h_line.trim().is_empty()
+                                        && !t_line.trim().is_empty()
+                                    {
                                         current_hunk_indent = h_ind;
                                         current_target_indent = t_ind;
                                     }
