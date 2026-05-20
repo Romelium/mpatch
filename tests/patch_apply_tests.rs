@@ -3305,6 +3305,45 @@ mod ensure_path_is_safe_tests {
             "VULNERABILITY: Directory was created outside base_dir!"
         );
     }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_path_traversal_via_dangling_symlink_is_blocked() {
+        use std::os::unix::fs::symlink;
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let base_dir = dir.path().join("base");
+        fs::create_dir(&base_dir).unwrap();
+
+        // Create a dangling symlink inside base_dir pointing outside
+        let evil_target = dir.path().join("evil_outside.txt");
+        let symlink_path = base_dir.join("dangling_link");
+        symlink(&evil_target, &symlink_path).unwrap();
+
+        // Ensure it's dangling
+        assert!(!symlink_path.exists());
+        assert!(fs::symlink_metadata(&symlink_path).is_ok());
+
+        // Patch targets the dangling symlink
+        let diff = indoc::indoc! {"
+            ```diff
+            --- /dev/null
+            +++ b/dangling_link
+            @@ -0,0 +1 @@
+            +hacked
+            ```
+        "};
+
+        let patch = &mpatch::parse_diffs(diff).unwrap()[0];
+        let options = mpatch::ApplyOptions::exact();
+        let result = mpatch::apply_patch_to_file(patch, &base_dir, options);
+
+        assert!(result.is_err(), "Patching a dangling symlink should fail");
+        assert!(
+            !evil_target.exists(),
+            "VULNERABILITY: Arbitrary file created via dangling symlink!"
+        );
+    }
 }
 
 mod hunk_finder_tests {
@@ -5175,14 +5214,12 @@ fn test_apply_patch_to_symlink_deletion() {
 
     assert!(result.report.all_applied_cleanly());
 
-    // Verify symlink is deleted
-    assert!(!symlink_path.exists());
-    assert!(fs::symlink_metadata(&symlink_path).is_err());
+    // Verify the target is deleted (because mpatch operates on the resolved target)
+    assert!(!target_file.exists());
 
-    // Verify target file is NOT deleted
-    assert!(target_file.exists());
-    let content = fs::read_to_string(&target_file).unwrap();
-    assert_eq!(content, "original content\n");
+    // Verify symlink still exists but is dangling
+    assert!(fs::symlink_metadata(&symlink_path).is_ok());
+    assert!(!symlink_path.exists());
 }
 
 mod fuzzy_logic_edge_cases {
@@ -5841,6 +5878,34 @@ fn test_smart_indentation_adjustment() {
         }
     "#};
     assert_eq!(content, expected);
+}
+
+#[test]
+fn test_out_of_order_hunks_eof_newline_preservation() {
+    let original = "line 1\nline 2\nline 3\n"; // Ends with newline
+    // Patch removes newline at EOF in hunk 1, then modifies line 1 in hunk 2.
+    let diff = indoc! {r#"
+        ```diff
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -2,2 +2,2 @@
+         line 2
+        -line 3
+        +line 3
+        \ No newline at end of file
+        @@ -1,2 +1,2 @@
+        -line 1
+        +line one
+         line 2
+        ```
+    "#};
+
+    let options = ApplyOptions::new();
+    let result = patch_content_str(diff, Some(original), &options).unwrap();
+
+    // The EOF was modified to remove the newline.
+    let expected = "line one\nline 2\nline 3";
+    assert_eq!(result, expected);
 }
 
 #[test]

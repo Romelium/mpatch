@@ -4071,7 +4071,7 @@ pub fn ensure_path_is_safe(base_dir: &Path, relative_path: &Path) -> Result<Path
                 // Resolve symlinks for existing components to prevent traversal via symlink.
                 // If it doesn't exist yet, we just append it lexically (safe because 
                 // non-existent paths cannot be malicious symlinks).
-                if virtual_path.exists() {
+                if fs::symlink_metadata(&virtual_path).is_ok() {
                     virtual_path = fs::canonicalize(&virtual_path)
                         .map_err(|e| map_io_error(virtual_path.clone(), e))?;
                     if !virtual_path.starts_with(&base_path) {
@@ -4535,7 +4535,7 @@ pub struct HunkApplier<'a> {
     options: &'a ApplyOptions,
     patch_ends_with_newline: bool,
     original_ends_with_newline: bool,
-    last_hunk_end_index: usize,
+    touched_eof: bool,
 }
 
 impl<'a> HunkApplier<'a> {
@@ -4588,7 +4588,7 @@ impl<'a> HunkApplier<'a> {
             options,
             patch_ends_with_newline: patch.ends_with_newline,
             original_ends_with_newline: true,
-            last_hunk_end_index: 0,
+            touched_eof: false,
         }
     }
 
@@ -4743,8 +4743,7 @@ impl<'a> HunkApplier<'a> {
     pub fn into_content(self) -> String {
         let mut new_content = self.current_lines.join("\n");
 
-        let touched_eof = self.last_hunk_end_index >= self.current_lines.len();
-        let should_have_newline = if touched_eof {
+        let should_have_newline = if self.touched_eof {
             self.patch_ends_with_newline
         } else {
             self.original_ends_with_newline
@@ -4800,7 +4799,9 @@ impl<'a> Iterator for HunkApplier<'a> {
             let new_len = self.current_lines.len();
             let delta = (new_len as isize) - (old_len as isize);
             let inserted_len = (location.length as isize + delta) as usize;
-            self.last_hunk_end_index = location.start_index + inserted_len;
+            if location.start_index + inserted_len >= new_len {
+                self.touched_eof = true;
+            }
         }
         Some(status)
     }

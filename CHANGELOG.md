@@ -7,10 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+-   **Path Validation:** Fixed a vulnerability in `ensure_path_is_safe` where a dangling symlink could bypass the path traversal check and allow arbitrary file creation outside the target directory. The validation now correctly detects dangling symlinks using `symlink_metadata`.
+
 ### Fixed
 
 -   **CLI:** Fixed a critical bug where `--dry-run` would incorrectly create parent directories on the filesystem. The path safety check now performs symlink resolution without requiring intermediate directory creation.
 -   **CLI/API:** Fixed an issue where the preview diff generated during a dry run (`PatchResult::diff`) contained hardcoded `"a"` and `"b"` file headers instead of the actual target file paths.
+-   **Patch Application:** Fixed a bug where the trailing newline status could be handled incorrectly if a patch contained out-of-order hunks that modified the end of the file before modifying earlier lines.
 
 ## [1.4.4] - 2026-05-02
 
