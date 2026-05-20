@@ -3231,8 +3231,6 @@ mod ensure_path_is_safe_tests {
         let resolved_path = result.unwrap();
         assert!(resolved_path.ends_with(safe_path));
         assert!(resolved_path.is_absolute());
-        // The function creates the parent directory
-        assert!(base_dir.join("new").is_dir());
     }
 
     #[test]
@@ -5843,6 +5841,63 @@ fn test_smart_indentation_adjustment() {
         }
     "#};
     assert_eq!(content, expected);
+}
+
+#[test]
+fn test_dry_run_does_not_create_directories() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let nested_dir = dir.path().join("nested_folder");
+
+    let diff = indoc! {"
+        ```diff
+        --- a/nested_folder/new_file.txt
+        +++ b/nested_folder/new_file.txt
+        @@ -0,0 +1,2 @@
+        +Hello
+        +New World
+        ```
+    "};
+    let patch = &parse_diffs(diff).unwrap()[0];
+
+    // Execute a dry run
+    let options = ApplyOptions::dry_run();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
+
+    assert!(result.report.all_applied_cleanly());
+    assert!(result.diff.is_some());
+
+    // Regression verification: Ensure the directory was NOT created on the filesystem
+    assert!(!nested_dir.exists(), "Dry run must not create directories on the filesystem");
+}
+
+#[test]
+fn test_dry_run_diff_contains_correct_file_paths() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("existing_file.txt");
+    fs::write(&file_path, "original line\n").unwrap();
+
+    let diff = indoc! {"
+        ```diff
+        --- a/existing_file.txt
+        +++ b/existing_file.txt
+        @@ -1 +1 @@
+        -original line
+        +modified line
+        ```
+    "};
+    let patch = &parse_diffs(diff).unwrap()[0];
+    let options = ApplyOptions::dry_run();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
+
+    assert!(result.report.all_applied_cleanly());
+
+    let diff_output = result.diff.expect("Dry run should produce a diff");
+
+    // Regression verification: Ensure file paths are accurately preserved
+    assert!(diff_output.contains("--- a/existing_file.txt"));
+    assert!(diff_output.contains("+++ b/existing_file.txt"));
 }
 
 #[test]

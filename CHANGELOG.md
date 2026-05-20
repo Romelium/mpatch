@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+-   **CLI:** Fixed a critical bug where `--dry-run` would incorrectly create parent directories on the filesystem. The path safety check now performs symlink resolution without requiring intermediate directory creation.
+-   **CLI/API:** Fixed an issue where the preview diff generated during a dry run (`PatchResult::diff`) contained hardcoded `"a"` and `"b"` file headers instead of the actual target file paths.
+
 ## [1.4.4] - 2026-05-02
 
 ### Security

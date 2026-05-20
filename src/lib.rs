@@ -4068,6 +4068,16 @@ pub fn ensure_path_is_safe(base_dir: &Path, relative_path: &Path) -> Result<Path
             }
             std::path::Component::Normal(c) => {
                 virtual_path.push(c);
+                // Resolve symlinks for existing components to prevent traversal via symlink.
+                // If it doesn't exist yet, we just append it lexically (safe because 
+                // non-existent paths cannot be malicious symlinks).
+                if virtual_path.exists() {
+                    virtual_path = fs::canonicalize(&virtual_path)
+                        .map_err(|e| map_io_error(virtual_path.clone(), e))?;
+                    if !virtual_path.starts_with(&base_path) {
+                        return Err(PatchError::PathTraversal(relative_path.to_path_buf()));
+                    }
+                }
             }
             std::path::Component::CurDir => {}
             std::path::Component::RootDir | std::path::Component::Prefix(_) => {
@@ -4076,17 +4086,7 @@ pub fn ensure_path_is_safe(base_dir: &Path, relative_path: &Path) -> Result<Path
         }
     }
 
-    let parent = virtual_path.parent().unwrap_or(Path::new(""));
-    fs::create_dir_all(parent).map_err(|e| map_io_error(parent.to_path_buf(), e))?;
-
-    let final_path = fs::canonicalize(parent)
-        .map_err(|e| map_io_error(parent.to_path_buf(), e))?
-        .join(virtual_path.file_name().unwrap_or_default());
-
-    if !final_path.starts_with(&base_path) {
-        return Err(PatchError::PathTraversal(relative_path.to_path_buf()));
-    }
-    Ok(final_path)
+    Ok(virtual_path)
 }
 
 /// A convenience function that applies a slice of [`Patch`] objects to a target directory.
@@ -4322,12 +4322,15 @@ pub fn apply_patch_to_file(
             patch.file_path.display()
         );
         trace!("  Generating diff for dry run...");
+
+        let a_path = format!("a/{}", patch.file_path.display());
+        let b_path = format!("b/{}", patch.file_path.display());
         let diff_text = unified_diff(
             similar::Algorithm::default(),
             &original_content,
             &new_content,
             3,
-            Some(("a", "b")),
+            Some((&a_path, &b_path)),
         );
         diff = Some(diff_text.to_string());
     } else {
