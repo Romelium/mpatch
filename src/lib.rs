@@ -4069,7 +4069,7 @@ pub fn ensure_path_is_safe(base_dir: &Path, relative_path: &Path) -> Result<Path
             std::path::Component::Normal(c) => {
                 virtual_path.push(c);
                 // Resolve symlinks for existing components to prevent traversal via symlink.
-                // If it doesn't exist yet, we just append it lexically (safe because 
+                // If it doesn't exist yet, we just append it lexically (safe because
                 // non-existent paths cannot be malicious symlinks).
                 if fs::symlink_metadata(&virtual_path).is_ok() {
                     virtual_path = fs::canonicalize(&virtual_path)

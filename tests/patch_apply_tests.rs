@@ -5883,7 +5883,7 @@ fn test_smart_indentation_adjustment() {
 #[test]
 fn test_out_of_order_hunks_eof_newline_preservation() {
     let original = "line 1\nline 2\nline 3\n"; // Ends with newline
-    // Patch removes newline at EOF in hunk 1, then modifies line 1 in hunk 2.
+                                               // Patch removes newline at EOF in hunk 1, then modifies line 1 in hunk 2.
     let diff = indoc! {r#"
         ```diff
         --- a/file.txt
@@ -5933,7 +5933,10 @@ fn test_dry_run_does_not_create_directories() {
     assert!(result.diff.is_some());
 
     // Regression verification: Ensure the directory was NOT created on the filesystem
-    assert!(!nested_dir.exists(), "Dry run must not create directories on the filesystem");
+    assert!(
+        !nested_dir.exists(),
+        "Dry run must not create directories on the filesystem"
+    );
 }
 
 #[test]
