@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 -   **Diagnostics:** Significantly enhanced the anonymization of debug reports (`-vvvv`). The report generator now actively redacts the input file path, target directory, current working directory, and user home directory from the entire report, including the full trace log, file contents, and error messages.
 -   **Diagnostics:** The discrepancy check failure output in the debug report (`-vvvv`) now includes a unified diff between the original input patch and the regenerated patch to make differences easier to spot. The full patch contents are now placed inside a collapsible `<details>` block to reduce visual clutter.
+-   **Diagnostics:** Improved the discrepancy check to normalize patches before comparison. It now ignores context lines, hunk headers, +/- interleaving, and self-replacements, significantly reducing noise and eliminating false positives caused by structural differences.
 
 ### Security
 

@@ -609,14 +609,14 @@ fn write_report_footer(
                 {
                     let mut file = file_arc.lock().unwrap();
                     if compare_patches(original_patch, &recreated_patch) {
-                        let _ = writeln!(file, "\n- **Result:** <span style='color:green;'>SUCCESS</span>\n- **Details:** The regenerated patch is identical to the input patch.");
+                        let _ = writeln!(file, "\n- **Result:** <span style='color:green;'>SUCCESS</span>\n- **Details:** The regenerated patch is identical to the input patch (ignoring context lines).");
                     } else {
-                        let original_str = format_patch_for_report(original_patch);
-                        let recreated_str = format_patch_for_report(&recreated_patch);
+                        let original_norm = format_normalized_patch(original_patch);
+                        let recreated_norm = format_normalized_patch(&recreated_patch);
                         let diff_text = similar::udiff::unified_diff(
                             similar::Algorithm::default(),
-                            &original_str,
-                            &recreated_str,
+                            &original_norm,
+                            &recreated_norm,
                             3,
                             Some(("Original Input Patch", "Regenerated Patch")),
                         );
@@ -630,11 +630,17 @@ fn write_report_footer(
                         );
                         let _ = writeln!(file, "\n<details><summary>Click to see full original and regenerated patches</summary>\n");
                         let _ = writeln!(file, "**Original Input Patch:**");
-                        let _ =
-                            writeln!(file, "```diff\n{}```", anonymizer.anonymize(&original_str));
+                        let _ = writeln!(
+                            file,
+                            "```diff\n{}```",
+                            anonymizer.anonymize(&original_patch.to_string())
+                        );
                         let _ = writeln!(file, "\n**Regenerated Patch (from file changes):**");
-                        let _ =
-                            writeln!(file, "```diff\n{}```", anonymizer.anonymize(&recreated_str));
+                        let _ = writeln!(
+                            file,
+                            "```diff\n{}```",
+                            anonymizer.anonymize(&recreated_patch.to_string())
+                        );
                         let _ = writeln!(file, "</details>\n");
                     }
                 }
@@ -648,24 +654,39 @@ fn write_report_footer(
     }
 }
 
-/// Formats a [`Patch`] struct back into a human-readable diff string for reporting.
-fn format_patch_for_report(patch: &Patch) -> String {
-    let mut output = String::new();
-    let _ = writeln!(output, "--- a/{}", patch.file_path.display());
-    let _ = writeln!(output, "+++ b/{}", patch.file_path.display());
+/// Formats a [`Patch`] struct into a normalized string for robust discrepancy checking.
+/// It excludes context lines, ignores interleaving of +/- lines, removes self-replacements,
+/// and sorts additions/deletions globally to ignore hunk ordering differences.
+fn format_normalized_patch(patch: &Patch) -> String {
+    let mut all_removed = Vec::new();
+    let mut all_added = Vec::new();
+
     for hunk in &patch.hunks {
-        let old_len = hunk.lines.iter().filter(|l| !l.starts_with('+')).count();
-        let new_len = hunk.lines.iter().filter(|l| !l.starts_with('-')).count();
-        let old_start = hunk.old_start_line.unwrap_or(1);
-        let new_start = hunk.new_start_line.unwrap_or(1);
-        let _ = writeln!(
-            output,
-            "@@ -{},{} +{},{} @@",
-            old_start, old_len, new_start, new_len
-        );
-        for line in &hunk.lines {
-            let _ = writeln!(output, "{}", line);
+        all_removed.extend(hunk.removed_lines().into_iter().map(|s| s.to_string()));
+        all_added.extend(hunk.added_lines().into_iter().map(|s| s.to_string()));
+    }
+
+    // Remove identical lines (self-replacements) using multiset subtraction
+    let mut i = 0;
+    while i < all_removed.len() {
+        if let Some(j) = all_added.iter().position(|a| a == &all_removed[i]) {
+            all_removed.remove(i);
+            all_added.remove(j);
+        } else {
+            i += 1;
         }
+    }
+
+    // Sort to ignore ordering differences across hunks
+    all_removed.sort();
+    all_added.sort();
+
+    let mut output = String::new();
+    for line in all_removed {
+        let _ = writeln!(output, "-{}", line);
+    }
+    for line in all_added {
+        let _ = writeln!(output, "+{}", line);
     }
     if !patch.ends_with_newline {
         let _ = write!(output, "\\ No newline at end of file");
@@ -716,29 +737,8 @@ fn anonymize_command_args(args: &Args) -> String {
 }
 
 /// Compares two patches for semantic equivalence, focusing on the actual line changes.
-/// It ignores `old_start_line` and `new_start_line` because these can differ legitimately
-/// after a fuzzy match finds a new location.
+/// It ignores context lines, hunk headers, interleaving, self-replacements, and hunk order
+/// by comparing their normalized string representations.
 fn compare_patches(original: &Patch, recreated: &Patch) -> bool {
-    if original.hunks.len() != recreated.hunks.len() {
-        return false;
-    }
-
-    let mut recreated_hunks = recreated.hunks.clone();
-
-    for h1 in &original.hunks {
-        let added1 = h1.added_lines();
-        let removed1 = h1.removed_lines();
-
-        let match_idx = recreated_hunks
-            .iter()
-            .position(|h2| h2.added_lines() == added1 && h2.removed_lines() == removed1);
-
-        if let Some(idx) = match_idx {
-            recreated_hunks.remove(idx);
-        } else {
-            return false;
-        }
-    }
-    // Also check newline status, which is part of the patch's semantics.
-    original.ends_with_newline == recreated.ends_with_newline
+    format_normalized_patch(original) == format_normalized_patch(recreated)
 }
