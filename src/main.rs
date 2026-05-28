@@ -611,20 +611,31 @@ fn write_report_footer(
                     if compare_patches(original_patch, &recreated_patch) {
                         let _ = writeln!(file, "\n- **Result:** <span style='color:green;'>SUCCESS</span>\n- **Details:** The regenerated patch is identical to the input patch.");
                     } else {
+                        let original_str = format_patch_for_report(original_patch);
+                        let recreated_str = format_patch_for_report(&recreated_patch);
+                        let diff_text = similar::udiff::unified_diff(
+                            similar::Algorithm::default(),
+                            &original_str,
+                            &recreated_str,
+                            3,
+                            Some(("Original Input Patch", "Regenerated Patch")),
+                        );
+
                         let _ = writeln!(file, "\n- **Result:** <span style='color:red;'>FAILURE</span>\n- **Details:** The regenerated patch does not match the input patch. This may indicate an issue with how a fuzzy match was applied.");
-                        let _ = writeln!(file, "\nClick to see original vs. regenerated patch\n");
+                        let _ = writeln!(file, "\n**Diff (Original vs. Regenerated):**");
+                        let _ = writeln!(
+                            file,
+                            "```diff\n{}```",
+                            anonymizer.anonymize(&diff_text.to_string())
+                        );
+                        let _ = writeln!(file, "\n<details><summary>Click to see full original and regenerated patches</summary>\n");
                         let _ = writeln!(file, "**Original Input Patch:**");
-                        let _ = writeln!(
-                            file,
-                            "```diff\n{}```",
-                            anonymizer.anonymize(&format_patch_for_report(original_patch))
-                        );
+                        let _ =
+                            writeln!(file, "```diff\n{}```", anonymizer.anonymize(&original_str));
                         let _ = writeln!(file, "\n**Regenerated Patch (from file changes):**");
-                        let _ = writeln!(
-                            file,
-                            "```diff\n{}```",
-                            anonymizer.anonymize(&format_patch_for_report(&recreated_patch))
-                        );
+                        let _ =
+                            writeln!(file, "```diff\n{}```", anonymizer.anonymize(&recreated_str));
+                        let _ = writeln!(file, "</details>\n");
                     }
                 }
             }
