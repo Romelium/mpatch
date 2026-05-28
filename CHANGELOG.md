@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+-   **CLI:** Added `-c` / `--clipboard` flag to input directly from the system clipboard.
+
 ### Security
 
 -   **Path Validation:** Fixed a vulnerability in `ensure_path_is_safe` where a dangling symlink could bypass the path traversal check and allow arbitrary file creation outside the target directory. The validation now correctly detects dangling symlinks using `symlink_metadata`.

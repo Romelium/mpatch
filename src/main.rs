@@ -33,21 +33,65 @@ fn main() {
 
 /// Contains the primary logic of the application.
 fn run(args: Args) -> Result<()> {
+    // We re-bind `args` as mutable and allow `unused_mut`.
+    // When the `clipboard` feature is disabled, `args` is never mutated,
+    // which triggers an `unused_mut` warning. When enabled, it MUST be mutable.
+    // This satisfies the compiler across all feature flag combinations.
+    #[allow(unused_mut)]
+    let mut args = args;
+
+    // --- File Parsing & Clipboard ---
+    #[cfg(feature = "clipboard")]
+    let use_clipboard = args.clipboard;
+    #[cfg(not(feature = "clipboard"))]
+    let use_clipboard = false;
+
+    let content = if use_clipboard {
+        #[cfg(feature = "clipboard")]
+        {
+            let mut clipboard =
+                arboard::Clipboard::new().context("Failed to initialize clipboard")?;
+            let content = clipboard
+                .get_text()
+                .context("Failed to read text from clipboard")?;
+
+            let target = match (&args.input_file, &args.target_dir) {
+                (Some(dir), None) => dir.clone(),
+                (None, None) => PathBuf::from("."),
+                (Some(_), Some(dir)) => dir.clone(),
+                _ => PathBuf::from("."),
+            };
+            args.target_dir = Some(target);
+            args.input_file = None; // clear this so report generator marks it cleanly
+            content
+        }
+        #[cfg(not(feature = "clipboard"))]
+        {
+            unreachable!()
+        }
+    } else {
+        let input_file = args
+            .input_file
+            .as_ref()
+            .expect("input_file is required unless --clipboard is used");
+        let content = fs::read_to_string(input_file)
+            .with_context(|| format!("Failed to read input file '{}'", input_file.display()))?;
+        content
+    };
+
+    let actual_target_dir = args.target_dir.as_ref().unwrap().clone();
+
     // --- Argument Validation ---
-    if !args.target_dir.is_dir() {
+    if !actual_target_dir.is_dir() {
         return Err(anyhow!(
             "Target directory '{}' not found or is not a directory.",
-            args.target_dir.display()
+            actual_target_dir.display()
         ));
     }
     if !(0.0..=1.0).contains(&args.fuzz_factor) {
         return Err(anyhow!("Fuzz factor must be between 0.0 and 1.0."));
     }
 
-    // --- File Parsing ---
-    // Read the input file and pass its content to the core parsing logic from the library.
-    let content = fs::read_to_string(&args.input_file)
-        .with_context(|| format!("Failed to read input file '{}'", args.input_file.display()))?;
     let mut all_patches = parse_auto(&content)?;
 
     if args.reverse {
@@ -103,7 +147,7 @@ fn run(args: Args) -> Result<()> {
     let mut fail_count = 0;
 
     // Use the new high-level batch application function.
-    let batch_result = apply_patches_to_dir(&all_patches, &args.target_dir, options);
+    let batch_result = apply_patches_to_dir(&all_patches, &actual_target_dir, options);
     let num_ops = batch_result.results.len();
 
     // Iterate through the results to provide detailed CLI feedback.
@@ -192,9 +236,20 @@ fn log_failed_hunks(apply_result: &mpatch::ApplyResult, patch: &Patch) {
 )]
 struct Args {
     /// Path to the input file containing the patch (Markdown, Unified Diff, or Conflict Markers).
-    input_file: PathBuf,
+    /// If --clipboard is used, the first positional argument becomes the target directory.
+    #[cfg_attr(feature = "clipboard", arg(required_unless_present = "clipboard"))]
+    #[cfg_attr(not(feature = "clipboard"), arg(required = true))]
+    input_file: Option<PathBuf>,
+
     /// Path to the target directory to apply patches.
-    target_dir: PathBuf,
+    #[cfg_attr(feature = "clipboard", arg(required_unless_present = "clipboard"))]
+    #[cfg_attr(not(feature = "clipboard"), arg(required = true))]
+    target_dir: Option<PathBuf>,
+
+    /// Input from clipboard instead of a file.
+    #[cfg(feature = "clipboard")]
+    #[arg(short = 'c', long, help = "Input from clipboard instead of a file.")]
+    clipboard: bool,
     /// If set, show what would be done, but don't modify any files.
     #[arg(
         short = 'n',
@@ -321,7 +376,7 @@ fn create_report_file(args: &Args, patch_content: &str, patches: &[Patch]) -> Re
     writeln!(file, "\n## Original Target File(s)\n")?;
     let mut original_contents = HashMap::new();
     for patch in patches {
-        let target_file_path = args.target_dir.join(&patch.file_path);
+        let target_file_path = args.target_dir.as_ref().unwrap().join(&patch.file_path);
         writeln!(file, "### File: `{}`\n", patch.file_path.display())?;
         match fs::read_to_string(&target_file_path) {
             Ok(file_content) => {
@@ -385,7 +440,7 @@ fn write_report_footer(
             );
         } else {
             for patch in all_patches {
-                let target_file_path = args.target_dir.join(&patch.file_path);
+                let target_file_path = args.target_dir.as_ref().unwrap().join(&patch.file_path);
                 let _ = writeln!(file, "### File: `{}`\n", patch.file_path.display());
                 match fs::read_to_string(&target_file_path) {
                     Ok(file_content) => {
@@ -446,7 +501,9 @@ fn write_report_footer(
                     continue;
                 };
 
-                let new_content = match fs::read_to_string(args.target_dir.join(path)) {
+                let new_content = match fs::read_to_string(
+                    args.target_dir.as_ref().unwrap().join(path),
+                ) {
                     Ok(content) => content,
                     Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
                     Err(_) => {
@@ -530,15 +587,25 @@ fn anonymize_command_args(args: &Args) -> String {
         let arg_path = PathBuf::from(&arg);
         // Canonicalize paths to handle relative vs. absolute paths consistently.
         let canonical_arg = fs::canonicalize(&arg_path).unwrap_or(arg_path);
-        let canonical_input =
-            fs::canonicalize(&args.input_file).unwrap_or_else(|_| args.input_file.clone());
-        let canonical_target =
-            fs::canonicalize(&args.target_dir).unwrap_or_else(|_| args.target_dir.clone());
+        let canonical_input = args
+            .input_file
+            .as_ref()
+            .map(|p| fs::canonicalize(p).unwrap_or_else(|_| p.clone()));
+        let canonical_target = args
+            .target_dir
+            .as_ref()
+            .map(|p| fs::canonicalize(p).unwrap_or_else(|_| p.clone()));
 
         // Check if the argument matches one of the sensitive paths.
-        if canonical_arg == canonical_input {
+        if canonical_input
+            .as_ref()
+            .is_some_and(|p| p == &canonical_arg)
+        {
             anonymized_args.push("<INPUT_FILE>".to_string());
-        } else if canonical_arg == canonical_target {
+        } else if canonical_target
+            .as_ref()
+            .is_some_and(|p| p == &canonical_arg)
+        {
             anonymized_args.push("<TARGET_DIR>".to_string());
         } else {
             // If it's not a sensitive path (e.g., a flag like `-v`), keep it as is.

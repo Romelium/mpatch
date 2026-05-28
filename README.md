@@ -41,6 +41,7 @@ You ask an AI to modify some code. You get the diff. Except, the comment inside 
 *   **🤖 Format Independent:** Automatically recognizes and processes:
     *   **Markdown** diff code blocks (standard chat output format).
     *   **Unified Diff** (output from `git diff` command).
+*   **📋 Clipboard Support:** Input directly from your clipboard with `-c` or `--clipboard`.
 *   **✨ Smarter Indentation:** Automatically indents added lines to be consistent with the target file. It perfectly applies the patch files that were initially indented in Markdown lists or use another tab/space indentation style.
 *   **🗑️ File Deletion:** Automatically removes the target file if the output becomes empty after patching.
 *   **🛡️ Secure:** Path traversal is automatically prevented, which means that no evil patch files can overwrite anything outside the target directory.
@@ -109,6 +110,13 @@ Apply a patch file (Markdown, Diff, or Conflict markers) to a target directory.
 
 ```bash
 mpatch changes.md ./src
+```
+
+### From Clipboard
+Apply a patch copied to your clipboard directly to a target directory.
+
+```bash
+mpatch -c ./src
 ```
 
 ### Preview Changes (Dry Run)
