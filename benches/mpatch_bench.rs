@@ -1,6 +1,33 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use indoc::indoc;
-use mpatch::{apply_patch_to_content, parse_diffs, ApplyOptions, Patch};
+use mpatch::{
+    apply_patch_to_content, detect_patch, find_hunk_location_in_lines, parse_conflict_markers,
+    parse_diffs, parse_patches, ApplyOptions, Patch,
+};
+
+// --- Detecting Benchmarks ---
+
+fn detecting_benches(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Detecting");
+
+    let md_diff = "```diff\n--- a/file\n+++ b/file\n@@ -1 +1 @@\n-a\n+b\n```";
+    let raw_diff = "--- a/file\n+++ b/file\n@@ -1 +1 @@\n-a\n+b";
+    let conflict_diff = "<<<<\na\n====\nb\n>>>>";
+
+    group.bench_function("detect_markdown", |b| {
+        b.iter(|| detect_patch(black_box(md_diff)))
+    });
+
+    group.bench_function("detect_unified", |b| {
+        b.iter(|| detect_patch(black_box(raw_diff)))
+    });
+
+    group.bench_function("detect_conflict", |b| {
+        b.iter(|| detect_patch(black_box(conflict_diff)))
+    });
+
+    group.finish();
+}
 
 // --- Parsing Benchmarks ---
 
@@ -66,6 +93,104 @@ fn parsing_benches(c: &mut Criterion) {
     large_markdown.push_str(simple_diff);
     group.bench_function("large_markdown_scan", |b| {
         b.iter(|| parse_diffs(black_box(&large_markdown)).unwrap())
+    });
+
+    let raw_diff = "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-foo\n+bar\n";
+    group.bench_function("raw_diff", |b| {
+        b.iter(|| parse_patches(black_box(raw_diff)).unwrap())
+    });
+
+    let conflict_diff = "<<<<\nfoo\n====\nbar\n>>>>\n";
+    group.bench_function("conflict_markers", |b| {
+        b.iter(|| parse_conflict_markers(black_box(conflict_diff)))
+    });
+
+    group.finish();
+}
+
+// --- Finding Benchmarks ---
+
+fn finding_benches(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Finding");
+
+    let options_exact = ApplyOptions::exact();
+    let options_fuzzy = ApplyOptions::new();
+
+    // Setup large file content as a vector of lines
+    let mut large_file_lines = Vec::new();
+    for i in 0..10000 {
+        large_file_lines.push(format!("This is line number {}", i));
+    }
+
+    let exact_patch = parse_diffs(indoc! {r#"
+        ```diff
+        --- a/large_file.txt
+        +++ b/large_file.txt
+        @@ -5000,5 +5000,5 @@
+         This is line number 4999
+         This is line number 5000
+        -This is line number 5001
+        +THIS LINE WAS CHANGED
+         This is line number 5002
+         This is line number 5003
+        ```
+    "#})
+    .unwrap()
+    .remove(0);
+    let exact_hunk = exact_patch.hunks[0].clone();
+
+    group.bench_function("exact_match_large_file", |b| {
+        b.iter(|| {
+            criterion::black_box(find_hunk_location_in_lines(
+                black_box(&exact_hunk),
+                black_box(&large_file_lines),
+                &options_exact,
+            ))
+        });
+    });
+
+    // Setup for fuzzy matching with anchor
+    let mut fuzzy_anchor_lines = large_file_lines.clone();
+    // Insert a line to break the exact match but keep anchors intact
+    fuzzy_anchor_lines.insert(100, "An extra line to break exact match".to_string());
+
+    group.bench_function("fuzzy_match_large_file_with_anchor", |b| {
+        b.iter(|| {
+            criterion::black_box(find_hunk_location_in_lines(
+                black_box(&exact_hunk),
+                black_box(&fuzzy_anchor_lines),
+                &options_fuzzy,
+            ))
+        });
+    });
+
+    // Setup worst-case fuzzy match (no anchor, full scan)
+    let repetitive_lines: Vec<String> = (0..10000)
+        .map(|_| "println!(\"hello world\");".to_string())
+        .collect();
+    let worst_case_patch = parse_diffs(indoc! {r#"
+        ```diff
+        --- a/repetitive.txt
+        +++ b/repetitive.txt
+        @@ -5000,5 +5000,5 @@
+         This is a unique context line 1
+        -This is a unique line to be removed
+        +This is a unique line to be added
+         This is a unique context line 2
+        ```
+    "#})
+    .unwrap()
+    .remove(0);
+    let worst_case_hunk = worst_case_patch.hunks[0].clone();
+
+    group.bench_function("fuzzy_match_worst_case_no_anchor", |b| {
+        b.iter(|| {
+            criterion::black_box(find_hunk_location_in_lines(
+                black_box(&worst_case_hunk),
+                black_box(&repetitive_lines),
+                &options_fuzzy,
+            ))
+        });
     });
 
     group.finish();
@@ -238,5 +363,11 @@ fn applying_benches(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, parsing_benches, applying_benches);
+criterion_group!(
+    benches,
+    detecting_benches,
+    parsing_benches,
+    finding_benches,
+    applying_benches
+);
 criterion_main!(benches);

@@ -293,7 +293,7 @@ Fuzzy match is $O(N \times M)$ operation. To ensure speed on large files:
 2.  **Anchoring:** `mpatch` tries to look for unique lines in the patch file to shrink the match range.
 3.  **Parallelism:** If a full scan is required, it uses [Rayon](https://github.com/rayon-rs/rayon) to parallelize the workload.
 
-*Benchmark code can be found in `benches/mpatch_bench.rs`.*
+*Benchmark code can be found in `benches/mpatch_bench.rs`. To run, use `cargo bench`.*
 
 ---
 
