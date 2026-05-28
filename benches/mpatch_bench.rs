@@ -112,6 +112,7 @@ fn parsing_benches(c: &mut Criterion) {
 
 fn finding_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Finding");
+    group.sample_size(10);
 
     let options_exact = ApplyOptions::exact();
     let options_fuzzy = ApplyOptions::new();
@@ -206,6 +207,7 @@ struct ApplyBenchSetup {
 
 fn applying_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Applying");
+    group.sample_size(10);
 
     let options_exact = ApplyOptions::exact();
     let options_fuzzy = ApplyOptions::new();
