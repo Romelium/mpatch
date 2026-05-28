@@ -257,16 +257,34 @@ impl Anonymizer {
         // Sort by length descending so we replace the longest, most specific paths first
         replacements.sort_by_key(|b| std::cmp::Reverse(b.0.len()));
 
-        Self { replacements }
+        // Precompute and deduplicate slash formatting
+        let mut processed = Vec::new();
+        for (search, replace) in replacements {
+            let search_forward = search.replace('\\', "/");
+            if !processed.contains(&(search.clone(), replace.clone())) {
+                processed.push((search.clone(), replace.clone()));
+            }
+            if search_forward != search
+                && !processed.contains(&(search_forward.clone(), replace.clone()))
+            {
+                processed.push((search_forward, replace));
+            }
+        }
+
+        processed.sort_by_key(|b| std::cmp::Reverse(b.0.len()));
+        Self {
+            replacements: processed,
+        }
     }
 
-    fn anonymize(&self, text: &str) -> String {
-        let mut result = text.to_string();
+    fn anonymize<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
+        if self.replacements.is_empty() {
+            return std::borrow::Cow::Borrowed(text);
+        }
+        let mut result = std::borrow::Cow::Borrowed(text);
         for (search, replace) in &self.replacements {
-            result = result.replace(search, replace);
-            let search_forward = search.replace('\\', "/");
-            if search_forward != *search {
-                result = result.replace(&search_forward, replace);
+            if result.contains(search) {
+                result = std::borrow::Cow::Owned(result.replace(search, replace));
             }
         }
         result
@@ -278,6 +296,9 @@ type ReportData = (Arc<Mutex<File>>, HashMap<PathBuf, String>, Anonymizer);
 
 /// Logs the reasons why hunks failed to apply.
 fn log_failed_hunks(apply_result: &mpatch::ApplyResult, patch: &Patch) {
+    if !log::log_enabled!(log::Level::Warn) {
+        return;
+    }
     for failure in apply_result.failures() {
         warn!("  - Hunk {} failed: {}", failure.hunk_index, failure.reason);
         // hunk_index is 1-based, so we need to subtract 1 for indexing.
