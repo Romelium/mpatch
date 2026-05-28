@@ -15,7 +15,6 @@ env:
   CARGO_PROFILE_RELEASE_STRIP: false
   # Map secret existence to env vars to avoid context issues in 'if' conditions
   HAS_GPG_SECRET: ${{ secrets.GPG_PRIVATE_KEY != '' }}
-  HAS_PUBLIC_KEY: ${{ vars.GPG_PUBLIC_KEY != '' }}
 
 jobs:
   # ===========================================================================
@@ -353,12 +352,17 @@ jobs:
           path: release-assets
           merge-multiple: true
 
-      - name: Include Public Key
-        # Only run if the variable is set in GitHub Settings
-        if: env.HAS_PUBLIC_KEY == 'true'
+      - name: Import GPG Key
+        if: env.HAS_GPG_SECRET == 'true'
+        uses: crazy-max/ghaction-import-gpg@v6
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.GPG_PASSPHRASE }}
+
+      - name: Export Public Key
+        if: env.HAS_GPG_SECRET == 'true'
         run: |
-          # Write the variable content to a file in the assets folder
-          echo "${{ vars.GPG_PUBLIC_KEY }}" > release-assets/public.key
+          gpg --armor --export > release-assets/public.key
 
       - name: Install parse-changelog
         uses: taiki-e/install-action@v2
