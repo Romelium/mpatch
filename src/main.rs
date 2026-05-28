@@ -108,17 +108,20 @@ fn run(args: Args) -> Result<()> {
     // this function (no matter how it exits), its `drop` method is called,
     // which guarantees the report file is correctly finalized.
     let report_arc = setup_logging_and_reporting(&args, &content, &all_patches)?;
-    let (report_file_arc, original_contents) = if let Some((arc, contents)) = report_arc {
-        (Some(arc), Some(contents))
-    } else {
-        (None, None)
-    };
+    let (report_file_arc, original_contents, anonymizer) =
+        if let Some((arc, contents, anon)) = report_arc {
+            (Some(arc), Some(contents), Some(anon))
+        } else {
+            (None, None, None)
+        };
 
     // This closure will be called at the end of the function to finalize the report.
     // This is done manually instead of with a Drop guard to allow access to `batch_result`.
     let finalize_report = |batch_result: Option<&mpatch::BatchResult>| {
-        if let (Some(arc), Some(contents)) = (&report_file_arc, &original_contents) {
-            write_report_footer(arc, &args, &all_patches, batch_result, contents);
+        if let (Some(arc), Some(contents), Some(anon)) =
+            (&report_file_arc, &original_contents, &anonymizer)
+        {
+            write_report_footer(arc, &args, &all_patches, batch_result, contents, anon);
         }
     };
     // --- Core Patching Logic ---
@@ -209,8 +212,69 @@ fn run(args: Args) -> Result<()> {
 
 // --- Helper Structs and Functions ---
 
-/// A tuple containing the shared handle to the report file and a map of original file contents.
-type ReportData = (Arc<Mutex<File>>, HashMap<PathBuf, String>);
+#[derive(Clone)]
+struct Anonymizer {
+    replacements: Vec<(String, String)>,
+}
+
+impl Anonymizer {
+    fn new(args: &Args) -> Self {
+        let mut replacements = Vec::new();
+
+        if let Some(input) = &args.input_file {
+            let canon = fs::canonicalize(input).unwrap_or_else(|_| input.clone());
+            replacements.push((
+                canon.to_string_lossy().into_owned(),
+                "<INPUT_FILE>".to_string(),
+            ));
+            if let Some(parent) = canon.parent() {
+                replacements.push((
+                    parent.to_string_lossy().into_owned(),
+                    "<INPUT_DIR>".to_string(),
+                ));
+            }
+        }
+
+        if let Some(target) = &args.target_dir {
+            let canon = fs::canonicalize(target).unwrap_or_else(|_| target.clone());
+            replacements.push((
+                canon.to_string_lossy().into_owned(),
+                "<TARGET_DIR>".to_string(),
+            ));
+        }
+
+        if let Ok(cwd) = std::env::current_dir() {
+            replacements.push((cwd.to_string_lossy().into_owned(), "<CWD>".to_string()));
+        }
+
+        if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+            replacements.push((home, "<HOME>".to_string()));
+        }
+
+        // Filter out very short strings (like "/", "\", "C:\") to prevent over-anonymization
+        replacements.retain(|(s, _)| s.len() > 3);
+
+        // Sort by length descending so we replace the longest, most specific paths first
+        replacements.sort_by_key(|b| std::cmp::Reverse(b.0.len()));
+
+        Self { replacements }
+    }
+
+    fn anonymize(&self, text: &str) -> String {
+        let mut result = text.to_string();
+        for (search, replace) in &self.replacements {
+            result = result.replace(search, replace);
+            let search_forward = search.replace('\\', "/");
+            if search_forward != *search {
+                result = result.replace(&search_forward, replace);
+            }
+        }
+        result
+    }
+}
+
+/// A tuple containing the shared handle to the report file, a map of original file contents, and the anonymizer.
+type ReportData = (Arc<Mutex<File>>, HashMap<PathBuf, String>, Anonymizer);
 
 /// Logs the reasons why hunks failed to apply.
 fn log_failed_hunks(apply_result: &mpatch::ApplyResult, patch: &Patch) {
@@ -276,6 +340,7 @@ struct Args {
 /// while also writing them to the report file.
 struct TeeWriter {
     file: Arc<Mutex<File>>,
+    anonymizer: Anonymizer,
 }
 
 impl Write for TeeWriter {
@@ -283,7 +348,12 @@ impl Write for TeeWriter {
         // Write to standard error first.
         io::stderr().write_all(buf)?;
         // Then write to the locked file.
-        self.file.lock().unwrap().write_all(buf)?;
+        if let Ok(s) = std::str::from_utf8(buf) {
+            let anonymized = self.anonymizer.anonymize(s);
+            self.file.lock().unwrap().write_all(anonymized.as_bytes())?;
+        } else {
+            self.file.lock().unwrap().write_all(buf)?;
+        }
         Ok(buf.len())
     }
     fn flush(&mut self) -> io::Result<()> {
@@ -301,15 +371,18 @@ fn setup_logging_and_reporting(
 ) -> Result<Option<ReportData>> {
     let mut builder = Builder::new();
     let report_data = if args.verbose >= 4 {
+        let anonymizer = Anonymizer::new(args);
         // --- Create and Write Report Header ---
-        let (file_arc, original_contents) = create_report_file(args, patch_content, patches)?;
+        let (file_arc, original_contents) =
+            create_report_file(args, patch_content, patches, &anonymizer)?;
         // --- Configure Logger to Tee to the Report File ---
         builder
             .filter_level(LevelFilter::Trace) // Max verbosity for the report
             .target(env_logger::Target::Pipe(Box::new(TeeWriter {
                 file: file_arc.clone(),
+                anonymizer: anonymizer.clone(),
             })));
-        Some((file_arc, original_contents))
+        Some((file_arc, original_contents, anonymizer))
     } else {
         // --- Configure Standard Logger ---
         let log_level = match args.verbose {
@@ -337,7 +410,13 @@ fn setup_logging_and_reporting(
 }
 
 /// Creates the report file, writes the header, and returns a shared pointer to it.
-fn create_report_file(args: &Args, patch_content: &str, patches: &[Patch]) -> Result<ReportData> {
+#[allow(clippy::type_complexity)]
+fn create_report_file(
+    args: &Args,
+    patch_content: &str,
+    patches: &[Patch],
+    anonymizer: &Anonymizer,
+) -> Result<(Arc<Mutex<File>>, HashMap<PathBuf, String>)> {
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let report_filename = format!("mpatch-debug-report-{}.md", timestamp);
     let mut file = File::create(&report_filename)
@@ -363,13 +442,14 @@ fn create_report_file(args: &Args, patch_content: &str, patches: &[Patch]) -> Re
     // --- Write Anonymized Command ---
     writeln!(file, "\n## Command Line\n")?;
     writeln!(file, "```sh")?;
-    writeln!(file, "{}", anonymize_command_args(args))?;
+    let cmd = anonymize_command_args(args);
+    writeln!(file, "{}", anonymizer.anonymize(&cmd))?;
     writeln!(file, "```")?;
 
     // --- Write Input Patch File ---
     writeln!(file, "\n## Input Patch File\n")?;
     writeln!(file, "````markdown")?;
-    writeln!(file, "{}", patch_content)?;
+    writeln!(file, "{}", anonymizer.anonymize(patch_content))?;
     writeln!(file, "````")?;
 
     // --- Write Original Target Files ---
@@ -385,7 +465,7 @@ fn create_report_file(args: &Args, patch_content: &str, patches: &[Patch]) -> Re
                     .and_then(|s| s.to_str())
                     .unwrap_or("");
                 writeln!(file, "````{}", lang)?;
-                writeln!(file, "{}", file_content)?;
+                writeln!(file, "{}", anonymizer.anonymize(&file_content))?;
                 writeln!(file, "````")?;
                 original_contents.insert(patch.file_path.clone(), file_content);
             }
@@ -393,7 +473,10 @@ fn create_report_file(args: &Args, patch_content: &str, patches: &[Patch]) -> Re
                 writeln!(file, "*File does not exist.*")?;
                 original_contents.insert(patch.file_path.clone(), String::new());
             }
-            Err(e) => writeln!(file, "*Error reading file: {}*", e)?,
+            Err(e) => {
+                let msg = format!("*Error reading file: {}*", e);
+                writeln!(file, "{}", anonymizer.anonymize(&msg))?;
+            }
         }
     }
 
@@ -412,6 +495,7 @@ fn write_report_footer(
     all_patches: &[Patch],
     batch_result: Option<&mpatch::BatchResult>,
     original_contents: &HashMap<PathBuf, String>,
+    anonymizer: &Anonymizer,
 ) {
     // Use a static bool to ensure this only runs once.
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -452,14 +536,17 @@ fn write_report_footer(
                                 .and_then(|s| s.to_str())
                                 .unwrap_or("");
                             let _ = writeln!(file, "````{}", lang);
-                            let _ = writeln!(file, "{}", file_content);
+                            let _ = writeln!(file, "{}", anonymizer.anonymize(&file_content));
                             let _ = writeln!(file, "````");
                         }
                     }
                     Err(e) if e.kind() == io::ErrorKind::NotFound => {
                         let _ = writeln!(file, "*File does not exist.*");
                     }
-                    Err(e) => _ = writeln!(file, "*Error reading file: {}*", e),
+                    Err(e) => {
+                        let msg = format!("*Error reading file: {}*", e);
+                        let _ = writeln!(file, "{}", anonymizer.anonymize(&msg));
+                    }
                 }
             }
         }
@@ -530,20 +617,21 @@ fn write_report_footer(
                         let _ = writeln!(
                             file,
                             "```diff\n{}```",
-                            format_patch_for_report(original_patch)
+                            anonymizer.anonymize(&format_patch_for_report(original_patch))
                         );
                         let _ = writeln!(file, "\n**Regenerated Patch (from file changes):**");
                         let _ = writeln!(
                             file,
                             "```diff\n{}```",
-                            format_patch_for_report(&recreated_patch)
+                            anonymizer.anonymize(&format_patch_for_report(&recreated_patch))
                         );
                     }
                 }
             }
             Err(e) => {
                 let mut file = file_arc.lock().unwrap();
-                let _ = writeln!(file, "\n- **Result:** <span style='color:orange;'>SKIPPED</span> (Patch application failed with a hard error: {}).", e);
+                let msg = format!("\n- **Result:** <span style='color:orange;'>SKIPPED</span> (Patch application failed with a hard error: {}).", e);
+                let _ = writeln!(file, "{}", anonymizer.anonymize(&msg));
             }
         }
     }
@@ -582,19 +670,20 @@ fn anonymize_command_args(args: &Args) -> String {
     // The first argument is always the program name.
     anonymized_args.push(args_iter.next().unwrap_or_else(|| "mpatch".to_string()));
 
+    let canonical_input = args
+        .input_file
+        .as_ref()
+        .map(|p| fs::canonicalize(p).unwrap_or_else(|_| p.clone()));
+    let canonical_target = args
+        .target_dir
+        .as_ref()
+        .map(|p| fs::canonicalize(p).unwrap_or_else(|_| p.clone()));
+
     // Iterate through the rest of the command-line arguments.
     for arg in args_iter {
         let arg_path = PathBuf::from(&arg);
         // Canonicalize paths to handle relative vs. absolute paths consistently.
         let canonical_arg = fs::canonicalize(&arg_path).unwrap_or(arg_path);
-        let canonical_input = args
-            .input_file
-            .as_ref()
-            .map(|p| fs::canonicalize(p).unwrap_or_else(|_| p.clone()));
-        let canonical_target = args
-            .target_dir
-            .as_ref()
-            .map(|p| fs::canonicalize(p).unwrap_or_else(|_| p.clone()));
 
         // Check if the argument matches one of the sensitive paths.
         if canonical_input

@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 -   **CLI:** Added `-c` / `--clipboard` flag to input directly from the system clipboard.
 
+### Changed
+
+-   **Diagnostics:** Significantly enhanced the anonymization of debug reports (`-vvvv`). The report generator now actively redacts the input file path, target directory, current working directory, and user home directory from the entire report, including the full trace log, file contents, and error messages.
+
 ### Security
 
 -   **Path Validation:** Fixed a vulnerability in `ensure_path_is_safe` where a dangling symlink could bypass the path traversal check and allow arbitrary file creation outside the target directory. The validation now correctly detects dangling symlinks using `symlink_metadata`.
