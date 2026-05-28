@@ -92,7 +92,7 @@ The integrity of all released binaries is verified with GPG. The `.sig` signatur
 2.  **Verify the archive:**
     ```bash
     # Example for Linux x64
-    gpg --verify mpatch-x86_64-unknown-linux-gnu-v1.4.4.tar.gz.sig mpatch-x86_64-unknown-linux-gnu-v1.4.4.tar.gz
+    gpg --verify mpatch-x86_64-unknown-linux-gnu-v1.5.0.tar.gz.sig mpatch-x86_64-unknown-linux-gnu-v1.5.0.tar.gz
     ```
 
 ### Option 2: Build from Source
@@ -161,7 +161,7 @@ mpatch -vvvv changes.md ./src
 Add to `Cargo.toml`:
 ```toml
 [dependencies]
-mpatch = "1.4.4"
+mpatch = "1.5.0"
 ```
 
 ### 1. Simple One-Shot (String to String)
