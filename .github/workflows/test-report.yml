@@ -3,7 +3,7 @@ name: Test Report
 # Trigger ONLY after the CI workflow finishes
 on:
   workflow_run:
-    workflows: ["Rust CI"]
+    workflows: ["Rust CI", "Python CI"]
     types:
       - completed
 

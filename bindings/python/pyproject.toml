@@ -1,0 +1,66 @@
+[build-system]
+requires = ["maturin>=1.6,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "mpatch"
+# Keep this in sync with your Rust crate version
+version = "1.5.0"
+description = "A smart, context-aware patch tool that applies diffs using fuzzy matching, ideal for AI-generated code."
+readme = "README.md"
+authors = [
+    { name = "Romelium", email = "author@romelium.com" }
+]
+license = { text = "MIT" }
+# abi3-py38 means it requires Python 3.8 or newer
+requires-python = ">=3.8"
+
+# PyPI Classifiers help users find your package
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Text Processing",
+]
+
+[project.urls]
+Homepage = "https://github.com/romelium/mpatch"
+Repository = "https://github.com/romelium/mpatch"
+"Bug Tracker" = "https://github.com/romelium/mpatch/issues"
+
+# Defines optional dependencies. Users can install test dependencies via:
+# pip install .[test]
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+]
+
+[tool.maturin]
+# The name of the Python module produced by the Rust build
+module-name = "mpatch"
+
+[tool.pytest.ini_options]
+# Tells pytest where to look for tests
+testpaths = ["tests"]
+addopts = "-v"
+
+[tool.ruff]
+# Standard configuration for the blazing fast Ruff linter/formatter (written in Rust!)
+line-length = 88
+target-version = "py38"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"] # Errors, Fatal, Isort, pyUpgrade
+ignore = []

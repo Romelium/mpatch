@@ -50,6 +50,9 @@ path = "src/lib.rs"
 name = "mpatch_bench"
 harness = false
 
+[workspace]
+members = ["bindings/python"]
+
 # --- Cargo Release Configuration ---
 # This section configures the `cargo-release` tool to automatically update version
 # numbers in documentation and source files when you publish a new release.
@@ -75,5 +78,9 @@ pre-release-replacements = [
   # Update complex style: version = "x.y.z" (inside feature flags or brackets)
   {file="README.md", search="version = \"[0-9.]+\"", replace="version = \"{{version}}\"", min=0},
   # Update GPG verification example
-  {file="README.md", search="mpatch-x86_64-unknown-linux-gnu-v[0-9.]+\\.tar\\.gz", replace="mpatch-x86_64-unknown-linux-gnu-v{{version}}.tar.gz", min=0}
+  {file="README.md", search="mpatch-x86_64-unknown-linux-gnu-v[0-9.]+\\.tar\\.gz", replace="mpatch-x86_64-unknown-linux-gnu-v{{version}}.tar.gz", min=0},
+
+  # --- Python Bindings ---
+  {file="bindings/python/Cargo.toml", search="(?m)^version = \"[a-z0-9.-]+\"", replace="version = \"{{version}}\"", min=1},
+  {file="bindings/python/pyproject.toml", search="(?m)^version = \"[a-z0-9.-]+\"", replace="version = \"{{version}}\"", min=1}
 ]

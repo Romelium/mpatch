@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Python Bindings:** Introduced official Python bindings via PyO3. The `mpatch` package is now available on PyPI!
+  - Exposes a rich, object-oriented, and fully typed API (with `.pyi` stubs) for tool builders and AI agent frameworks.
+  - Provides high-level convenience functions (`patch_content`, `apply_directory`) and granular control over patches and hunks.
+  - Includes pre-compiled wheels for Linux, macOS, and Windows, with support for Python 3.8+ and Python 3.13 free-threaded builds.
+  - Implements Pythonic paradigms like slicing, unary inversion (`~patch`), and native exceptions (`ParseError`, `PathTraversalError`).
+
 ## [1.5.0] - 2026-05-28
 
 ### Added

@@ -1,0 +1,19 @@
+/target
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+*.whl
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+.pytype/
+.pyre/

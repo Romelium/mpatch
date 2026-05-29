@@ -10,6 +10,8 @@
 
 This tool was created to easily apply diffs produced by **LLMs (ChatGPT, Gemini, Claude, Copilot)**, since they tend to hallucinate the exact line numbers or the context around the patch.
 
+> **🐍 Python Developer?** We have official Python bindings! Check out the [`mpatch` PyPI package and Python documentation](https://github.com/romelium/mpatch/tree/main/bindings/python).
+
 ---
 
 ## The Problem and the Solution
