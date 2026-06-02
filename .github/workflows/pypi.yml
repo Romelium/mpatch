@@ -10,32 +10,24 @@ permissions:
 
 jobs:
   build-wheels:
-    name: Build wheels on ${{ matrix.os }} (${{ matrix.target }}) ${{ matrix.free-threaded && 'Free-Threaded' || '' }}
-    runs-on: ${{ matrix.os }}
+    name: Build wheels on ${{ matrix.platform.os }} (${{ matrix.platform.target }}) ${{ matrix.free-threaded && 'Free-Threaded' || '' }}
+    runs-on: ${{ matrix.platform.os }}
     strategy:
       fail-fast: false
       matrix:
         free-threaded: [false, true]
-        include:
+        platform:
           # --- Linux ---
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-musl
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-musl }
           # --- macOS ---
-          - os: macos-13 # Intel Mac
-            target: x86_64-apple-darwin
-          - os: macos-14 # Apple Silicon (M1/M2/M3)
-            target: aarch64-apple-darwin
+          - { os: macos-13, target: x86_64-apple-darwin }
+          - { os: macos-14, target: aarch64-apple-darwin }
           # --- Windows ---
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-          - os: windows-latest
-            target: aarch64-pc-windows-msvc
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: windows-latest, target: aarch64-pc-windows-msvc }
 
     steps:
       - uses: actions/checkout@v4
@@ -53,7 +45,7 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          target: ${{ matrix.target }}
+          target: ${{ matrix.platform.target }}
           manylinux: auto
           working-directory: bindings/python
           # Pass `-i python3.13t` to explicitly tell maturin to build a cp313t wheel alongside abi3
@@ -64,7 +56,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           # Use dynamic artifact names to prevent overwriting between parallel free-threaded and standard jobs
-          name: wheels-${{ matrix.target }}${{ matrix.free-threaded && '-freethreaded' || '' }}
+          name: wheels-${{ matrix.platform.target }}${{ matrix.free-threaded && '-freethreaded' || '' }}
           path: bindings/python/dist/*.whl
 
   build-sdist:
