@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "mpatch"
 # Keep this in sync with your Rust crate version
-version = "1.6.3"
+version = "1.6.4"
 description = "A smart, context-aware patch tool that applies diffs using fuzzy matching, ideal for AI-generated code."
 readme = "README.md"
 authors = [
