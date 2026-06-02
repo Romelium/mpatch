@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-06-02
+
 ### Added
 - **Python Bindings:** Introduced official Python bindings via PyO3. The `mpatch` package is now available on PyPI!
   - Exposes a rich, object-oriented, and fully typed API (with `.pyi` stubs) for tool builders and AI agent frameworks.
