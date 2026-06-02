@@ -83,4 +83,5 @@ pre-release-replacements = [
   # --- Python Bindings ---
   { file = "bindings/python/Cargo.toml", search = "(?m)^version = \"[a-z0-9.-]+\"", replace = "version = \"{{version}}\"", min = 1 },
   { file = "bindings/python/pyproject.toml", search = "(?m)^version = \"[a-z0-9.-]+\"", replace = "version = \"{{version}}\"", min = 1 },
+  { file = "Cargo.lock", search = "(?m)^name = \"mpatch_py\"\\r?\\nversion = \"[a-z0-9.-]+\"", replace = "name = \"mpatch_py\"\nversion = \"{{version}}\"", min = 1 },
 ]
