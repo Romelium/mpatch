@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime
 import os
 import re
@@ -10,14 +11,11 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional
 
 # Enable ANSI escape sequences on Windows console
 if sys.platform == "win32":
-    try:
+    with contextlib.suppress(OSError):
         os.system("")
-    except Exception:
-        pass
 
 
 # --- ANSI Color Helpers ---
@@ -71,10 +69,10 @@ def abort(msg: str, exit_code: int = 1) -> None:
 # --- Subprocess Execution Helper ---
 def run_cmd(
     cmd: list[str],
-    cwd: Optional[Path] = None,
+    cwd: Path | None = None,
     capture_output: bool = False,
     check: bool = True,
-    env: Optional[dict[str, str]] = None,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     cwd_str = f" (in {cwd})" if cwd else ""
     dim = Style.DIM if supports_color() else ""
@@ -106,7 +104,7 @@ def run_cmd(
         ) from e
 
 
-def probe_command(cmd: list[str], cwd: Optional[Path] = None) -> tuple[bool, str]:
+def probe_command(cmd: list[str], cwd: Path | None = None) -> tuple[bool, str]:
     """Runs a command silently and returns (success, output)."""
     try:
         res = subprocess.run(
@@ -118,7 +116,7 @@ def probe_command(cmd: list[str], cwd: Optional[Path] = None) -> tuple[bool, str
         )
         out = (res.stdout or res.stderr or "").strip()
         return res.returncode == 0, out
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError) as e:
         return False, str(e)
 
 
@@ -126,13 +124,13 @@ def probe_command(cmd: list[str], cwd: Optional[Path] = None) -> tuple[bool, str
 def write_file_lf(path: Path, content: str) -> None:
     """Writes text with strict LF (\\n) line endings across all platforms."""
     with open(path, "w", encoding="utf-8", newline="\n") as f:
-        f.write(content)
+        f.write(content.replace("\r\n", "\n"))
 
 
 # --- Version Helpers ---
 def parse_semver(version_str: str) -> tuple[int, int, int, str]:
-    pattern = r"^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$"
-    match = re.match(pattern, version_str.strip())
+    pattern = r"^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$"
+    match = re.match(pattern, version_str.strip(), re.IGNORECASE)
     if not match:
         raise ValueError(f"Invalid semantic version string: '{version_str}'")
     major, minor, patch, prerelease = match.groups()
@@ -140,17 +138,20 @@ def parse_semver(version_str: str) -> tuple[int, int, int, str]:
 
 
 def bump_version(current: str, bump_type: str) -> str:
-    major, minor, patch, _ = parse_semver(current)
-    if bump_type == "patch":
+    major, minor, patch, prerelease = parse_semver(current)
+    bump_lower = bump_type.strip().lower()
+    if bump_lower == "patch":
         new_ver = f"{major}.{minor}.{patch + 1}"
-    elif bump_type == "minor":
+    elif bump_lower == "minor":
         new_ver = f"{major}.{minor + 1}.0"
-    elif bump_type == "major":
+    elif bump_lower == "major":
         new_ver = f"{major + 1}.0.0"
     else:
-        new_ver = bump_type
-        new_maj, new_min, new_pat, _ = parse_semver(new_ver)
-        if (new_maj, new_min, new_pat) <= (major, minor, patch):
+        new_maj, new_min, new_pat, new_pre = parse_semver(bump_type)
+        new_ver = f"{new_maj}.{new_min}.{new_pat}" + (f"-{new_pre}" if new_pre else "")
+        curr_tuple = (major, minor, patch, 0 if prerelease else 1)
+        new_tuple = (new_maj, new_min, new_pat, 0 if new_pre else 1)
+        if new_tuple <= curr_tuple:
             raise ValueError(
                 f"New version '{new_ver}' must be strictly greater than "
                 f"current version '{current}'"
@@ -167,7 +168,7 @@ def get_repo_root() -> Path:
     try:
         res = run_cmd(["git", "rev-parse", "--show-toplevel"], capture_output=True)
         return Path(res.stdout.strip())
-    except Exception as e:
+    except (RuntimeError, OSError) as e:
         abort(f"Not inside a git repository: {e}")
 
 
@@ -180,6 +181,15 @@ def read_current_version(root: Path) -> str:
     return match.group(1)
 
 
+def read_package_name(root: Path) -> str:
+    cargo_path = root / "Cargo.toml"
+    content = cargo_path.read_text(encoding="utf-8")
+    match = re.search(r'(?m)^\[package\][\s\S]*?^name\s*=\s*"([^"]+)"', content)
+    if not match:
+        return "mpatch"
+    return match.group(1)
+
+
 def get_git_remote(root: Path, branch: str) -> str:
     try:
         res = subprocess.run(
@@ -187,27 +197,27 @@ def get_git_remote(root: Path, branch: str) -> str:
             cwd=root,
             capture_output=True,
             text=True,
+            check=False,
         )
         return res.stdout.strip() or "origin"
-    except Exception:
+    except (subprocess.SubprocessError, OSError):
         return "origin"
 
 
 # --- Tool Resolution Helpers ---
-def find_ruff_cmd() -> Optional[list[str]]:
+def find_ruff_cmd() -> list[str] | None:
     """Detects whether ruff is available via PATH or as a Python module."""
     if shutil.which("ruff"):
         return ["ruff"]
-    try:
+    with contextlib.suppress(subprocess.SubprocessError, OSError):
         res = subprocess.run(
             [sys.executable, "-m", "ruff", "--version"],
             capture_output=True,
             text=True,
+            check=False,
         )
         if res.returncode == 0:
             return [sys.executable, "-m", "ruff"]
-    except Exception:
-        pass
     return None
 
 
@@ -217,15 +227,18 @@ def check_python_module(module_name: str) -> bool:
         res = subprocess.run(
             [sys.executable, "-c", f"import {module_name}"],
             capture_output=True,
+            check=False,
         )
         return res.returncode == 0
-    except Exception:
+    except (subprocess.SubprocessError, OSError):
         return False
 
 
 def verify_crates_io_auth() -> bool:
     """Checks if credentials exist for publishing to crates.io."""
-    if os.environ.get("CARGO_REGISTRY_TOKEN"):
+    if os.environ.get("CARGO_REGISTRY_TOKEN") or os.environ.get(
+        "CARGO_REGISTRIES_CRATES_IO_TOKEN"
+    ):
         return True
     home = Path.home()
     cred_toml = home / ".cargo" / "credentials.toml"
@@ -329,10 +342,7 @@ def run_tool_diagnostics(
     py_ver = (
         f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     )
-    if sys.version_info < (3, 8):
-        issues.append(f"Python 3.8+ is required (active interpreter: {py_ver}).")
-    else:
-        print(f"  ✔ python:       {py_ver} ({sys.executable})")
+    print(f"  ✔ python:       {py_ver} ({sys.executable})")
 
     # 4. Ruff (Python Linter / Formatter)
     ruff_cmd = find_ruff_cmd()
@@ -408,7 +418,7 @@ class ReleaseContext:
 def apply_version_bumps(ctx: ReleaseContext, current_ver: str, new_ver: str) -> None:
     root = ctx.root
     dry_run = ctx.dry_run
-    today = datetime.date.today().isoformat()
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
     c_esc = re.escape(current_ver)
 
     # 1. Root Cargo.toml
@@ -528,7 +538,9 @@ def apply_version_bumps(ctx: ReleaseContext, current_ver: str, new_ver: str) -> 
 
 
 # --- Test & Lint Verification Suites ---
-def run_test_and_lint_suite(root: Path, ruff_cmd: list[str] | None) -> None:
+def run_test_and_lint_suite(
+    root: Path, ruff_cmd: list[str] | None, allow_dirty: bool = False
+) -> None:
     """Runs all linting, formatting, and test suites across Rust and Python."""
     info("Checking Rust code formatting (cargo fmt)...")
     run_cmd(["cargo", "fmt", "--all", "--", "--check"], cwd=root)
@@ -547,7 +559,12 @@ def run_test_and_lint_suite(root: Path, ruff_cmd: list[str] | None) -> None:
     )
 
     info("Validating Rust crate packaging integrity (cargo package)...")
-    run_cmd(["cargo", "package", "--no-deps"], cwd=root)
+    pkg_name = read_package_name(root)
+    pkg_cmd = ["cargo", "package", "-p", pkg_name]
+
+    if allow_dirty:
+        pkg_cmd.append("--allow-dirty")
+    run_cmd(pkg_cmd, cwd=root)
 
     info("Running Cargo test suite...")
     run_cmd(["cargo", "test", "--all-features"], cwd=root)
@@ -714,6 +731,7 @@ def main() -> None:
                 cwd=root,
                 capture_output=True,
                 text=True,
+                check=False,
             )
             if fetch_res.returncode == 0:
                 behind_check = subprocess.run(
@@ -726,6 +744,7 @@ def main() -> None:
                     cwd=root,
                     capture_output=True,
                     text=True,
+                    check=False,
                 )
                 if (
                     behind_check.returncode == 0
@@ -748,17 +767,22 @@ def main() -> None:
                 ["git", "rev-parse", "-q", "--verify", f"refs/tags/{tag_name}"],
                 cwd=root,
                 capture_output=True,
+                check=False,
             )
             if tag_check.returncode == 0:
                 raise RuntimeError(f"Git tag '{tag_name}' already exists locally!")
 
             remote_tag_check = subprocess.run(
-                ["git", "ls-remote", "--tags", remote_name, tag_name],
+                ["git", "ls-remote", "--tags", remote_name, f"refs/tags/{tag_name}"],
                 cwd=root,
                 capture_output=True,
                 text=True,
+                check=False,
             )
-            if remote_tag_check.returncode == 0 and remote_tag_check.stdout.strip():
+            if remote_tag_check.returncode == 0 and any(
+                line.endswith((f"refs/tags/{tag_name}", f"refs/tags/{tag_name}^{{}}"))
+                for line in remote_tag_check.stdout.splitlines()
+            ):
                 raise RuntimeError(
                     f"Git tag '{tag_name}' already exists on remote {remote_name}!"
                 )
@@ -787,14 +811,14 @@ def main() -> None:
 
         # --- Step 2: Test & Lint Suite Verification ---
         if not args.skip_tests:
-            print("")
+            print()
             info("Step 2: Running Comprehensive Test & Lint Suite")
-            run_test_and_lint_suite(root, ruff_cmd)
+            run_test_and_lint_suite(root, ruff_cmd, allow_dirty=args.skip_git_check)
         else:
             warn("Step 2: Test and lint suite SKIPPED (--skip-tests).")
 
         # --- Step 3: Confirmation Prompt ---
-        print("")
+        print()
         info("Step 3: Ready to Apply Version Bump")
         print(f"  • Current Version: {Style.BOLD}{current_ver}{Style.RESET}")
         print(f"  • Target Version:  {Style.BOLD}{new_ver}{Style.RESET}")
@@ -812,10 +836,13 @@ def main() -> None:
                 sys.exit(0)
 
         # --- Step 4: Apply Version Bumps ---
-        print("")
+        print()
         info("Step 4: Updating Version References in Files")
         apply_version_bumps(ctx, current_ver, new_ver)
-        success(f"Updated {len(ctx.modified_files)} files.")
+        if args.dry_run:
+            info(f"[DRY RUN] Would update {len(ctx.modified_files)} files.")
+        else:
+            success(f"Updated {len(ctx.modified_files)} files.")
 
         # Post-bump syntax verification before committing
         if not args.dry_run and not args.skip_tests:
@@ -823,14 +850,14 @@ def main() -> None:
             run_cmd(["cargo", "fmt", "--all", "--", "--check"], cwd=root)
 
         # --- Step 5: Git Commit & Tag ---
-        print("")
+        print()
         info("Step 5: Git Commit and Tagging")
         commit_msg = f"chore: release {tag_name}"
 
         if args.dry_run:
             info(
                 f"[DRY RUN] Would execute: git add "
-                f"{' '.join(f.name for f in ctx.modified_files)}"
+                f"{' '.join(f.relative_to(root).as_posix() for f in ctx.modified_files)}"
             )
             info(f"[DRY RUN] Would execute: git commit -m '{commit_msg}'")
             info(
@@ -851,11 +878,11 @@ def main() -> None:
             success(f"Created git commit '{commit_msg}' and tag '{tag_name}'.")
 
         # --- Step 6: Git Push ---
-        print("")
+        print()
         info("Step 6: Pushing to Remote Repository")
         should_push = args.push
-        if should_push is None and not args.dry_run:
-            if args.yes:
+        if should_push is None:
+            if args.dry_run or args.yes:
                 should_push = True
             else:
                 ans = (
@@ -868,22 +895,23 @@ def main() -> None:
         if should_push:
             if args.dry_run:
                 info(
-                    f"[DRY RUN] Would execute: git push {remote_name} HEAD "
+                    f"[DRY RUN] Would execute: git push {remote_name} {current_branch} "
                     f"and git push {remote_name} {tag_name}"
                 )
             else:
-                run_cmd(["git", "push", remote_name, "HEAD"], cwd=root)
+                run_cmd(["git", "push", remote_name, current_branch], cwd=root)
                 run_cmd(["git", "push", remote_name, tag_name], cwd=root)
                 success(f"Pushed commit and tag '{tag_name}' to {remote_name}.")
         else:
             warn(
-                f"Skipped push. Run manually: git push {remote_name} HEAD "
+                f"Skipped push. Run manually: git push {remote_name} {current_branch} "
                 f"&& git push {remote_name} {tag_name}"
             )
 
         # --- Step 7: Crates.io Publishing ---
-        print("")
+        print()
         info("Step 7: Publishing to Crates.io")
+        pkg_name = read_package_name(root)
         should_publish_cargo = args.publish_cargo
         if not should_publish_cargo and not args.dry_run and not args.yes:
             ans = (
@@ -895,20 +923,20 @@ def main() -> None:
 
         if should_publish_cargo:
             if args.dry_run:
-                info("[DRY RUN] Would execute: cargo publish -p mpatch")
+                info(f"[DRY RUN] Would execute: cargo publish -p {pkg_name}")
             else:
                 try:
-                    run_cmd(["cargo", "publish", "-p", "mpatch"], cwd=root)
-                    success("Published mpatch to Crates.io!")
-                except Exception as e:
+                    run_cmd(["cargo", "publish", "-p", pkg_name], cwd=root)
+                    success(f"Published {pkg_name} to Crates.io!")
+                except (RuntimeError, OSError) as e:
                     warn(
                         f"Crates.io publish failed ({e}). "
-                        "You can publish manually later with: cargo publish -p mpatch"
+                        f"You can publish manually later with: cargo publish -p {pkg_name}"
                     )
         else:
             info(
-                "Skipped cargo publish. Publish manually later using: "
-                "cargo publish -p mpatch"
+                f"Skipped cargo publish. Publish manually later using: "
+                f"cargo publish -p {pkg_name}"
             )
 
         # --- Step 8: Summary & Guidance ---
@@ -935,12 +963,12 @@ def main() -> None:
         )
         print("    • This automatically triggers `.github/workflows/pypi.yml` to build")
         print("      and publish all Python wheels to PyPI.")
-        print("")
+        print()
 
     except KeyboardInterrupt:
         ctx.rollback()
         abort("Release interrupted by user.")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         ctx.rollback()
         abort(str(exc))
 
