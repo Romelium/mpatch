@@ -21,6 +21,10 @@
 //!   modified comments or minor whitespace changes).
 //! - **Indentation Awareness**: Dynamically re-aligning the indentation of
 //!   injected code to match the target file's style.
+//! - **Candidate Backtracking**: Backtracking through alternative candidate
+//!   locations if an initial fuzzy window fails validation (e.g., orphan additions).
+//! - **Statement Re-alignment**: Recognizing statements across line-break or
+//!   formatting differences to prevent multi-line refactoring mismatches.
 //!
 //! ## Format Support & Limitations
 //!
@@ -169,9 +173,10 @@
 //!
 //! ### Granular Application
 //!
-//! - [`apply_hunk_to_lines()`]: Applies a single hunk to a mutable vector of lines in-place.
+//! - [`apply_hunk_to_lines()`]: Applies a single hunk to a mutable vector of lines in-place, with automatic candidate backtracking.
 //! - [`find_hunk_location()`]: Finds the location to apply a hunk to a given text content without modifying it.
 //! - [`find_hunk_location_in_lines()`]: Finds the location to apply a hunk to a slice of lines without modifying it.
+//! - [`DefaultHunkFinder`]: The default, built-in search strategy for locating hunks and candidate match locations.
 //!
 //! ### Core Data Structures
 //!
@@ -1441,7 +1446,7 @@ impl ApplyOptions {
     }
 }
 
-/// Creates a new builder for [`ApplyOptions`].
+/// A builder for constructing an [`ApplyOptions`] configuration.
 ///
 /// This provides a classic builder pattern for constructing an [`ApplyOptions`] struct,
 /// which can be useful when the configuration is built conditionally or comes from
@@ -2486,6 +2491,33 @@ impl Hunk {
 
     /// Returns the minimum span (in lines of `match_block`) between the first and
     /// last edit site (addition or removal) in this hunk.
+    ///
+    /// This calculates the distance across the hunk's match block between the earliest
+    /// modification (a removed line or the anchor preceding an added line) and the latest
+    /// modification. Target file windows shorter than this span cannot possibly contain
+    /// all edits in the hunk and are pruned during candidate search.
+    ///
+    /// # Returns
+    ///
+    /// The span length in match block lines, or `0` if the hunk contains no changes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use mpatch::Hunk;
+    /// let hunk = Hunk {
+    ///     lines: vec![
+    ///         " ctx0".to_string(),
+    ///         "-del0".to_string(),
+    ///         " ctx1".to_string(),
+    ///         "+add1".to_string(),
+    ///         " ctx2".to_string(),
+    ///     ],
+    ///     old_start_line: Some(1),
+    ///     new_start_line: Some(1),
+    /// };
+    /// assert_eq!(hunk.required_match_span(), 2);
+    /// ```
     pub fn required_match_span(&self) -> usize {
         let match_block = self.get_match_block();
         if match_block.is_empty() {
@@ -5483,6 +5515,11 @@ fn is_low_entropy_line(line: &str) -> bool {
 /// users to apply changes hunk-by-hunk. It modifies the `target_lines` vector
 /// directly based on the changes defined in the `hunk`.
 ///
+/// If an initial candidate match location fails during reconstruction (for example, if
+/// added lines cannot be cleanly anchored without context corruption), the function
+/// automatically backtracks to evaluate alternative candidate locations before reporting
+/// failure.
+///
 /// # Arguments
 ///
 /// * `hunk` - The [`Hunk`] to apply.
@@ -6163,7 +6200,10 @@ pub trait HunkFinder {
 /// 2.  Exact match ignoring trailing whitespace.
 /// 3.  Flexible fuzzy match using a similarity algorithm.
 ///
-/// It uses line number hints from the patch to resolve ambiguities.
+/// It uses line number hints from the patch to resolve ambiguities and supports
+/// candidate location enumeration via [`find_candidate_locations`](DefaultHunkFinder::find_candidate_locations)
+/// for backtracking during patch application.
+///
 /// While you can use this struct directly, it's typically used internally by
 /// functions like [`find_hunk_location_in_lines()`].
 ///
@@ -6229,6 +6269,51 @@ impl<'a> DefaultHunkFinder<'a> {
         Self { options }
     }
 
+    /// Finds all candidate locations for applying a hunk in the target lines.
+    ///
+    /// This method evaluates potential match locations using the hierarchical search
+    /// strategy (exact matching, whitespace-insensitive matching, and flexible-window
+    /// fuzzy matching). The returned candidate locations are sorted by score and
+    /// preference. Candidates whose match window length is smaller than the hunk's
+    /// [`required_match_span()`](Hunk::required_match_span) are pruned to prevent attempting
+    /// windows too short to accommodate all edits.
+    ///
+    /// This is used internally by [`apply_hunk_to_lines()`] to backtrack across candidate
+    /// locations if an initial match candidate fails during hunk reconstruction (for example,
+    /// when an addition cannot be cleanly anchored without corrupting surrounding context).
+    ///
+    /// # Arguments
+    ///
+    /// * `hunk` - The [`Hunk`] to locate.
+    /// * `target_lines` - A slice of strings representing the content to search within.
+    ///
+    /// # Returns
+    ///
+    /// A vector of `(HunkLocation, MatchType)` pairs on success, ordered from highest to lowest preference.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(`[`HunkApplyError`]`)` if no suitable candidate locations could be found, or
+    /// if all potential candidates fail the required minimum match span.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use mpatch::{parse_single_patch, DefaultHunkFinder, ApplyOptions, HunkLocation, MatchType};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let diff = "```diff\n--- a/file.txt\n+++ b/file.txt\n@@ -1,2 +1,2 @@\n line 1\n-line 2\n+line two\n```";
+    /// let hunk = parse_single_patch(diff)?.hunks.remove(0);
+    /// let target_lines = vec!["line 1", "line 2"];
+    /// let options = ApplyOptions::new();
+    /// let finder = DefaultHunkFinder::new(&options);
+    ///
+    /// let candidates = finder.find_candidate_locations(&hunk, &target_lines)?;
+    /// assert_eq!(candidates.len(), 1);
+    /// assert_eq!(candidates[0].0, HunkLocation { start_index: 0, length: 2 });
+    /// assert!(matches!(candidates[0].1, MatchType::Exact));
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn find_candidate_locations<T: AsRef<str> + Sync>(
         &self,
         hunk: &Hunk,
