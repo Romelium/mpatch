@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Patch Application:** Fixed a bug where hunks with low-entropy match blocks (such as a single closing brace `}`) were incorrectly tie-broken using line-number hints across multiple ambiguous locations, which could overwrite unrelated block delimiters. Ambiguous low-entropy contexts are now cleanly rejected.
+- **Patch Application:** Fixed a bug in fuzzy reconstruction where additions attached to unchanged context lines that were missing or unaligned in the target file window (`DiffOp::Delete` and `DiffOp::Replace`) were blindly injected into preceding code. The applier now aborts with `ContextNotFound` to prevent syntax corruption.
+
 ## [1.6.4] - 2026-06-02
 
 ## [1.6.3] - 2026-06-02

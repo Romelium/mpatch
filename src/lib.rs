@@ -5390,6 +5390,18 @@ fn get_indent(line: &str) -> &str {
     &line[..line.len() - line.trim_start().len()]
 }
 
+/// Checks whether a line is trivial / low-entropy syntax (e.g. closing braces, blank lines).
+fn is_low_entropy_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.is_empty()
+        || trimmed == "}"
+        || trimmed == "};"
+        || trimmed == "]"
+        || trimmed == "];"
+        || trimmed == ")"
+        || trimmed == ");"
+        || trimmed == "{"
+}
 /// Applies a single hunk to a mutable vector of lines in-place.
 ///
 /// This function provides granular control over the patching process, allowing library
@@ -5692,13 +5704,32 @@ pub fn apply_hunk_to_lines(
                                         current_hunk_indent,
                                         current_target_indent,
                                     ));
-                                }
-                                for add in additions {
-                                    final_lines.push(adjust_indentation(
-                                        add,
-                                        current_hunk_indent,
-                                        current_target_indent,
-                                    ));
+                                    for add in additions {
+                                        final_lines.push(adjust_indentation(
+                                            add,
+                                            current_hunk_indent,
+                                            current_target_indent,
+                                        ));
+                                    }
+                                } else if !*is_removal && !additions.is_empty() {
+                                    // Context line from hunk is missing in target, but had additions attached.
+                                    // Splicing additions whose anchor context does not exist causes syntax corruption.
+                                    warn!(
+                                        "    Fuzzy match rejected: Context line {:?} is missing from target, cannot anchor {} addition(s).",
+                                        match_block_content[old_idx],
+                                        additions.len()
+                                    );
+                                    return HunkApplyStatus::Failed(
+                                        HunkApplyError::ContextNotFound,
+                                    );
+                                } else if *is_removal {
+                                    for add in additions {
+                                        final_lines.push(adjust_indentation(
+                                            add,
+                                            current_hunk_indent,
+                                            current_target_indent,
+                                        ));
+                                    }
                                 }
                             }
                         }
@@ -5750,6 +5781,27 @@ pub fn apply_hunk_to_lines(
                                     let new_idx = new_index + i;
                                     let (is_removal, additions) = &match_lines_meta[old_idx];
 
+                                    // If a context line has additions attached, ensure it actually matches
+                                    // the target line rather than being an entirely different code block.
+                                    if !*is_removal && !additions.is_empty() {
+                                        let sim = similar::TextDiff::from_words(
+                                            match_block_trimmed[old_idx],
+                                            file_block_trimmed[new_idx],
+                                        )
+                                        .ratio();
+                                        if sim < 0.4 {
+                                            warn!(
+                                                "    Fuzzy match rejected: Context line {:?} differs completely from target line {:?}, cannot anchor {} addition(s).",
+                                                match_block_content[old_idx],
+                                                file_matched_lines[new_idx],
+                                                additions.len()
+                                            );
+                                            return HunkApplyStatus::Failed(
+                                                HunkApplyError::ContextNotFound,
+                                            );
+                                        }
+                                    }
+
                                     let h_line = match_block_content[old_idx];
                                     let t_line = &file_matched_lines[new_idx];
                                     let h_ind = get_indent(h_line);
@@ -5792,6 +5844,22 @@ pub fn apply_hunk_to_lines(
                                 if has_context {
                                     for i in 0..*new_len {
                                         final_lines.push(file_matched_lines[new_index + i].clone());
+                                    }
+                                }
+
+                                // If any context line in an unaligned replacement has additions attached,
+                                // it cannot be safely anchored.
+                                for i in 0..*old_len {
+                                    let (is_removal, additions) = &match_lines_meta[old_index + i];
+                                    if !*is_removal && !additions.is_empty() {
+                                        warn!(
+                                            "    Fuzzy match rejected: Context line {:?} was unaligned in replacement block, cannot anchor {} addition(s).",
+                                            match_block_content[old_index + i],
+                                            additions.len()
+                                        );
+                                        return HunkApplyStatus::Failed(
+                                            HunkApplyError::ContextNotFound,
+                                        );
                                     }
                                 }
 
@@ -6125,6 +6193,8 @@ impl<'a> DefaultHunkFinder<'a> {
         target_lines: &[T],
         old_start_line: Option<usize>,
     ) -> Result<(HunkLocation, MatchType), HunkApplyError> {
+        let match_has_entropy = match_block.iter().any(|l| !is_low_entropy_line(l));
+
         trace!(
             "  find_hunk_location_internal called for a hunk with {} lines to match against {} target lines.",
             match_block.len(),
@@ -6164,9 +6234,14 @@ impl<'a> DefaultHunkFinder<'a> {
                             .eq(match_block.iter().copied())
                     })
                     .map(|(i, _)| i);
-                Self::tie_break_with_line_number(iter, old_start_line, "exact")
+                Self::tie_break_with_line_number(iter, old_start_line, "exact", match_has_entropy)
             } else {
-                Self::tie_break_with_line_number(std::iter::empty(), old_start_line, "exact")
+                Self::tie_break_with_line_number(
+                    std::iter::empty(),
+                    old_start_line,
+                    "exact",
+                    match_has_entropy,
+                )
             };
 
             match result {
@@ -6214,12 +6289,14 @@ impl<'a> DefaultHunkFinder<'a> {
                     iter,
                     old_start_line,
                     "exact (ignoring whitespace)",
+                    match_has_entropy,
                 )
             } else {
                 Self::tie_break_with_line_number(
                     std::iter::empty(),
                     old_start_line,
                     "exact (ignoring whitespace)",
+                    match_has_entropy,
                 )
             };
 
@@ -6570,6 +6647,11 @@ impl<'a> DefaultHunkFinder<'a> {
                 }
                 // AMBIGUOUS FUZZY MATCH - TRY TO TIE-BREAK
                 if let Some(line) = old_start_line {
+                    if !match_has_entropy {
+                        trace!("    Ambiguous fuzzy match: Match block has low entropy, refusing to tie-break by line number.");
+                        return Err(HunkApplyError::AmbiguousFuzzyMatch(potential_matches));
+                    }
+
                     trace!(
                             "    Ambiguous fuzzy match found at {:?}. Attempting to tie-break using line number hint: {}",
                             potential_matches,
@@ -6699,6 +6781,7 @@ impl<'a> DefaultHunkFinder<'a> {
         mut matches: impl Iterator<Item = usize>,
         start_line: Option<usize>,
         match_type: &str,
+        has_sufficient_entropy: bool,
     ) -> Result<Option<usize>, Vec<usize>> {
         // --- Step 1: Check for 0 or 1 matches without allocation ---
         let first_match = match matches.next() {
@@ -6721,6 +6804,15 @@ impl<'a> DefaultHunkFinder<'a> {
                 match_type,
                 all_matches
             );
+
+            if !has_sufficient_entropy {
+                trace!(
+                    "      Ambiguous {} match: Refusing to tie-break {} matches because match block has low entropy.",
+                    match_type,
+                    all_matches.len()
+                );
+                return Err(all_matches);
+            }
 
             // More than 1 match, try to tie-break using the line number hint.
             if let Some(line) = start_line {

@@ -6790,3 +6790,187 @@ fn test_smart_indentation_outdented_added_line_fallback() {
     "#};
     assert_eq!(content, expected);
 }
+
+mod entropy_and_orphan_guards {
+    use indoc::indoc;
+    use mpatch::{
+        apply_patch_to_file, parse_auto, parse_diffs, try_apply_patch_to_content, ApplyOptions,
+        HunkApplyError, HunkApplyStatus,
+    };
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_rejects_ambiguous_low_entropy_closing_brace() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("lib.rs");
+
+        let original_content = indoc! {r#"
+            pub fn first() {
+                println!("one");
+            }
+
+            pub fn second() {
+                println!("two");
+            }
+        "#};
+        fs::write(&file_path, original_content).unwrap();
+
+        // Malformed patch anchoring solely on a lone closing brace
+        let diff = indoc! {r#"
+            --- a/lib.rs
+            +++ b/lib.rs
+            @@ -3,1 +3,3 @@
+            +pub fn injected() {}
+             }
+        "#};
+
+        let patches = parse_auto(diff).unwrap();
+        let options = ApplyOptions::exact();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(
+            !result.report.all_applied_cleanly(),
+            "Should refuse to tie-break among multiple closing braces with low-entropy context"
+        );
+        assert!(matches!(
+            result.report.hunk_results[0],
+            HunkApplyStatus::Failed(HunkApplyError::AmbiguousExactMatch(_))
+        ));
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, original_content);
+    }
+
+    #[test]
+    fn test_accepts_low_entropy_when_unambiguous() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("single_brace.rs");
+
+        let original_content = "fn only() {\n    return;\n}\n";
+        fs::write(&file_path, original_content).unwrap();
+
+        let diff = indoc! {r#"
+            --- a/single_brace.rs
+            +++ b/single_brace.rs
+            @@ -2,1 +2,2 @@
+            +    println!("added");
+             }
+        "#};
+
+        let patches = parse_auto(diff).unwrap();
+        let options = ApplyOptions::exact();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(result.report.all_applied_cleanly());
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(
+            content,
+            "fn only() {\n    return;\n    println!(\"added\");\n}\n"
+        );
+    }
+
+    #[test]
+    fn test_orphaned_addition_rejected_during_fuzzy_match() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("main.rs");
+
+        // Setup func_one with enough lines so that func_one alone matches >= 70% of the hunk,
+        // causing the fuzzy window finder to select it while leaving func_two outside the window.
+        let mut original_content = String::from("fn func_one() {\n");
+        for i in 0..10 {
+            original_content.push_str(&format!("    let step_{} = {};\n", i, i));
+        }
+        original_content.push_str("}\n\n");
+        for i in 0..20 {
+            original_content.push_str(&format!("/// Intervening doc comment {}\n", i));
+        }
+        original_content.push_str("fn func_two(arg: u32) {\n    step_2();\n}\n");
+        fs::write(&file_path, &original_content).unwrap();
+
+        let diff = indoc! {r#"
+            ```diff
+            --- a/main.rs
+            +++ b/main.rs
+            @@ -1,13 +1,15 @@
+             fn func_one() {
+                 let step_0 = 0;
+                 let step_1 = 1;
+            -    let step_2 = 2;
+            +    let step_2_modified = 2;
+                 let step_3 = 3;
+                 let step_4 = 4;
+             }
+
+             fn func_two(arg: u32) {
+            +    injected_inside_func_two();
+                 step_2();
+             }
+            ```
+        "#};
+
+        let patches = parse_diffs(diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        // The hunk must be rejected with ContextNotFound by the orphan guard during reconstruction
+        // instead of dumping `injected_inside_func_two()` after func_one!
+        assert!(!result.report.all_applied_cleanly());
+        assert!(matches!(
+            result.report.hunk_results[0],
+            HunkApplyStatus::Failed(HunkApplyError::ContextNotFound)
+        ));
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(
+            content, original_content,
+            "File must remain untouched on failure"
+        );
+    }
+
+    #[test]
+    fn test_stale_context_without_additions_still_skipped() {
+        let original = "line A\nline C\n";
+        let diff = indoc! {r#"
+            --- a/test.txt
+            +++ b/test.txt
+            @@ -1,4 +1,4 @@
+             line A
+             line B
+            -line C
+            +line modified
+        "#};
+
+        let patch = parse_auto(diff).unwrap().remove(0);
+        let options = ApplyOptions::new();
+        let result = try_apply_patch_to_content(&patch, Some(original), &options).unwrap();
+
+        assert_eq!(result.new_content, "line A\nline modified\n");
+    }
+
+    #[test]
+    fn test_eof_truncation_restoration_with_additions() {
+        let original = "fn main() {\n    run();\n";
+        let diff = indoc! {r#"
+            --- a/test.rs
+            +++ b/test.rs
+            @@ -1,3 +1,4 @@
+             fn main() {
+                 run();
+             }
+            +// EOF comment
+        "#};
+
+        let patch = parse_auto(diff).unwrap().remove(0);
+        let options = ApplyOptions::new();
+        let result = try_apply_patch_to_content(&patch, Some(original), &options).unwrap();
+
+        assert_eq!(
+            result.new_content,
+            "fn main() {\n    run();\n}\n// EOF comment\n"
+        );
+    }
+}
