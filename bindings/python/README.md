@@ -103,7 +103,7 @@ Patches are composed of `Hunk` objects. You can slice, index, and inspect the ex
 patch = mpatch.parse_auto(diff_string)[0]
 
 for i, hunk in enumerate(patch):
-    print(f"Hunk {i+1} changes:")
+    print(f"Hunk {i + 1} changes:")
     print(f"  Removed: {hunk.removed_lines}")
     print(f"  Added:   {hunk.added_lines}")
 ```
@@ -161,8 +161,8 @@ Want to see what *would* happen without modifying your files? Use `dry_run=True`
 ```python
 result = patch.apply_to_file(
     "./my_project",
-    fuzz_factor=0.5, # Lower is more lenient, higher is stricter (0.0 is exact match only)
-    dry_run=True     # Generate a diff without writing to disk
+    fuzz_factor=0.5,  # Lower is more lenient, higher is stricter (0.0 is exact match only)
+    dry_run=True,  # Generate a diff without writing to disk
 )
 
 if result.diff:
