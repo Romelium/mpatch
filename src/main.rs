@@ -684,7 +684,11 @@ fn format_normalized_patch(patch: &Patch) -> String {
 
     for hunk in &patch.hunks {
         // Normalize leading and trailing whitespace to ignore smart-indentation adjustments
-        all_removed.extend(hunk.removed_lines().into_iter().map(|s| s.trim().to_string()));
+        all_removed.extend(
+            hunk.removed_lines()
+                .into_iter()
+                .map(|s| s.trim().to_string()),
+        );
         all_added.extend(hunk.added_lines().into_iter().map(|s| s.trim().to_string()));
     }
 

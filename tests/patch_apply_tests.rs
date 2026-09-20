@@ -7122,6 +7122,8 @@ mod entropy_and_orphan_guards {
         assert!(content.contains("anonymize: bool,"));
         assert!(content.contains("copy_to_clipboard(clipboard, &buffer, anonymize)"));
         assert!(content.contains("anonymized = cv_clip::anonymize_text(content);"));
-        assert!(content.contains("This function performs two main tasks before setting the clipboard contents:"));
+        assert!(content.contains(
+            "This function performs two main tasks before setting the clipboard contents:"
+        ));
     }
 }
