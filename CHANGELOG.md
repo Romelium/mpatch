@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **Patch Application:** Fixed a bug where hunks with low-entropy match blocks (such as a single closing brace `}`) were incorrectly tie-broken using line-number hints across multiple ambiguous locations, which could overwrite unrelated block delimiters. Ambiguous low-entropy contexts are now cleanly rejected.
 - **Patch Application:** Fixed a bug in fuzzy reconstruction where additions attached to unchanged context lines that were missing or unaligned in the target file window (`DiffOp::Delete` and `DiffOp::Replace`) were blindly injected into preceding code. The applier now aborts with `ContextNotFound` to prevent syntax corruption.
+- **Fuzzy Matching:** Expanded fuzzy search window expansion bounds and incorporated line-based similarity ratios (`ratio_lines` and `ratio_loose_lines`) to reliably match multi-anchor hunks spanning across newly inserted documentation comments or code blocks without word-dilution score penalties.
+- **CLI:** Trimmed whitespace during patch normalization in `format_normalized_patch` to prevent smart-indentation adjustments from triggering false-positive failures in the debug report discrepancy check (`-vvvv`).
 
 ## [1.6.4] - 2026-06-02
 

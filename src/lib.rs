@@ -6352,10 +6352,13 @@ impl<'a> DefaultHunkFinder<'a> {
 
             let len = match_block.len();
             // Define how far to search for different-sized windows.
-            // Proportional to hunk size, but with reasonable bounds.
-            let fuzz_distance = (len / 4).clamp(3, 8);
-            let min_len = len.saturating_sub(fuzz_distance).max(1);
-            let max_len = len.saturating_add(fuzz_distance);
+            // Expand generously based on hunk size so local doc comments or inserted
+            // statements don't push the target block outside the search window.
+            let max_expansion = ((len / 2) + 6).clamp(8, 36);
+            let min_reduction = (len / 4).clamp(2, 8);
+            let min_len = len.saturating_sub(min_reduction).max(1);
+            let max_len = len.saturating_add(max_expansion);
+            let fuzz_distance = max_expansion;
             trace!(
                 "      Searching with window sizes from {} to {} (hunk size: {}, fuzz distance: {})",
                 min_len,
@@ -6447,7 +6450,14 @@ impl<'a> DefaultHunkFinder<'a> {
                                     // The ratio from the `similar` crate already implicitly includes a
                                     // penalty for size differences. We use the raw ratio as the score.
                                     // We take the MAX of strict and loose to support both exact indentation and nested patches.
-                                    let ratio = ratio_strict.max(ratio_loose);
+                                    //
+                                    // We also factor in pure `ratio_lines` and `ratio_loose_lines`. This ensures that multi-anchor
+                                    // hunks spanning across newly inserted comments or code blocks in the target file are not
+                                    // rejected purely because the added word volume dilutes `ratio_words`.
+                                    let ratio = ratio_strict
+                                        .max(ratio_loose)
+                                        .max(ratio_lines as f64)
+                                        .max(ratio_loose_lines as f64);
                                     let score = ratio;
 
                                     (
@@ -6535,7 +6545,14 @@ impl<'a> DefaultHunkFinder<'a> {
                                 // The ratio from the `similar` crate already implicitly includes a
                                 // penalty for size differences. We use the raw ratio as the score.
                                 // We take the MAX of strict and loose to support both exact indentation and nested patches.
-                                let ratio = ratio_strict.max(ratio_loose);
+                                //
+                                // We also factor in pure `ratio_lines` and `ratio_loose_lines`. This ensures that multi-anchor
+                                // hunks spanning across newly inserted comments or code blocks in the target file are not
+                                // rejected purely because the added word volume dilutes `ratio_words`.
+                                let ratio = ratio_strict
+                                    .max(ratio_loose)
+                                    .max(ratio_lines as f64)
+                                    .max(ratio_loose_lines as f64);
                                 let score = ratio;
 
                                 (

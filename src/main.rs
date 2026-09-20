@@ -683,8 +683,9 @@ fn format_normalized_patch(patch: &Patch) -> String {
     let mut all_added = Vec::new();
 
     for hunk in &patch.hunks {
-        all_removed.extend(hunk.removed_lines().into_iter().map(|s| s.to_string()));
-        all_added.extend(hunk.added_lines().into_iter().map(|s| s.to_string()));
+        // Normalize leading and trailing whitespace to ignore smart-indentation adjustments
+        all_removed.extend(hunk.removed_lines().into_iter().map(|s| s.trim().to_string()));
+        all_added.extend(hunk.added_lines().into_iter().map(|s| s.trim().to_string()));
     }
 
     // Remove identical lines (self-replacements) using multiset subtraction

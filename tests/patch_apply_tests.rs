@@ -6973,4 +6973,155 @@ mod entropy_and_orphan_guards {
             "fn main() {\n    run();\n}\n// EOF comment\n"
         );
     }
+
+    #[test]
+    fn test_fuzzy_match_multi_anchor_hunk_with_intervening_doc_comments() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("service.rs");
+
+        let original_content = indoc! {r#"
+            fn start_service() {
+                init();
+            }
+
+            /// Detailed documentation for stopping the service.
+            /// 1. Flushes internal buffers.
+            /// 2. Closes all open network sockets.
+            /// 3. Signals background worker threads to exit.
+            /// 4. Waits for termination confirmation.
+            /// 5. Logs final shutdown status.
+            fn stop_service(timeout: u64) {
+                teardown();
+            }
+        "#};
+        fs::write(&file_path, original_content).unwrap();
+
+        let diff = [
+            "--- a/service.rs",
+            "+++ b/service.rs",
+            "@@ -1,9 +1,11 @@",
+            " fn start_service() {",
+            "+    configure_tls();",
+            "     init();",
+            " }",
+            "",
+            "-fn stop_service(timeout: u64) {",
+            "+fn stop_service(timeout: u64, force: bool) {",
+            "     teardown();",
+            " }",
+        ]
+        .join("\n");
+
+        let patches = parse_auto(&diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(
+            result.report.all_applied_cleanly(),
+            "Multi-anchor hunk should apply cleanly across intervening doc comments"
+        );
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("configure_tls();"));
+        assert!(content.contains("fn stop_service(timeout: u64, force: bool)"));
+        assert!(content.contains("/// Detailed documentation for stopping the service."));
+        assert!(content.contains("/// 5. Logs final shutdown status."));
+    }
+
+    #[test]
+    fn test_fuzzy_match_cv_clip_hunk3_regression() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("main.rs");
+
+        let original_content = indoc! {r#"
+            /// # Arguments
+            /// * `input`: The source to read from.
+            /// * `clipboard`: A mutable reference to a clipboard implementation.
+            fn run_pipe_mode<R: Read, C: Clipboard>(mut input: R, clipboard: &mut C) -> Result<(), AppError> {
+                let mut buffer = String::new();
+                input
+                    .read_to_string(&mut buffer)
+                    .map_err(|e| AppError::Io(e.to_string()))?;
+                copy_to_clipboard(clipboard, &buffer)
+            }
+
+            /// Copies the given content to the clipboard after minor processing.
+            ///
+            /// This function performs two main tasks before setting the clipboard contents:
+            /// 1. It strips a single trailing newline, which is common in command output.
+            /// 2. It checks if the resulting content is empty and avoids modifying the clipboard
+            ///    if it is, printing a warning instead.
+            ///
+            /// # Arguments
+            /// * `clipboard`: A mutable reference to a clipboard implementation.
+            /// * `content`: The string content to copy.
+            fn copy_to_clipboard<C: Clipboard>(
+                clipboard: &mut C,
+                content: &str,
+            ) -> Result<(), AppError> {
+                let content_to_copy = content.strip_suffix('\n').unwrap_or(content);
+
+                if content_to_copy.is_empty() {
+                    return Ok(());
+                }
+            }
+        "#};
+        fs::write(&file_path, original_content).unwrap();
+
+        let diff = [
+            "--- a/main.rs",
+            "+++ b/main.rs",
+            "@@ -1,21 +1,33 @@",
+            " /// # Arguments",
+            " /// * `input`: The source to read from.",
+            "+/// * `anonymize`: Whether to replace the user's home directory path with `~`.",
+            " /// * `clipboard`: A mutable reference to a clipboard implementation.",
+            "-fn run_pipe_mode<R: Read, C: Clipboard>(mut input: R, clipboard: &mut C) -> Result<(), AppError> {",
+            "+fn run_pipe_mode<R: Read, C: Clipboard>(",
+            "+    mut input: R,",
+            "+    anonymize: bool,",
+            "+    clipboard: &mut C,",
+            "+) -> Result<(), AppError> {",
+            "     let mut buffer = String::new();",
+            "     input",
+            "         .read_to_string(&mut buffer)",
+            "         .map_err(|e| AppError::Io(e.to_string()))?;",
+            "-    copy_to_clipboard(clipboard, &buffer)",
+            "+    copy_to_clipboard(clipboard, &buffer, anonymize)",
+            " }",
+            "",
+            "+/// Copies the given content to the clipboard after optional anonymization and trimming.",
+            " fn copy_to_clipboard<C: Clipboard>(",
+            "     clipboard: &mut C,",
+            "     content: &str,",
+            "+    anonymize: bool,",
+            " ) -> Result<(), AppError> {",
+            "+    let anonymized;",
+            "+    let content = if anonymize {",
+            "+        anonymized = cv_clip::anonymize_text(content);",
+            "+        &anonymized",
+            "+    } else {",
+            "+        content",
+            "+    };",
+            "     let content_to_copy = content.strip_suffix('\\n').unwrap_or(content);",
+            "",
+            "     if content_to_copy.is_empty() {",
+        ]
+        .join("\n");
+
+        let patches = parse_auto(&diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(
+            result.report.all_applied_cleanly(),
+            "Regression test failed: Hunk 3 should apply cleanly without ContextNotFound"
+        );
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("anonymize: bool,"));
+        assert!(content.contains("copy_to_clipboard(clipboard, &buffer, anonymize)"));
+        assert!(content.contains("anonymized = cv_clip::anonymize_text(content);"));
+        assert!(content.contains("This function performs two main tasks before setting the clipboard contents:"));
+    }
 }
