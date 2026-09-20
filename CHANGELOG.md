@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Patch Application:** Implemented candidate location backtracking in `apply_hunk_to_lines`. If the highest-scoring candidate window fails during reconstruction (e.g., due to the orphan addition guard), the applier now backtracks and attempts remaining candidate windows instead of failing immediately.
+- **Patch Application:** Added semantic statement matching across line breaks (`find_statement_match_in_block`) and `required_match_span` validation, allowing hunks with multi-line signatures or formatted statements to cleanly match single-line targets (and vice-versa) while pruning candidate windows too short to contain all edits.
 - **Patch Application:** Fixed a bug where hunks with low-entropy match blocks (such as a single closing brace `}`) were incorrectly tie-broken using line-number hints across multiple ambiguous locations, which could overwrite unrelated block delimiters. Ambiguous low-entropy contexts are now cleanly rejected.
 - **Patch Application:** Fixed a bug in fuzzy reconstruction where additions attached to unchanged context lines that were missing or unaligned in the target file window (`DiffOp::Delete` and `DiffOp::Replace`) were blindly injected into preceding code. The applier now aborts with `ContextNotFound` to prevent syntax corruption.
 - **Fuzzy Matching:** Expanded fuzzy search window expansion bounds and incorporated line-based similarity ratios (`ratio_lines` and `ratio_loose_lines`) to reliably match multi-anchor hunks spanning across newly inserted documentation comments or code blocks without word-dilution score penalties.

@@ -12,6 +12,7 @@ use tempfile::tempdir;
 
 #[test]
 fn test_parse_simple_diff() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {"
         Some text before.
         ```diff
@@ -45,6 +46,7 @@ fn test_parse_simple_diff() {
 
 #[test]
 fn test_parse_patch_block_header() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {"
         Some text before.
         ```patch
@@ -78,6 +80,7 @@ fn test_parse_patch_block_header() {
 
 #[test]
 fn test_parse_flexible_diff_block_headers() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let test_cases = vec![
         "```diff,rust",
         "```rust, diff",
@@ -102,6 +105,7 @@ fn test_parse_flexible_diff_block_headers() {
 
 #[test]
 fn test_parse_accepts_all_code_blocks() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let test_cases = vec![
         "```rust",
         "```",
@@ -131,6 +135,7 @@ fn test_parse_accepts_all_code_blocks() {
 
 #[test]
 fn test_parse_multiple_diff_blocks() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         First change:
         ```diff
@@ -167,6 +172,7 @@ fn test_parse_multiple_diff_blocks() {
 
 #[test]
 fn test_parse_multiple_files_in_one_block() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         ```diff
         --- a/file1.txt
@@ -195,6 +201,7 @@ fn test_parse_multiple_files_in_one_block() {
 
 #[test]
 fn test_parse_multiple_sections_for_same_file_in_one_block() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         ```diff
         --- a/same_file.txt
@@ -226,6 +233,7 @@ fn test_parse_multiple_sections_for_same_file_in_one_block() {
 
 #[test]
 fn test_parse_file_creation_with_dev_null() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         ```diff
         --- /dev/null
@@ -247,6 +255,7 @@ fn test_parse_file_creation_with_dev_null() {
 
 #[test]
 fn test_parse_file_creation_with_a_dev_null() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         ```diff
         --- a/dev/null
@@ -266,6 +275,7 @@ fn test_parse_file_creation_with_a_dev_null() {
 
 #[test]
 fn test_parse_diff_without_ab_prefix() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         ```diff
         --- path/to/file.txt
@@ -286,6 +296,7 @@ fn test_parse_diff_without_ab_prefix() {
 
 #[test]
 fn test_parse_file_creation_without_b_prefix() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         ```diff
         --- /dev/null
@@ -305,6 +316,7 @@ fn test_parse_file_creation_without_b_prefix() {
 
 #[test]
 fn test_parse_error_on_missing_file_header() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {"
         Some text on line 1.
         ```diff
@@ -320,6 +332,7 @@ fn test_parse_error_on_missing_file_header() {
 
 #[test]
 fn test_parse_patches_raw_diff() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let raw_diff = indoc! {r#"
         --- a/file1.txt
         +++ b/file1.txt
@@ -336,6 +349,7 @@ fn test_parse_patches_raw_diff() {
 
 #[test]
 fn test_parse_patches_multi_file_raw_diff() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let raw_diff = indoc! {r#"
         --- a/file1.txt
         +++ b/file1.txt
@@ -356,6 +370,7 @@ fn test_parse_patches_multi_file_raw_diff() {
 
 #[test]
 fn test_parse_ignores_irrelevant_code_blocks() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let content = indoc! {r#"
         Here is some rust code that is not a patch:
         ```rust
@@ -379,6 +394,7 @@ fn test_parse_ignores_irrelevant_code_blocks() {
 
 #[test]
 fn test_parse_finds_patch_in_unlabeled_block() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let content = indoc! {r#"
         Here is a patch in a generic block:
         ```
@@ -397,6 +413,7 @@ fn test_parse_finds_patch_in_unlabeled_block() {
 
 #[test]
 fn test_parse_finds_patch_in_misleading_language_block() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // Scenario: User mistakenly labeled the block as python, or it's a diff of python code
     // but they used the language tag 'python' instead of 'diff'.
     let content = indoc! {r#"
@@ -415,6 +432,7 @@ fn test_parse_finds_patch_in_misleading_language_block() {
 
 #[test]
 fn test_parse_mixed_content_robustness() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // A complex file with TOML, a Patch, and Bash commands.
     let content = indoc! {r#"
         Step 1: Update config
@@ -444,6 +462,7 @@ fn test_parse_mixed_content_robustness() {
 
 #[test]
 fn test_heuristic_skips_yaml_separators() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // YAML uses '---' which triggers the `starts_with("--- ")` check if followed by a space,
     // or just `---` (newline).
     // The parser should be robust enough to see `---` but no `+++` and return 0 patches.
@@ -461,6 +480,7 @@ fn test_heuristic_skips_yaml_separators() {
 
 #[test]
 fn test_conflict_markers_in_rust_block() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // AI often outputs conflict markers inside a language-specific block.
     let content = indoc! {r#"
         ```rust
@@ -481,6 +501,7 @@ fn test_conflict_markers_in_rust_block() {
 
 #[test]
 fn test_heuristic_trigger_but_invalid_diff_is_ignored() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // A block that triggers the "looks like patch" heuristic (has "--- ")
     // but isn't actually a valid diff (no "+++", no hunks).
     // It should return Ok(empty) rather than an error.
@@ -496,6 +517,7 @@ fn test_heuristic_trigger_but_invalid_diff_is_ignored() {
 
 #[test]
 fn test_block_with_only_hunk_no_header_is_skipped() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // If a block has `@@ ... @@` but no `---` or `diff --git` or `<<<<`,
     // the optimization heuristic `looks_like_patch` returns false.
     // This effectively skips blocks that are just fragments without file context,
@@ -513,6 +535,7 @@ fn test_block_with_only_hunk_no_header_is_skipped() {
 
 #[test]
 fn test_git_diff_header_triggers_parsing() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // Ensure `diff --git` triggers the parser even if `---` is further down.
     let content = indoc! {r#"
         ```
@@ -531,6 +554,7 @@ fn test_git_diff_header_triggers_parsing() {
 
 #[test]
 fn test_yaml_block_with_header_like_content_is_ignored() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // YAML often uses "---" separators.
     // If a line is just "---", the heuristic `starts_with("--- ")` (note space) is false.
     // But "--- title" matches.
@@ -549,6 +573,7 @@ fn test_yaml_block_with_header_like_content_is_ignored() {
 
 #[test]
 fn test_crlf_line_endings() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // Ensure the parser and heuristic handle Windows-style line endings.
     let content =
         "```diff\r\n--- a/file.txt\r\n+++ b/file.txt\r\n@@ -1 +1 @@\r\n-old\r\n+new\r\n```";
@@ -560,6 +585,7 @@ fn test_crlf_line_endings() {
 
 #[test]
 fn test_heuristic_skips_indented_unified_headers() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // Standard unified diffs require headers to be at the start of the line.
     // Indented headers inside a block are usually invalid or part of a quote/list.
     // The heuristic `starts_with("--- ")` enforces this strictness.
@@ -581,6 +607,7 @@ fn test_heuristic_skips_indented_unified_headers() {
 
 #[test]
 fn test_multiple_blocks_with_noise() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // A stress test with a mix of valid patches, false positives, and noise.
     let content = indoc! {r#"
         # Documentation
@@ -630,6 +657,7 @@ fn test_multiple_blocks_with_noise() {
 
 #[test]
 fn test_horizontal_rule_in_markdown_code_block() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // Markdown-in-markdown might contain `---` horizontal rules.
     // These should not trigger the parser unless they look exactly like `--- path`.
     let content = indoc! {r#"
@@ -645,6 +673,7 @@ fn test_horizontal_rule_in_markdown_code_block() {
 
 #[test]
 fn test_diff_git_header_only_is_ignored() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // If a block has `diff --git ...` but no hunks or unified headers following it,
     // it triggers the heuristic but the parser should return empty (no hunks found).
     let content = indoc! {r#"
@@ -660,6 +689,7 @@ fn test_diff_git_header_only_is_ignored() {
 
 #[test]
 fn test_parse_patches_error_on_missing_header() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let raw_diff = indoc! {r#"
         @@ -1 +1 @@
         -foo
@@ -673,18 +703,21 @@ fn test_parse_patches_error_on_missing_header() {
 
 #[test]
 fn test_parse_patches_empty_input() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let patches = parse_patches("").unwrap();
     assert!(patches.is_empty());
 }
 
 #[test]
 fn test_parse_patches_whitespace_input() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let patches = parse_patches("  \n\t\n  ").unwrap();
     assert!(patches.is_empty());
 }
 
 #[test]
 fn test_parse_patches_file_creation() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let raw_diff = indoc! {r#"
         --- /dev/null
         +++ b/new_file.txt
@@ -702,6 +735,7 @@ fn test_parse_patches_file_creation() {
 
 #[test]
 fn test_parse_patches_file_deletion() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let raw_diff = indoc! {r#"
         --- a/old_file.txt
         +++ b/old_file.txt
@@ -720,6 +754,7 @@ fn test_parse_patches_file_deletion() {
 
 #[test]
 fn test_parse_patches_no_newline() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let raw_diff = indoc! {r#"
         --- a/file.txt
         +++ b/file.txt
@@ -735,6 +770,7 @@ fn test_parse_patches_no_newline() {
 
 #[test]
 fn test_parse_patches_with_git_headers() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let raw_diff = indoc! {r#"
         diff --git a/src/main.rs b/src/main.rs
         index 1234567..abcdefg 100644
@@ -754,6 +790,7 @@ fn test_parse_patches_with_git_headers() {
 
 #[test]
 fn test_parse_patches_merges_sections_for_same_file() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let raw_diff = indoc! {r#"
         --- a/same_file.txt
         +++ b/same_file.txt
@@ -781,6 +818,7 @@ fn test_parse_patches_merges_sections_for_same_file() {
 
 #[test]
 fn test_parse_patches_from_lines() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let raw_diff_lines = vec![
         "--- a/src/main.rs",
         "+++ b/src/main.rs",
@@ -803,6 +841,7 @@ fn test_parse_patches_from_lines() {
 
 #[test]
 fn test_parse_patches_from_lines_error() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let raw_diff_lines = vec![
         "@@ -1,3 +1,3 @@",
         "-    println!(\"Hello, world!\");",
@@ -1146,6 +1185,7 @@ fn test_preserves_no_newline_when_patch_does_not_touch_eof() {
 
 #[test]
 fn test_patch_content_str_preserves_no_newline_on_partial_patch() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let original = "line 1\nline 2";
     let diff = indoc! {r#"
         ```diff
@@ -1570,6 +1610,7 @@ fn test_hunk_with_no_changes_is_skipped() {
 
 #[test]
 fn test_parse_empty_diff_block() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {"
         Some text.
         ```diff
@@ -1585,6 +1626,7 @@ fn test_parse_empty_diff_block() {
 
 #[test]
 fn test_parse_diff_block_with_header_only() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {"
         ```diff
         --- a/some_file.txt
@@ -1600,6 +1642,7 @@ fn test_parse_diff_block_with_header_only() {
 
 #[test]
 fn test_indented_diff_block_is_ignored() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = r#"
         This should not be parsed.
           ```diff
@@ -1616,6 +1659,7 @@ fn test_indented_diff_block_is_ignored() {
 
 #[test]
 fn test_find_hunk_location_in_lines() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let original_lines = vec!["line 1", "line two", "line 3"];
     let diff = indoc! {r#"
         ```diff
@@ -1654,6 +1698,7 @@ fn test_find_hunk_location_in_lines() {
 
 #[test]
 fn test_apply_patch_to_lines() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let original_lines = vec!["Hello, world!"];
     let diff_str = [
         "```diff",
@@ -1678,6 +1723,7 @@ fn test_apply_patch_to_lines() {
 
 #[test]
 fn test_apply_hunk_to_lines_in_place() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let mut original_lines = vec![
         "line 1".to_string(),
         "line two".to_string(),
@@ -1720,6 +1766,7 @@ fn test_apply_hunk_to_lines_in_place() {
 
 #[test]
 fn test_hunk_applier_iterator() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let original_content = "line 1\nline 2\nline 3\n\nline 5\nline 6\nline 7\n";
     let original_lines: Vec<_> = original_content.lines().collect();
     let diff = indoc! {r#"
@@ -1815,6 +1862,7 @@ fn test_fuzzy_match_below_threshold_fails() {
 
 #[test]
 fn test_find_hunk_location_exact_match() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let original_content = "line 1\nline two\nline 3\n";
     let diff = indoc! {r#"
         ```diff
@@ -1844,6 +1892,7 @@ fn test_find_hunk_location_exact_match() {
 
 #[test]
 fn test_find_hunk_location_fuzzy_match() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // The file has an extra line compared to the patch's context.
     let original_content = "context A\ninserted line\nline to change\ncontext C\n";
     let diff = indoc! {r#"
@@ -1875,6 +1924,7 @@ fn test_find_hunk_location_fuzzy_match() {
 
 #[test]
 fn test_find_hunk_location_not_found() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let original_content = "completely different content\n";
     let diff = indoc! {r#"
         ```diff
@@ -1901,6 +1951,7 @@ fn test_find_hunk_location_not_found() {
 
 #[test]
 fn test_find_hunk_location_ambiguous() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let original_content = "duplicate\n\nduplicate\n";
     let diff = indoc! {r#"
         ```diff
@@ -2081,6 +2132,7 @@ fn test_apply_hunk_to_file_end() {
 
 #[test]
 fn test_parse_diff_with_git_headers() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         ```diff
         diff --git a/src/main.rs b/src/main.rs
@@ -2855,6 +2907,7 @@ fn test_fuzzy_match_with_multiple_differences_preserves_context() {
 
 #[test]
 fn test_parse_hunk_header_line_number() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         ```diff
         --- a/file.txt
@@ -2971,6 +3024,7 @@ fn test_ambiguous_match_fails_with_equidistant_line_hint() {
 
 #[test]
 fn test_hunk_semantic_helpers() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let hunk = mpatch::Hunk {
         lines: vec![
             " context 1".to_string(),
@@ -2990,6 +3044,7 @@ fn test_hunk_semantic_helpers() {
 
 #[test]
 fn test_patch_is_creation() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let creation_diff = indoc! {r#"
         ```diff
         --- a/new_file.txt
@@ -3017,6 +3072,7 @@ fn test_patch_is_creation() {
 
 #[test]
 fn test_patch_is_deletion() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let deletion_diff = indoc! {r#"
         ```diff
         --- a/old_file.txt
@@ -3058,6 +3114,7 @@ fn test_patch_is_deletion() {
 
 #[test]
 fn test_apply_options_builder() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let options = ApplyOptions::builder()
         .dry_run(true)
         .fuzz_factor(0.99)
@@ -3072,6 +3129,7 @@ fn test_apply_options_builder() {
 
 #[test]
 fn test_apply_options_convenience_constructors() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // Test ApplyOptions::new()
     let new_options = ApplyOptions::new();
     assert!(!new_options.dry_run);
@@ -3085,6 +3143,7 @@ fn test_apply_options_convenience_constructors() {
 
 #[test]
 fn test_apply_options_fluent_methods() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let options = ApplyOptions::new().with_dry_run(true).with_fuzz_factor(0.9);
 
     assert!(options.dry_run);
@@ -3116,6 +3175,7 @@ fn test_apply_options_fluent_methods() {
 
 #[test]
 fn test_patch_from_texts() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let old_text = "hello\nworld\n";
     let new_text = "hello\nrust\n";
     let patch = Patch::from_texts("file.txt", old_text, new_text, 3).unwrap();
@@ -3130,6 +3190,7 @@ fn test_patch_from_texts() {
 
 #[test]
 fn test_patch_from_texts_no_change() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let old_text = "hello\nworld\n";
     let patch = Patch::from_texts("file.txt", old_text, old_text, 3).unwrap();
     assert!(patch.hunks.is_empty());
@@ -3137,6 +3198,7 @@ fn test_patch_from_texts_no_change() {
 
 #[test]
 fn test_patch_inversion() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let old_text = "line 1\nline 2\n";
     let new_text = "line 1\nline two\n";
     let patch = Patch::from_texts("file.txt", old_text, new_text, 3).unwrap();
@@ -3163,6 +3225,7 @@ fn test_patch_inversion() {
 
 #[test]
 fn test_apply_patches_to_dir() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let dir = tempdir().unwrap();
     let file1_path = dir.path().join("file1.txt");
     let file2_path = dir.path().join("file2.txt");
@@ -3205,6 +3268,7 @@ mod ensure_path_is_safe_tests {
 
     #[test]
     fn test_safe_path_succeeds() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let dir = tempdir().unwrap();
         let base_dir = dir.path();
         let safe_path = "src/main.rs";
@@ -3222,6 +3286,7 @@ mod ensure_path_is_safe_tests {
 
     #[test]
     fn test_safe_path_to_nonexistent_file_succeeds() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let dir = tempdir().unwrap();
         let base_dir = dir.path();
         let safe_path = "new/file.txt";
@@ -3235,6 +3300,7 @@ mod ensure_path_is_safe_tests {
 
     #[test]
     fn test_traversal_path_fails() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let dir = tempdir().unwrap();
         let base_dir = dir.path();
         let unsafe_path = "../evil.txt";
@@ -3245,6 +3311,7 @@ mod ensure_path_is_safe_tests {
 
     #[test]
     fn test_traversal_path_to_nonexistent_file_fails() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let dir = tempdir().unwrap();
         let base_dir = dir.path();
         let unsafe_path = "src/../../evil.txt";
@@ -3256,6 +3323,7 @@ mod ensure_path_is_safe_tests {
     #[test]
     #[cfg(unix)]
     fn test_absolute_path_fails() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let dir = tempdir().unwrap();
         let base_dir = dir.path();
         let unsafe_path = "/etc/passwd";
@@ -3266,6 +3334,7 @@ mod ensure_path_is_safe_tests {
 
     #[test]
     fn test_path_normalization_within_project_succeeds() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let dir = tempdir().unwrap();
         let base_dir = dir.path();
         fs::create_dir(base_dir.join("src")).unwrap();
@@ -3356,6 +3425,7 @@ mod hunk_finder_tests {
 
     #[test]
     fn test_default_finder_exact_match() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let options = ApplyOptions::exact();
         let finder = DefaultHunkFinder::new(&options);
 
@@ -3386,6 +3456,7 @@ mod hunk_finder_tests {
 
     #[test]
     fn test_default_finder_fuzzy_match() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let options = ApplyOptions::new();
         let finder = DefaultHunkFinder::new(&options);
 
@@ -3417,6 +3488,7 @@ mod hunk_finder_tests {
 
     #[test]
     fn test_default_finder_not_found() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let options = ApplyOptions {
             fuzz_factor: 0.9,
             ..Default::default()
@@ -3443,6 +3515,7 @@ mod hunk_finder_tests {
 
     #[test]
     fn test_default_finder_ambiguous_match() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let options = ApplyOptions::exact();
         let finder = DefaultHunkFinder::new(&options);
 
@@ -3471,6 +3544,7 @@ mod fuzzy_finder_diagnostics {
 
     #[test]
     fn test_apply_options_convenience_constructors() {
+        let _ = env_logger::builder().is_test(true).try_init();
         // Test ApplyOptions::new()
         let new_options = ApplyOptions::new();
         assert!(!new_options.dry_run);
@@ -3534,6 +3608,7 @@ mod fuzzy_finder_diagnostics {
 
     #[test]
     fn finder_single_insertion_middle() {
+        let _ = env_logger::builder().is_test(true).try_init();
         // This reproduces the core logic failure from the failing tests.
         // The finder should select the larger window (len 3) that includes the insertion.
         assert_fuzzy_location(
@@ -3549,6 +3624,7 @@ mod fuzzy_finder_diagnostics {
 
     #[test]
     fn finder_single_insertion_start() {
+        let _ = env_logger::builder().is_test(true).try_init();
         // This test previously expected a fuzzy match, but a perfect exact match exists.
         // The hierarchical search correctly finds the exact match at an offset and stops,
         // which is the desired behavior. The test is updated to reflect this.
@@ -3582,6 +3658,7 @@ mod fuzzy_finder_diagnostics {
 
     #[test]
     fn finder_single_deletion_middle() {
+        let _ = env_logger::builder().is_test(true).try_init();
         // The finder should select the smaller window (len 2) that reflects the deletion.
         assert_fuzzy_location(
             &["line A", "line B", "line C"],
@@ -3596,6 +3673,7 @@ mod fuzzy_finder_diagnostics {
 
     #[test]
     fn finder_multiple_insertions() {
+        let _ = env_logger::builder().is_test(true).try_init();
         // This reproduces the other failing test case.
         // The score was just below the threshold. This test will fail if the scoring is too punitive.
         assert_fuzzy_location(
@@ -3617,6 +3695,7 @@ mod fuzzy_finder_diagnostics {
 
     #[test]
     fn finder_mixed_change_modification() {
+        let _ = env_logger::builder().is_test(true).try_init();
         // Hunk expects "B", file has "X". Finder should still match the block.
         assert_fuzzy_location(
             &["A", "B", "C"],
@@ -3649,6 +3728,7 @@ mod parse_single_patch_tests {
 
     #[test]
     fn test_success_case() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let patch = parse_single_patch(SUCCESS_DIFF).unwrap();
         assert_eq!(patch.file_path.to_str(), Some("file.txt"));
         assert_eq!(patch.hunks.len(), 1);
@@ -3656,6 +3736,7 @@ mod parse_single_patch_tests {
 
     #[test]
     fn test_err_no_patches_found() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let diff = "Just some text, no diff block.";
         let result = parse_single_patch(diff);
         assert!(matches!(result, Err(SingleParseError::NoPatchesFound)));
@@ -3663,6 +3744,7 @@ mod parse_single_patch_tests {
 
     #[test]
     fn test_err_multiple_patches_in_one_block() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let diff = indoc! {r#"
             ```diff
             --- a/file1.txt
@@ -3686,6 +3768,7 @@ mod parse_single_patch_tests {
 
     #[test]
     fn test_err_multiple_patches_in_separate_blocks() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let diff = indoc! {r#"
             ```diff
             --- a/file1.txt
@@ -3712,6 +3795,7 @@ mod parse_single_patch_tests {
 
     #[test]
     fn test_err_parse_error_propagates() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let diff = indoc! {r#"
             ```diff
             @@ -1 +1 @@
@@ -3727,6 +3811,7 @@ mod parse_single_patch_tests {
 
 #[test]
 fn test_strict_apply_variants() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let original_content = "line 1\nline 2\nline 3\n\nline 5\nline 6\nline 7\n";
     let successful_diff = indoc! {r#"
         ```diff
@@ -3832,6 +3917,7 @@ mod patch_content_str_tests {
 
     #[test]
     fn test_success_case() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let options = ApplyOptions::new();
         let new_content = patch_content_str(SUCCESS_DIFF, Some(ORIGINAL), &options).unwrap();
         assert_eq!(new_content, EXPECTED);
@@ -3839,6 +3925,7 @@ mod patch_content_str_tests {
 
     #[test]
     fn test_file_creation_success() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let creation_diff = indoc! {r#"
             ```diff
             --- a/new.txt
@@ -3855,6 +3942,7 @@ mod patch_content_str_tests {
 
     #[test]
     fn test_err_no_patches_found() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let diff = "Just some text, no diff block.";
         let options = ApplyOptions::new();
         let result = patch_content_str(diff, Some(ORIGINAL), &options);
@@ -3863,6 +3951,7 @@ mod patch_content_str_tests {
 
     #[test]
     fn test_err_multiple_patches_found() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let diff = indoc! {r#"
             ```diff
             --- a/file1.txt
@@ -3884,6 +3973,7 @@ mod patch_content_str_tests {
 
     #[test]
     fn test_err_parse_error() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let diff = indoc! {r#"
             ```diff
             @@ -1 +1 @@
@@ -3899,6 +3989,7 @@ mod patch_content_str_tests {
 
     #[test]
     fn test_err_apply_error() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let diff = indoc! {r#"
             ```diff
             --- a/file.txt
@@ -3923,6 +4014,7 @@ mod patch_content_str_tests {
 
 #[test]
 fn test_patch_and_hunk_display_format() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // Test Case 1: Standard patch with multiple hunks
     let patch = Patch {
         file_path: "src/main.rs".into(),
@@ -4053,6 +4145,7 @@ fn test_patch_and_hunk_display_format() {
 
 #[test]
 fn test_apply_result_helpers() {
+    let _ = env_logger::builder().is_test(true).try_init();
     use mpatch::{ApplyResult, HunkApplyError, HunkApplyStatus, HunkLocation, MatchType};
 
     // Case 1: All successful
@@ -4119,6 +4212,7 @@ fn test_apply_result_helpers() {
 
 #[test]
 fn test_parse_conflict_markers() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         ```diff
         fn main() {
@@ -4146,6 +4240,7 @@ fn test_parse_conflict_markers() {
 
 #[test]
 fn test_conflict_markers_git_style_labels() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // Git often adds labels like <<<<<<< HEAD or >>>>>>> branch-name
     let diff = indoc! {r#"
         ```diff
@@ -4167,6 +4262,7 @@ fn test_conflict_markers_git_style_labels() {
 
 #[test]
 fn test_conflict_markers_multiple_blocks_in_one_file() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // Conflict markers are parsed as a single large hunk containing context and changes
     let diff = indoc! {r#"
         ```diff
@@ -4203,6 +4299,7 @@ fn test_conflict_markers_multiple_blocks_in_one_file() {
 
 #[test]
 fn test_conflict_markers_pure_addition() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         ```diff
         <<<<
@@ -4221,6 +4318,7 @@ fn test_conflict_markers_pure_addition() {
 
 #[test]
 fn test_conflict_markers_pure_deletion() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         ```diff
         <<<<
@@ -4239,6 +4337,7 @@ fn test_conflict_markers_pure_deletion() {
 
 #[test]
 fn test_conflict_markers_apply_end_to_end() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // Use the high-level patch_content_str to verify it actually works
     let original = indoc! {r#"
         fn main() {
@@ -4278,6 +4377,7 @@ fn test_conflict_markers_apply_end_to_end() {
 
 #[test]
 fn test_conflict_markers_ignore_normal_text() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // If a block doesn't contain markers, it shouldn't be parsed as a conflict patch.
     // Since it also doesn't look like a unified diff (no @@, ---, +++), standard parsing
     // returns Ok(empty).
@@ -4295,6 +4395,7 @@ fn test_conflict_markers_ignore_normal_text() {
 
 #[test]
 fn test_conflict_markers_indented() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         ```diff
         fn main() {
@@ -4316,6 +4417,7 @@ fn test_conflict_markers_indented() {
 
 #[test]
 fn test_conflict_markers_missing_separator() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // <<<< without ==== means pure deletion
     let diff = indoc! {r#"
         ```diff
@@ -4332,6 +4434,7 @@ fn test_conflict_markers_missing_separator() {
 
 #[test]
 fn test_conflict_markers_missing_start() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // ==== without <<<< is not considered a valid conflict marker
     // to prevent false positives with Markdown headers.
     let diff = indoc! {r#"
@@ -4347,6 +4450,7 @@ fn test_conflict_markers_missing_start() {
 
 #[test]
 fn test_conflict_markers_unclosed() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // <<<< without >>>> (EOF implies end)
     let diff = indoc! {r#"
         ```diff
@@ -4364,6 +4468,7 @@ fn test_conflict_markers_unclosed() {
 
 #[test]
 fn test_conflict_markers_false_positive_check() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // Ensure `<<` operator isn't treated as marker
     let diff = indoc! {r#"
         ```diff
@@ -4381,6 +4486,7 @@ fn test_conflict_markers_false_positive_check() {
 
 #[test]
 fn test_conflict_markers_with_context() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         ```diff
         context before
@@ -4402,6 +4508,7 @@ fn test_conflict_markers_with_context() {
 
 #[test]
 fn test_conflict_markers_malformed_sequence() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         ```diff
         ====
@@ -4423,6 +4530,7 @@ fn test_conflict_markers_malformed_sequence() {
 
 #[test]
 fn test_conflict_markers_in_comments_ignored() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         ```diff
         // <<<< this is a comment
@@ -4439,6 +4547,7 @@ fn test_conflict_markers_in_comments_ignored() {
 
 #[test]
 fn test_conflict_markers_with_trailing_text() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         ```diff
         <<<< start of conflict
@@ -4456,6 +4565,7 @@ fn test_conflict_markers_with_trailing_text() {
 
 #[test]
 fn test_conflict_markers_empty_block() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         ```diff
         <<<<
@@ -4470,6 +4580,7 @@ fn test_conflict_markers_empty_block() {
 
 #[test]
 fn test_malformed_diff_returns_error_not_ignored() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // This looks like a diff (has @@) but is missing headers.
     // It should NOT be ignored, and should NOT be parsed as conflict markers.
     // It should return the standard parsing error.
@@ -4490,6 +4601,7 @@ fn test_malformed_diff_returns_error_not_ignored() {
 
 #[test]
 fn test_detect_markdown_standard() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let content = indoc! {r#"
         Here is a change:
         ```diff
@@ -4505,6 +4617,7 @@ fn test_detect_markdown_standard() {
 
 #[test]
 fn test_parse_closing_fence_longer_than_opening() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // Markdown spec allows closing fence to be longer than opening fence
     let diff = indoc! {r#"
         ```diff
@@ -4522,6 +4635,7 @@ fn test_parse_closing_fence_longer_than_opening() {
 
 #[test]
 fn test_parse_shorter_closing_fence_ignored() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // A fence shorter than the opening fence should be treated as content
     let diff = indoc! {r#"
         ````diff
@@ -4543,6 +4657,7 @@ fn test_parse_shorter_closing_fence_ignored() {
 
 #[test]
 fn test_parse_multiple_blocks_mixed_fences() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         ```diff
         --- a/file1
@@ -4568,6 +4683,7 @@ fn test_parse_multiple_blocks_mixed_fences() {
 
 #[test]
 fn test_parse_conflict_markers_variable_fence() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         ````
         <<<<
@@ -4584,6 +4700,7 @@ fn test_parse_conflict_markers_variable_fence() {
 
 #[test]
 fn test_parse_fence_trailing_whitespace() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // Fences with trailing whitespace should still be recognized
     let diff = "```diff   \n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n```   ";
     let patches = parse_diffs(diff).unwrap();
@@ -4592,6 +4709,7 @@ fn test_parse_fence_trailing_whitespace() {
 
 #[test]
 fn test_nested_diff_block_is_ignored() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         ````
         Here is an example of a patch:
@@ -4610,6 +4728,7 @@ fn test_nested_diff_block_is_ignored() {
 
 #[test]
 fn test_parse_diff_with_nested_indented_code_block() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // This tests a regression where an indented code block inside a diff
     // was incorrectly interpreted as the closing fence of the diff block.
     let diff = indoc! {r#"
@@ -4632,6 +4751,7 @@ fn test_parse_diff_with_nested_indented_code_block() {
 
 #[test]
 fn test_parse_diff_with_fence_like_context_line() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         ```diff
         --- README.md
@@ -4653,6 +4773,7 @@ fn test_parse_diff_with_fence_like_context_line() {
 
 #[test]
 fn test_detect_markdown_patch_keyword() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let content = indoc! {r#"
         ```patch
         --- a/file
@@ -4664,6 +4785,7 @@ fn test_detect_markdown_patch_keyword() {
 
 #[test]
 fn test_detect_markdown_with_language_hint() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let content = indoc! {r#"
         ```rust, diff
         --- a/file
@@ -4675,6 +4797,7 @@ fn test_detect_markdown_with_language_hint() {
 
 #[test]
 fn test_detect_unified_git_header() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let content = indoc! {r#"
         diff --git a/src/main.rs b/src/main.rs
         index 88d9554..e0c99b6 100644
@@ -4687,6 +4810,7 @@ fn test_detect_unified_git_header() {
 
 #[test]
 fn test_detect_unified_standard_headers() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let content = indoc! {r#"
         --- a/file.txt
         +++ b/file.txt
@@ -4699,6 +4823,7 @@ fn test_detect_unified_standard_headers() {
 
 #[test]
 fn test_detect_unified_hunk_only() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // Sometimes users paste just the hunk without file headers
     let content = indoc! {r#"
         @@ -10,4 +10,4 @@
@@ -4712,6 +4837,7 @@ fn test_detect_unified_hunk_only() {
 
 #[test]
 fn test_detect_conflict_markers_standard() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let content = indoc! {r#"
         <<<<
         old code
@@ -4724,6 +4850,7 @@ fn test_detect_conflict_markers_standard() {
 
 #[test]
 fn test_detect_conflict_markers_git_style() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let content = indoc! {r#"
         <<<<<<< HEAD
         current change
@@ -4736,6 +4863,7 @@ fn test_detect_conflict_markers_git_style() {
 
 #[test]
 fn test_detect_conflict_markers_missing_middle() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // Pure deletion case in conflict markers
     let content = indoc! {r#"
         <<<<
@@ -4747,6 +4875,7 @@ fn test_detect_conflict_markers_missing_middle() {
 
 #[test]
 fn test_detect_conflict_markers_missing_end() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // EOF case
     let content = indoc! {r#"
         <<<<
@@ -4762,6 +4891,7 @@ fn test_detect_conflict_markers_missing_end() {
 
 #[test]
 fn test_detect_false_positive_bitwise_shift() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // Should not be detected as Conflict
     let content = "let x = 1 << 2;";
     assert_eq!(detect_patch(content), PatchFormat::Unknown);
@@ -4769,6 +4899,7 @@ fn test_detect_false_positive_bitwise_shift() {
 
 #[test]
 fn test_detect_false_positive_comparison() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // Should not be detected as Conflict
     let content = "if x <= y && a >= b {}";
     assert_eq!(detect_patch(content), PatchFormat::Unknown);
@@ -4776,6 +4907,7 @@ fn test_detect_false_positive_comparison() {
 
 #[test]
 fn test_detect_false_positive_list_item() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // Should not be detected as Unified
     let content = "--- this is just a list item";
     assert_eq!(detect_patch(content), PatchFormat::Unknown);
@@ -4783,6 +4915,7 @@ fn test_detect_false_positive_list_item() {
 
 #[test]
 fn test_detect_false_positive_hr() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // Horizontal rule in markdown
     let content = "---\n\n# Title";
     assert_eq!(detect_patch(content), PatchFormat::Unknown);
@@ -4790,6 +4923,7 @@ fn test_detect_false_positive_hr() {
 
 #[test]
 fn test_detect_false_positive_plus_list() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // Should not be detected as Unified
     let content = "+++ Just a list item";
     assert_eq!(detect_patch(content), PatchFormat::Unknown);
@@ -4797,6 +4931,7 @@ fn test_detect_false_positive_plus_list() {
 
 #[test]
 fn test_detect_unified_requires_plus_after_minus() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // "--- " must be followed by "+++ " on the next line to be detected as Unified via headers
     let content = "--- a/file\nnot a plus line";
     assert_eq!(detect_patch(content), PatchFormat::Unknown);
@@ -4806,6 +4941,7 @@ fn test_detect_unified_requires_plus_after_minus() {
 
 #[test]
 fn test_parse_auto_markdown() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let content = indoc! {r#"
         ```diff
         --- a/file.txt
@@ -4823,6 +4959,7 @@ fn test_parse_auto_markdown() {
 
 #[test]
 fn test_parse_auto_raw_diff() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let content = indoc! {r#"
         --- a/raw.txt
         +++ b/raw.txt
@@ -4838,6 +4975,7 @@ fn test_parse_auto_raw_diff() {
 
 #[test]
 fn test_parse_auto_conflict_markers() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let content = indoc! {r#"
         <<<<
         old
@@ -4855,6 +4993,7 @@ fn test_parse_auto_conflict_markers() {
 
 #[test]
 fn test_parse_auto_fallback_to_raw() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // If detect_patch returns Unknown, parse_auto should try parsing as raw diff.
     // This is useful for fragments that might be missed by strict detection but accepted by the parser.
     // For example, a hunk without headers might be detected as Unified by `detect_patch` now,
@@ -4877,6 +5016,7 @@ fn test_parse_auto_fallback_to_raw() {
 
 #[test]
 fn test_patch_content_str_accepts_raw_diff() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // This verifies that the high-level helper now accepts raw diffs due to the refactor
     let diff = indoc! {r#"
         --- a/file.txt
@@ -4894,6 +5034,7 @@ fn test_patch_content_str_accepts_raw_diff() {
 
 #[test]
 fn test_patch_content_str_accepts_markdown() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         ```diff
         --- a/file.txt
@@ -4912,6 +5053,7 @@ fn test_patch_content_str_accepts_markdown() {
 
 #[test]
 fn test_parse_auto_multiple_raw_patches() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let content = indoc! {r#"
         --- a/file1.txt
         +++ b/file1.txt
@@ -5023,6 +5165,7 @@ fn test_cli_simulation_markdown_input() {
 
 #[test]
 fn test_patch_from_texts_uses_raw_parser() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // This test verifies that Patch::from_texts works correctly with the optimized
     // raw parser implementation (parse_patches) instead of wrapping in markdown.
     let old_text = "line 1\nline 2\n";
@@ -5230,6 +5373,7 @@ mod fuzzy_logic_edge_cases {
 
     #[test]
     fn test_fuzzy_insertion_clobbers_context() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("main.rs");
 
@@ -5284,6 +5428,7 @@ mod fuzzy_logic_edge_cases {
 
     #[test]
     fn test_fuzzy_interleaved_local_edits() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("config.toml");
 
@@ -5327,6 +5472,7 @@ mod fuzzy_logic_edge_cases {
 
     #[test]
     fn test_fuzzy_indentation_context_preserved() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("style.css");
 
@@ -5363,6 +5509,7 @@ mod fuzzy_logic_edge_cases {
 
     #[test]
     fn test_fuzzy_extra_newlines_in_target() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("list.txt");
 
@@ -5395,6 +5542,7 @@ mod fuzzy_logic_edge_cases {
 
     #[test]
     fn test_fuzzy_restore_truncated_context_at_eof() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("truncated.rs");
 
@@ -5429,6 +5577,7 @@ mod fuzzy_logic_edge_cases {
 
     #[test]
     fn test_fuzzy_skip_stale_context_middle() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("stale.txt");
 
@@ -5463,6 +5612,7 @@ mod fuzzy_logic_edge_cases {
 
     #[test]
     fn test_conflict_markers_adjacent() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("patch_target");
 
@@ -5494,6 +5644,7 @@ mod fuzzy_logic_edge_cases {
 
     #[test]
     fn test_hunks_out_of_order() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("order.txt");
 
@@ -5525,6 +5676,7 @@ mod fuzzy_logic_edge_cases {
 
     #[test]
     fn test_large_offset_application() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("offset.txt");
 
@@ -5558,6 +5710,7 @@ mod fuzzy_logic_edge_cases {
 
     #[test]
     fn test_fuzzy_anchor_indentation_drift_with_coincidental_match() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("anchor_drift.rs");
 
@@ -5615,6 +5768,7 @@ mod fuzzy_logic_edge_cases {
 
     #[test]
     fn test_fuzzy_reconstruction_misalignment_bug() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("model.py");
 
@@ -5691,6 +5845,7 @@ mod extended_stress_tests {
 
     #[test]
     fn test_fuzzy_crlf_mismatch() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("crlf.txt");
         // File uses CRLF
@@ -5713,6 +5868,7 @@ mod extended_stress_tests {
 
     #[test]
     fn test_fuzzy_unicode_context() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("unicode.txt");
         // File has "Hello 🌍" (Europe-Africa)
@@ -5740,6 +5896,7 @@ mod extended_stress_tests {
 
     #[test]
     fn test_fuzzy_repeated_lines_ambiguity_resolution() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("repeat.txt");
 
@@ -5773,6 +5930,7 @@ mod extended_stress_tests {
 
     #[test]
     fn test_apply_patch_with_huge_offset() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("offset.txt");
 
@@ -5808,6 +5966,7 @@ mod extended_stress_tests {
 
     #[test]
     fn test_parse_auto_mixed_formats() {
+        let _ = env_logger::builder().is_test(true).try_init();
         // A file containing both a markdown block and raw conflict markers
         let content = indoc! {r#"
             Some text
@@ -5882,6 +6041,7 @@ fn test_smart_indentation_adjustment() {
 
 #[test]
 fn test_out_of_order_hunks_eof_newline_preservation() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let original = "line 1\nline 2\nline 3\n"; // Ends with newline
                                                // Patch removes newline at EOF in hunk 1, then modifies line 1 in hunk 2.
     let diff = indoc! {r#"
@@ -5995,6 +6155,7 @@ fn test_smart_indentation_ignores_empty_lines_with_trailing_whitespace() {
 
 #[test]
 fn test_fuzzy_match_ignores_indentation() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // This tests the "Robust Fuzzy Matching" feature.
     // The patch is heavily indented, the file is not.
     // Standard fuzzy matching would fail (score ~0.67).
@@ -6018,6 +6179,7 @@ fn test_fuzzy_match_ignores_indentation() {
 
 #[test]
 fn test_fuzzy_insertion_clobbers_context() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("main.rs");
 
@@ -6073,6 +6235,7 @@ fn test_fuzzy_insertion_clobbers_context() {
 
 #[test]
 fn test_git_diff_header_is_not_absorbed_into_previous_hunk() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         --- a/file1.txt
         +++ b/file1.txt
@@ -6104,6 +6267,7 @@ fn test_git_diff_header_is_not_absorbed_into_previous_hunk() {
 
 #[test]
 fn test_new_file_mode_header_is_not_context() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         --- a/src/lib.rs
         +++ b/src/lib.rs
@@ -6133,6 +6297,7 @@ fn test_new_file_mode_header_is_not_context() {
 
 #[test]
 fn test_deleted_file_mode_header_is_not_context() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         --- a/keep.txt
         +++ b/keep.txt
@@ -6162,6 +6327,7 @@ fn test_deleted_file_mode_header_is_not_context() {
 
 #[test]
 fn test_markdown_block_with_git_headers() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // Ensure the issue is also reproduced when parsing markdown blocks,
     // as this uses the same underlying line parser.
     let content = indoc! {r#"
@@ -6193,6 +6359,7 @@ fn test_markdown_block_with_git_headers() {
 
 #[test]
 fn test_extended_git_headers() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // Test other git headers like similarity index, rename, etc.
     let diff = indoc! {r#"
         --- a/f1
@@ -6222,6 +6389,7 @@ fn test_extended_git_headers() {
 
 #[test]
 fn test_fuzzy_indentation_drift() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("drift.md");
 
@@ -6270,6 +6438,7 @@ fn test_fuzzy_indentation_drift() {
 
 #[test]
 fn test_invert_simple_modification() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         --- a/file.txt
         +++ b/file.txt
@@ -6292,6 +6461,7 @@ fn test_invert_simple_modification() {
 
 #[test]
 fn test_invert_creation_becomes_deletion() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         --- /dev/null
         +++ b/new.txt
@@ -6312,6 +6482,7 @@ fn test_invert_creation_becomes_deletion() {
 
 #[test]
 fn test_invert_deletion_becomes_creation() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         --- a/old.txt
         +++ /dev/null
@@ -6332,6 +6503,7 @@ fn test_invert_deletion_becomes_creation() {
 
 #[test]
 fn test_double_inversion_is_identity() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         --- a/file.txt
         +++ b/file.txt
@@ -6351,6 +6523,7 @@ fn test_double_inversion_is_identity() {
 
 #[test]
 fn test_apply_inverted_patch_undoes_changes() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("file.txt");
 
@@ -6384,6 +6557,7 @@ fn test_apply_inverted_patch_undoes_changes() {
 
 #[test]
 fn test_invert_multiple_files() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         --- a/f1
         +++ b/f1
@@ -6413,6 +6587,7 @@ fn test_invert_multiple_files() {
 
 #[test]
 fn test_invert_conflict_markers() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // Conflict markers: <<<< (Old) ==== (New) >>>>
     let diff = indoc! {r#"
         <<<<
@@ -6435,6 +6610,7 @@ fn test_invert_conflict_markers() {
 
 #[test]
 fn test_invert_mixed_hunk() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // A hunk with context, additions, and deletions mixed
     let diff = indoc! {r#"
         --- a/file
@@ -6471,6 +6647,7 @@ fn test_invert_mixed_hunk() {
 
 #[test]
 fn test_invert_empty_patch_list() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let patches: Vec<Patch> = vec![];
     let inverted = invert_patches(&patches);
     assert!(inverted.is_empty());
@@ -6478,6 +6655,7 @@ fn test_invert_empty_patch_list() {
 
 #[test]
 fn test_complex_apply_and_reverse_cycle() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("complex_cycle.txt");
 
@@ -6548,6 +6726,7 @@ fn test_complex_apply_and_reverse_cycle() {
 
 #[test]
 fn test_newline_only_file_preservation() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // Tests the fix where a file intended to be exactly one newline
     // was being truncated to 0 bytes.
     let original = "content\n";
@@ -6571,6 +6750,7 @@ fn test_newline_only_file_preservation() {
 
 #[test]
 fn test_conflict_marker_detection_false_positive_markdown_header() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // Verifies that a Markdown H1 header (text followed by ====)
     // is NOT detected as a conflict marker patch.
     let content = indoc! {r#"
@@ -6591,6 +6771,7 @@ fn test_conflict_marker_detection_false_positive_markdown_header() {
 
 #[test]
 fn test_conflict_marker_detection_requires_start_and_end() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // Verifies that we need both <<<< and (==== or >>>>) to trigger detection.
     let only_start = "<<<< Just some text";
     assert_eq!(detect_patch(only_start), PatchFormat::Unknown);
@@ -6637,6 +6818,7 @@ fn test_smart_indentation_tabs_to_tabs() {
 
 #[test]
 fn test_parse_empty_hunk_header_allowed() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // The changelog mentions support for empty hunks (@@ -0,0 +0,0 @@).
     // This test ensures the parser doesn't skip them.
     let diff = indoc! {r#"
@@ -6653,6 +6835,7 @@ fn test_parse_empty_hunk_header_allowed() {
 
 #[test]
 fn test_markdown_fence_indentation_strictness() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // A closing fence must not be more indented than the opening fence.
     // This prevents a context line that happens to start with ``` from
     // prematurely closing the patch block.
@@ -6678,6 +6861,7 @@ fn test_markdown_fence_indentation_strictness() {
 
 #[test]
 fn test_conflict_marker_pure_deletion_no_separator() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // Tests a conflict marker block that only has <<<< and >>>> (no ====).
     // This should be interpreted as a pure deletion.
     let original = "line 1\nline 2\nline 3\n";
@@ -6697,6 +6881,7 @@ fn test_conflict_marker_pure_deletion_no_separator() {
 
 #[test]
 fn test_apply_patch_to_empty_file_resulting_in_newline() {
+    let _ = env_logger::builder().is_test(true).try_init();
     // Test creating a file that consists of exactly one newline.
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("newline.txt");
@@ -6717,6 +6902,7 @@ fn test_apply_patch_to_empty_file_resulting_in_newline() {
 
 #[test]
 fn test_multiple_file_creations_with_empty_lines_between() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let diff = indoc! {r#"
         --- /dev/null
         +++ b/file1.txt
@@ -6795,7 +6981,7 @@ mod entropy_and_orphan_guards {
     use indoc::indoc;
     use mpatch::{
         apply_patch_to_file, parse_auto, parse_diffs, try_apply_patch_to_content, ApplyOptions,
-        HunkApplyError, HunkApplyStatus,
+        Hunk, HunkApplyError, HunkApplyStatus,
     };
     use std::fs;
     use tempfile::tempdir;
@@ -6933,6 +7119,7 @@ mod entropy_and_orphan_guards {
 
     #[test]
     fn test_stale_context_without_additions_still_skipped() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let original = "line A\nline C\n";
         let diff = indoc! {r#"
             --- a/test.txt
@@ -6953,6 +7140,7 @@ mod entropy_and_orphan_guards {
 
     #[test]
     fn test_eof_truncation_restoration_with_additions() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let original = "fn main() {\n    run();\n";
         let diff = indoc! {r#"
             --- a/test.rs
@@ -7117,6 +7305,498 @@ mod entropy_and_orphan_guards {
         assert!(
             result.report.all_applied_cleanly(),
             "Regression test failed: Hunk 3 should apply cleanly without ContextNotFound"
+        );
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("anonymize: bool,"));
+        assert!(content.contains("copy_to_clipboard(clipboard, &buffer, anonymize)"));
+        assert!(content.contains("anonymized = cv_clip::anonymize_text(content);"));
+        assert!(content.contains(
+            "This function performs two main tasks before setting the clipboard contents:"
+        ));
+    }
+
+    #[test]
+    fn test_backtracking_bypasses_high_scoring_truncated_window() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("service.rs");
+
+        let mut original = String::from("fn start_engine() {\n");
+        for i in 0..12 {
+            original.push_str(&format!("    let phase_{} = {};\n", i, i));
+        }
+        original.push_str("}\n\n");
+        for i in 0..12 {
+            original.push_str(&format!("// Intervening service telemetry notes {}\n", i));
+        }
+        original.push_str("\nfn stop_engine() {\n    teardown_all();\n}\n");
+        fs::write(&file_path, &original).unwrap();
+
+        let diff = [
+            "--- a/service.rs",
+            "+++ b/service.rs",
+            "@@ -1,18 +1,20 @@",
+            " fn start_engine() {",
+            "     let phase_0 = 0;",
+            "-    let phase_1 = 1;",
+            "+    let phase_1 = 100;",
+            "     let phase_2 = 2;",
+            "     let phase_3 = 3;",
+            " }",
+            "",
+            " fn stop_engine() {",
+            "+    flush_telemetry();",
+            "     teardown_all();",
+            " }",
+        ]
+        .join("\n");
+
+        let patches = parse_auto(&diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(
+            result.report.all_applied_cleanly(),
+            "Applier must backtrack to the full window when the truncated window cannot anchor stop_engine"
+        );
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("let phase_1 = 100;"));
+        assert!(content.contains("flush_telemetry();"));
+        assert!(content.contains("// Intervening service telemetry notes 0"));
+        assert!(content.contains("// Intervening service telemetry notes 11"));
+    }
+
+    #[test]
+    fn test_backtracking_all_candidates_exhausted_preserves_target() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("immutable.rs");
+
+        let original = indoc! {r#"
+            fn alpha() {
+                step_a();
+                step_b();
+            }
+
+            fn beta() {
+                step_c();
+                step_d();
+            }
+        "#};
+        fs::write(&file_path, original).unwrap();
+
+        let diff = [
+            "--- a/immutable.rs",
+            "+++ b/immutable.rs",
+            "@@ -1,7 +1,9 @@",
+            " fn alpha() {",
+            "     step_a();",
+            "+    step_alpha_new();",
+            "     step_b();",
+            " }",
+            "",
+            " fn nonexistent_gamma() {",
+            "+    injected_rogue_line();",
+            "     never_heard_of_this();",
+            " }",
+        ]
+        .join("\n");
+
+        let patches = parse_auto(&diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(
+            !result.report.all_applied_cleanly(),
+            "Should fail cleanly when no candidate can anchor all additions"
+        );
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(
+            content, original,
+            "Target file must remain 100% pristine if hunk application fails after backtracking"
+        );
+    }
+
+    #[test]
+    fn test_single_line_signature_expansion_python() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("metrics.py");
+
+        let original = indoc! {r#"
+            def compute_metrics(predictions, targets, average="macro"):
+                score = calculate_f1(predictions, targets, average)
+                return score
+        "#};
+        fs::write(&file_path, original).unwrap();
+
+        let diff = [
+            "--- a/metrics.py",
+            "+++ b/metrics.py",
+            "@@ -1,3 +1,5 @@",
+            " def compute_metrics(",
+            "     predictions,",
+            "     targets,",
+            "+    weights=None,",
+            "     average=\"macro\",",
+            " ):",
+            "+    validate_weights(weights)",
+            "     score = calculate_f1(predictions, targets, average)",
+            "     return score",
+        ]
+        .join("\n");
+
+        let patches = parse_auto(&diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(
+            result.report.all_applied_cleanly(),
+            "Should expand single-line Python signature to multi-line with inserted parameter and body statement"
+        );
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("weights=None,"));
+        assert!(content.contains("validate_weights(weights)"));
+        assert!(content.contains("score = calculate_f1(predictions, targets, average)"));
+    }
+
+    #[test]
+    fn test_single_line_statement_expansion_javascript() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("api.js");
+
+        let original = indoc! {r#"
+            async function init() {
+                const user = await fetchUser(userId, { timeout: 5000 });
+                console.log(user.name);
+            }
+        "#};
+        fs::write(&file_path, original).unwrap();
+
+        let diff = [
+            "--- a/api.js",
+            "+++ b/api.js",
+            "@@ -1,4 +1,5 @@",
+            " async function init() {",
+            "     const user = await fetchUser(",
+            "         userId,",
+            "+        authToken,",
+            "         { timeout: 5000 },",
+            "     );",
+            "     console.log(user.name);",
+            " }",
+        ]
+        .join("\n");
+
+        let patches = parse_auto(&diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(result.report.all_applied_cleanly());
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("authToken,"));
+        assert!(content.contains("timeout: 5000"));
+        assert!(content.contains("console.log(user.name);"));
+    }
+
+    #[test]
+    fn test_multi_anchor_hunk_with_intervening_helper_function() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("workflow.rs");
+
+        let original = indoc! {r#"
+            pub fn step_one() {
+                init_logger();
+            }
+
+            // Local helper added in current branch
+            fn sanitize_environment() -> bool {
+                check_env_vars()
+            }
+
+            pub fn step_two(status: bool) {
+                finalize(status);
+            }
+        "#};
+        fs::write(&file_path, original).unwrap();
+
+        let diff = [
+            "--- a/workflow.rs",
+            "+++ b/workflow.rs",
+            "@@ -1,9 +1,11 @@",
+            " pub fn step_one() {",
+            "+    setup_tracing();",
+            "     init_logger();",
+            " }",
+            "",
+            "-pub fn step_two(status: bool) {",
+            "+pub fn step_two(status: bool, retries: u32) {",
+            "     finalize(status);",
+            " }",
+        ]
+        .join("\n");
+
+        let patches = parse_auto(&diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(
+            result.report.all_applied_cleanly(),
+            "Hunk must span across locally inserted helper function without destroying it"
+        );
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("setup_tracing();"));
+        assert!(content.contains("pub fn step_two(status: bool, retries: u32)"));
+        assert!(content.contains("fn sanitize_environment() -> bool"));
+        assert!(content.contains("check_env_vars()"));
+    }
+
+    #[test]
+    fn test_genuine_orphan_addition_rejected_even_with_statement_matching() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("guard.rs");
+
+        let original = indoc! {r#"
+            fn calculate(a: i32, b: i32) -> i32 {
+                a + b
+            }
+        "#};
+        fs::write(&file_path, original).unwrap();
+
+        let diff = [
+            "--- a/guard.rs",
+            "+++ b/guard.rs",
+            "@@ -1,3 +1,4 @@",
+            " fn unrelated_worker(msg: &str) {",
+            "+    unauthorized_injection();",
+            " }",
+        ]
+        .join("\n");
+
+        let patches = parse_auto(&diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(
+            !result.report.all_applied_cleanly(),
+            "Unrelated statement must not match calculate() and must be rejected"
+        );
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, original);
+    }
+
+    #[test]
+    fn test_dry_run_diff_generation_with_backtracked_expansion() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("dry_run_test.py");
+
+        let original = "def send_email(to, subject):\n    return smtp.send(to, subject)\n";
+        fs::write(&file_path, original).unwrap();
+
+        let diff = [
+            "--- a/dry_run_test.py",
+            "+++ b/dry_run_test.py",
+            "@@ -1,2 +1,3 @@",
+            " def send_email(",
+            "     to,",
+            "+    cc=None,",
+            "     subject,",
+            " ):",
+            "     return smtp.send(to, subject)",
+        ]
+        .join("\n");
+
+        let patches = parse_auto(&diff).unwrap();
+        let options = ApplyOptions::dry_run();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(result.report.all_applied_cleanly());
+        assert!(
+            result.diff.is_some(),
+            "Dry run must generate unified diff output"
+        );
+
+        let diff_str = result.diff.unwrap();
+        assert!(diff_str.contains("+    cc=None,"));
+        assert!(diff_str.contains("--- a/dry_run_test.py"));
+        assert!(diff_str.contains("+++ b/dry_run_test.py"));
+
+        let on_disk = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(on_disk, original);
+    }
+
+    #[test]
+    fn test_required_match_span_calculation() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let h1 = Hunk {
+            lines: vec![
+                " ctx0".to_string(),
+                "+add1".to_string(),
+                " ctx1".to_string(),
+                " ctx2".to_string(),
+            ],
+            old_start_line: Some(1),
+            new_start_line: Some(1),
+        };
+        assert_eq!(h1.required_match_span(), 1);
+
+        let h2 = Hunk {
+            lines: vec![
+                " ctx0".to_string(),
+                "-del0".to_string(),
+                " ctx1".to_string(),
+                " ctx2".to_string(),
+                " ctx3".to_string(),
+                "+add4".to_string(),
+                " ctx4".to_string(),
+            ],
+            old_start_line: Some(1),
+            new_start_line: Some(1),
+        };
+        assert_eq!(h2.required_match_span(), 4);
+
+        let h3 = Hunk {
+            lines: vec![" ctx0".to_string(), " ctx1".to_string()],
+            old_start_line: Some(1),
+            new_start_line: Some(1),
+        };
+        assert_eq!(h3.required_match_span(), 0);
+    }
+
+    #[test]
+    fn test_single_line_with_trailing_commas_and_generics() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("complex.rs");
+
+        let original = indoc! {r#"
+            pub fn dispatch<T: Send + Sync, R: Clone>(handler: &T, request: R) -> Result<(), AppError> {
+                handler.handle(request);
+                Ok(())
+            }
+        "#};
+        fs::write(&file_path, original).unwrap();
+
+        let diff = [
+            "--- a/complex.rs",
+            "+++ b/complex.rs",
+            "@@ -1,4 +1,5 @@",
+            " pub fn dispatch<T: Send + Sync, R: Clone>(",
+            "     handler: &T,",
+            "+    timeout: Duration,",
+            "     request: R,",
+            " ) -> Result<(), AppError> {",
+            "     handler.handle(request);",
+            "     Ok(())",
+            " }",
+        ]
+        .join("\n");
+
+        let patches = parse_auto(&diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(result.report.all_applied_cleanly());
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("timeout: Duration,"));
+        assert!(content.contains("handler.handle(request);"));
+    }
+
+    #[test]
+    fn test_fuzzy_match_cv_clip_hunk3_with_single_line_signature_and_doc_drift() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("main.rs");
+
+        let original_content = indoc! {r#"
+            /// # Arguments
+            /// * `input`: The source to read from.
+            /// * `clipboard`: A mutable reference to a clipboard implementation.
+            fn run_pipe_mode<R: Read, C: Clipboard>(mut input: R, clipboard: &mut C) -> Result<(), AppError> {
+                let mut buffer = String::new();
+                input
+                    .read_to_string(&mut buffer)
+                    .map_err(|e| AppError::Io(e.to_string()))?;
+                copy_to_clipboard(clipboard, &buffer)
+            }
+
+            /// Copies the given content to the clipboard after minor processing.
+            ///
+            /// This function performs two main tasks before setting the clipboard contents:
+            /// 1. It strips a single trailing newline, which is common in command output.
+            /// 2. It checks if the resulting content is empty and avoids modifying the clipboard
+            ///    if it is, printing a warning instead.
+            ///
+            /// # Arguments
+            /// * `clipboard`: A mutable reference to a clipboard implementation.
+            /// * `content`: The string content to copy.
+            fn copy_to_clipboard<C: Clipboard>(clipboard: &mut C, content: &str) -> Result<(), AppError> {
+                let content_to_copy = content.strip_suffix('\n').unwrap_or(content);
+
+                if content_to_copy.is_empty() {
+                    return Ok(());
+                }
+            }
+        "#};
+        fs::write(&file_path, original_content).unwrap();
+
+        let diff = [
+            "--- a/main.rs",
+            "+++ b/main.rs",
+            "@@ -1,21 +1,33 @@",
+            " /// # Arguments",
+            " /// * `input`: The source to read from.",
+            "+/// * `anonymize`: Whether to replace the user's home directory path with `~`.",
+            " /// * `clipboard`: A mutable reference to a clipboard implementation.",
+            "-fn run_pipe_mode<R: Read, C: Clipboard>(mut input: R, clipboard: &mut C) -> Result<(), AppError> {",
+            "+fn run_pipe_mode<R: Read, C: Clipboard>(",
+            "+    mut input: R,",
+            "+    anonymize: bool,",
+            "+    clipboard: &mut C,",
+            "+) -> Result<(), AppError> {",
+            "     let mut buffer = String::new();",
+            "     input",
+            "         .read_to_string(&mut buffer)",
+            "         .map_err(|e| AppError::Io(e.to_string()))?;",
+            "-    copy_to_clipboard(clipboard, &buffer)",
+            "+    copy_to_clipboard(clipboard, &buffer, anonymize)",
+            " }",
+            "",
+            "+/// Copies the given content to the clipboard after optional anonymization and trimming.",
+            " fn copy_to_clipboard<C: Clipboard>(",
+            "     clipboard: &mut C,",
+            "     content: &str,",
+            "+    anonymize: bool,",
+            " ) -> Result<(), AppError> {",
+            "+    let anonymized;",
+            "+    let content = if anonymize {",
+            "+        anonymized = cv_clip::anonymize_text(content);",
+            "+        &anonymized",
+            "+    } else {",
+            "+        content",
+            "+    };",
+            "     let content_to_copy = content.strip_suffix('\\n').unwrap_or(content);",
+            "",
+            "     if content_to_copy.is_empty() {",
+        ]
+        .join("\n");
+
+        let patches = parse_auto(&diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(
+            result.report.all_applied_cleanly(),
+            "Hunk 3 should apply cleanly despite single-line signature and intervening doc drift"
         );
         let content = fs::read_to_string(&file_path).unwrap();
         assert!(content.contains("anonymize: bool,"));

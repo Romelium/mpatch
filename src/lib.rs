@@ -2483,6 +2483,38 @@ impl Hunk {
     pub fn has_changes(&self) -> bool {
         self.lines.iter().any(|l| l.starts_with(['+', '-']))
     }
+
+    /// Returns the minimum span (in lines of `match_block`) between the first and
+    /// last edit site (addition or removal) in this hunk.
+    pub fn required_match_span(&self) -> usize {
+        let match_block = self.get_match_block();
+        if match_block.is_empty() {
+            return 0;
+        }
+
+        let mut first_match_idx = None;
+        let mut last_match_idx = None;
+        let mut current_match_idx: usize = 0;
+
+        for line in &self.lines {
+            if line.starts_with('+') {
+                let anchor_idx = current_match_idx.saturating_sub(1);
+                first_match_idx.get_or_insert(anchor_idx);
+                last_match_idx = Some(anchor_idx);
+            } else {
+                if line.starts_with('-') {
+                    first_match_idx.get_or_insert(current_match_idx);
+                    last_match_idx = Some(current_match_idx);
+                }
+                current_match_idx += 1;
+            }
+        }
+
+        match (first_match_idx, last_match_idx) {
+            (Some(first), Some(last)) => (last.saturating_sub(first)) + 1,
+            _ => 0,
+        }
+    }
 }
 
 impl std::fmt::Display for Hunk {
@@ -5390,6 +5422,49 @@ fn get_indent(line: &str) -> &str {
     &line[..line.len() - line.trim_start().len()]
 }
 
+/// Searches for a target line in `new_slice` that represents the same semantic statement
+/// as `old_slice` across line-break or formatting variations.
+fn find_statement_match_in_block(
+    old_slice: &[&str],
+    new_slice: &[String],
+    has_context: bool,
+) -> Option<usize> {
+    if old_slice.is_empty() || new_slice.is_empty() {
+        return None;
+    }
+    let old_text = old_slice.join(" ");
+    let old_trimmed = old_text.trim();
+    if old_trimmed.is_empty() {
+        return None;
+    }
+
+    let mut best_match = None;
+    let mut best_ratio: f32 = 0.0;
+    // Require a near-perfect match if we are replacing context lines to avoid corrupting the file.
+    let threshold: f32 = if has_context { 0.85 } else { 0.6 };
+
+    let old_no_ws: String = old_trimmed.chars().filter(|c| !c.is_whitespace()).collect();
+
+    for (idx, line) in new_slice.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let diff = similar::TextDiff::from_words(old_trimmed, trimmed);
+        let ratio = diff.ratio();
+
+        let new_no_ws: String = trimmed.chars().filter(|c| !c.is_whitespace()).collect();
+        let ratio_no_ws = similar::TextDiff::from_chars(&old_no_ws, &new_no_ws).ratio();
+        let combined_ratio = ratio.max(ratio_no_ws);
+
+        if combined_ratio > best_ratio && combined_ratio >= threshold {
+            best_ratio = ratio;
+            best_match = Some(idx);
+        }
+    }
+    best_match
+}
+
 /// Checks whether a line is trivial / low-entropy syntax (e.g. closing braces, blank lines).
 fn is_low_entropy_line(line: &str) -> bool {
     let trimmed = line.trim();
@@ -5468,212 +5543,480 @@ pub fn apply_hunk_to_lines(
         return HunkApplyStatus::SkippedNoChanges;
     }
 
-    match find_hunk_location_in_lines(hunk, target_lines, options) {
-        Ok((location, match_type)) => {
-            debug!(
-                "  Found location {:?} with match type {:?}. Applying changes.",
-                location, match_type
-            );
+    let finder = DefaultHunkFinder::new(options);
+    let candidates = match finder.find_candidate_locations(hunk, target_lines) {
+        Ok(c) => c,
+        Err(error) => return HunkApplyStatus::Failed(error),
+    };
 
-            let final_replace_block: Vec<String> = if matches!(match_type, MatchType::Exact) {
-                // For Exact matches, we assume the patch's indentation is intentional and correct relative to the context.
-                // We don't need dynamic adjustment because the context matched byte-for-byte.
-                trace!("    Applying hunk via exact logic.");
-                hunk.get_replace_block()
-                    .iter()
-                    .map(|s| {
-                        if s.trim().is_empty() {
-                            String::new()
-                        } else {
-                            s.to_string()
-                        }
-                    })
-                    .collect()
+    let mut last_error = HunkApplyError::ContextNotFound;
+
+    for (location, match_type) in candidates {
+        let mut lines_clone = target_lines.clone();
+        match try_apply_hunk_at_location(hunk, &mut lines_clone, location, match_type.clone()) {
+            Ok(status) => {
+                *target_lines = lines_clone;
+                return status;
+            }
+            Err(e) => {
+                debug!(
+                    "  Candidate at {:?} failed ({:?}). Trying next candidate...",
+                    location, e
+                );
+                last_error = e;
+            }
+        }
+    }
+
+    HunkApplyStatus::Failed(last_error)
+}
+
+fn try_apply_hunk_at_location(
+    hunk: &Hunk,
+    target_lines: &mut Vec<String>,
+    location: HunkLocation,
+    match_type: MatchType,
+) -> Result<HunkApplyStatus, HunkApplyError> {
+    debug!(
+        "  Found location {:?} with match type {:?}. Applying changes.",
+        location, match_type
+    );
+
+    let final_replace_block: Vec<String> = if matches!(match_type, MatchType::Exact) {
+        // For Exact matches, we assume the patch's indentation is intentional and correct relative to the context.
+        // We don't need dynamic adjustment because the context matched byte-for-byte.
+        trace!("    Applying hunk via exact logic.");
+        hunk.get_replace_block()
+            .iter()
+            .map(|s| {
+                if s.trim().is_empty() {
+                    String::new()
+                } else {
+                    s.to_string()
+                }
+            })
+            .collect()
+    } else {
+        // For Fuzzy and ExactIgnoringWhitespace, indentation might mismatch or drift.
+        // We use a robust reconstruction that dynamically adjusts indentation based on the
+        // nearest matching line.
+        debug!("    Applying hunk via robust reconstruction logic (preserving file context & adjusting indent).");
+        trace!(
+            "      Fuzzy match location: start={}, len={}",
+            location.start_index,
+            location.length
+        );
+        let file_matched_lines: Vec<_> =
+            target_lines[location.start_index..location.start_index + location.length].to_vec();
+        trace!(
+            "      File content in matched range: {:?}",
+            file_matched_lines
+        );
+
+        // 1. Parse hunk to separate match lines and additions.
+        // We map each line in the match block (Context/Removal) to a list of additions that follow it.
+        // match_lines_meta: Vec<(is_removal, additions_after_this_line)>
+        // Note: We store raw additions here and adjust them later during reconstruction.
+        let mut match_lines_meta: Vec<(bool, Vec<String>)> = Vec::new();
+        let mut initial_additions: Vec<String> = Vec::new();
+
+        let mut line_iter = hunk.lines.iter().peekable();
+
+        // Consume any additions that appear before the first context/removal line
+        while let Some(line) = line_iter.peek() {
+            if let Some(stripped) = line.strip_prefix('+') {
+                initial_additions.push(stripped.to_string());
+                line_iter.next();
             } else {
-                // For Fuzzy and ExactIgnoringWhitespace, indentation might mismatch or drift.
-                // We use a robust reconstruction that dynamically adjusts indentation based on the
-                // nearest matching line.
-                debug!("    Applying hunk via robust reconstruction logic (preserving file context & adjusting indent).");
-                trace!(
-                    "      Fuzzy match location: start={}, len={}",
-                    location.start_index,
-                    location.length
-                );
-                let file_matched_lines: Vec<_> = target_lines
-                    [location.start_index..location.start_index + location.length]
-                    .to_vec();
-                trace!(
-                    "      File content in matched range: {:?}",
-                    file_matched_lines
-                );
+                break;
+            }
+        }
 
-                // 1. Parse hunk to separate match lines and additions.
-                // We map each line in the match block (Context/Removal) to a list of additions that follow it.
-                // match_lines_meta: Vec<(is_removal, additions_after_this_line)>
-                // Note: We store raw additions here and adjust them later during reconstruction.
-                let mut match_lines_meta: Vec<(bool, Vec<String>)> = Vec::new();
-                let mut initial_additions: Vec<String> = Vec::new();
-
-                let mut line_iter = hunk.lines.iter().peekable();
-
-                // Consume any additions that appear before the first context/removal line
-                while let Some(line) = line_iter.peek() {
-                    if let Some(stripped) = line.strip_prefix('+') {
-                        initial_additions.push(stripped.to_string());
-                        line_iter.next();
-                    } else {
-                        break;
-                    }
+        // Process the rest of the hunk
+        for line in line_iter {
+            if let Some(stripped) = line.strip_prefix('+') {
+                // Attach this addition to the most recent match line
+                if let Some(last) = match_lines_meta.last_mut() {
+                    last.1.push(stripped.to_string());
+                } else {
+                    // Should be unreachable if match block is not empty, but safe fallback
+                    initial_additions.push(stripped.to_string());
                 }
+            } else {
+                // It's a Context (' ') or Removal ('-') line
+                let is_removal = line.starts_with('-');
+                match_lines_meta.push((is_removal, Vec::new()));
+            }
+        }
 
-                // Process the rest of the hunk
-                for line in line_iter {
-                    if let Some(stripped) = line.strip_prefix('+') {
-                        // Attach this addition to the most recent match line
-                        if let Some(last) = match_lines_meta.last_mut() {
-                            last.1.push(stripped.to_string());
-                        } else {
-                            // Should be unreachable if match block is not empty, but safe fallback
-                            initial_additions.push(stripped.to_string());
+        // 2. Prepare text for diffing
+        // We align the hunk's "old" view (match block) with the file's actual content.
+        let match_block_content: Vec<&str> = hunk.get_match_block();
+        let file_block_content: Vec<&str> = file_matched_lines.iter().map(|s| s.as_str()).collect();
+
+        let match_block_trimmed: Vec<&str> = match_block_content.iter().map(|s| s.trim()).collect();
+        let file_block_trimmed: Vec<&str> = file_block_content.iter().map(|s| s.trim()).collect();
+
+        // 3. Diff
+        let diff = similar::TextDiff::from_slices(&match_block_trimmed, &file_block_trimmed);
+
+        // 4. Determine Initial Indentation Context
+        // We scan the diff ops to find the first aligned line (Equal or Replace)
+        // to establish the baseline indentation difference.
+        let mut current_hunk_indent = "";
+        let mut current_target_indent = "";
+
+        for op in diff.ops() {
+            let mut found = false;
+            match op {
+                similar::DiffOp::Equal {
+                    old_index,
+                    new_index,
+                    len,
+                } => {
+                    // Use the first non-empty line of the block to gauge indentation
+                    for i in 0..*len {
+                        let h_line = match_block_content[*old_index + i];
+                        let t_line = file_block_content[*new_index + i];
+                        let h_ind = get_indent(h_line);
+                        let t_ind = get_indent(t_line);
+                        if (!h_ind.is_empty() || !t_ind.is_empty())
+                            && !h_line.trim().is_empty()
+                            && !t_line.trim().is_empty()
+                        {
+                            current_hunk_indent = h_ind;
+                            current_target_indent = t_ind;
+                            trace!(
+                                "      Initial Indentation Context: Hunk='{}', Target='{}'",
+                                h_ind.escape_debug(),
+                                t_ind.escape_debug()
+                            );
+                            found = true;
+                            break;
                         }
-                    } else {
-                        // It's a Context (' ') or Removal ('-') line
-                        let is_removal = line.starts_with('-');
-                        match_lines_meta.push((is_removal, Vec::new()));
                     }
                 }
+                similar::DiffOp::Replace {
+                    old_index,
+                    new_index,
+                    old_len,
+                    new_len,
+                } => {
+                    let min_len = std::cmp::min(*old_len, *new_len);
+                    for i in 0..min_len {
+                        let h_line = match_block_content[*old_index + i];
+                        let t_line = file_block_content[*new_index + i];
+                        let h_ind = get_indent(h_line);
+                        let t_ind = get_indent(t_line);
+                        if (!h_ind.is_empty() || !t_ind.is_empty())
+                            && !h_line.trim().is_empty()
+                            && !t_line.trim().is_empty()
+                        {
+                            current_hunk_indent = h_ind;
+                            current_target_indent = t_ind;
+                            trace!("      Initial Indentation Context (from Replace): Hunk='{}', Target='{}'", h_ind.escape_debug(), t_ind.escape_debug());
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            if found {
+                break;
+            }
+        }
 
-                // 2. Prepare text for diffing
-                // We align the hunk's "old" view (match block) with the file's actual content.
-                let match_block_content: Vec<&str> = hunk.get_match_block();
-                let file_block_content: Vec<&str> =
-                    file_matched_lines.iter().map(|s| s.as_str()).collect();
+        // 5. Reconstruct the block
+        let mut final_lines = Vec::new();
 
-                let match_block_trimmed: Vec<&str> =
-                    match_block_content.iter().map(|s| s.trim()).collect();
-                let file_block_trimmed: Vec<&str> =
-                    file_block_content.iter().map(|s| s.trim()).collect();
+        // Apply initial additions using the seeded indentation
+        for line in initial_additions {
+            final_lines.push(adjust_indentation(
+                &line,
+                current_hunk_indent,
+                current_target_indent,
+            ));
+        }
 
-                // 3. Diff
-                let diff =
-                    similar::TextDiff::from_slices(&match_block_trimmed, &file_block_trimmed);
+        let is_at_eof = (location.start_index + location.length) == target_lines.len();
+        let ops = diff.ops().to_vec();
 
-                // 4. Determine Initial Indentation Context
-                // We scan the diff ops to find the first aligned line (Equal or Replace)
-                // to establish the baseline indentation difference.
-                let mut current_hunk_indent = "";
-                let mut current_target_indent = "";
+        for (op_idx, op) in ops.iter().enumerate() {
+            match op {
+                similar::DiffOp::Equal {
+                    old_index,
+                    new_index,
+                    len,
+                } => {
+                    // The file content matches the hunk's expectation (fuzzy or exact).
+                    for i in 0..*len {
+                        let old_idx = old_index + i;
+                        let new_idx = new_index + i;
+                        let (is_removal, additions) = &match_lines_meta[old_idx];
 
-                for op in diff.ops() {
-                    let mut found = false;
-                    match op {
-                        similar::DiffOp::Equal {
-                            old_index,
-                            new_index,
-                            len,
-                        } => {
-                            // Use the first non-empty line of the block to gauge indentation
-                            for i in 0..*len {
-                                let h_line = match_block_content[*old_index + i];
-                                let t_line = file_block_content[*new_index + i];
-                                let h_ind = get_indent(h_line);
-                                let t_ind = get_indent(t_line);
-                                if (!h_ind.is_empty() || !t_ind.is_empty())
-                                    && !h_line.trim().is_empty()
-                                    && !t_line.trim().is_empty()
-                                {
-                                    current_hunk_indent = h_ind;
-                                    current_target_indent = t_ind;
-                                    trace!(
-                                        "      Initial Indentation Context: Hunk='{}', Target='{}'",
-                                        h_ind.escape_debug(),
-                                        t_ind.escape_debug()
+                        // Update indentation context dynamically based on this matching line
+                        let h_line = match_block_content[old_idx];
+                        let t_line = &file_matched_lines[new_idx];
+                        let h_ind = get_indent(h_line);
+                        let t_ind = get_indent(t_line);
+                        if (!h_ind.is_empty() || !t_ind.is_empty())
+                            && !h_line.trim().is_empty()
+                            && !t_line.trim().is_empty()
+                            && (current_hunk_indent != h_ind || current_target_indent != t_ind)
+                        {
+                            trace!(
+                                "      Dynamic Indentation Update (Equal): Hunk='{}', Target='{}'",
+                                h_ind.escape_debug(),
+                                t_ind.escape_debug()
+                            );
+                            current_hunk_indent = h_ind;
+                            current_target_indent = t_ind;
+                        }
+
+                        // If it's not a removal, keep the file's version of the line (preserves local edits)
+                        if !*is_removal {
+                            final_lines.push(file_matched_lines[new_idx].clone());
+                        }
+                        // Always insert the additions associated with this line
+                        for add in additions {
+                            final_lines.push(adjust_indentation(
+                                add,
+                                current_hunk_indent,
+                                current_target_indent,
+                            ));
+                        }
+                    }
+                }
+                similar::DiffOp::Delete {
+                    old_index, old_len, ..
+                } => {
+                    // Lines in hunk match block that are missing in the file.
+                    // If it was a REMOVAL line, it's already gone, so we skip it.
+                    // If it was a CONTEXT line, we only restore it if we are at the EOF
+                    // and this is the trailing part of the patch (implying truncation).
+                    // Otherwise, we assume it's stale context (extra line in patch) and skip it.
+                    let is_last_op = op_idx == ops.len() - 1;
+                    for i in 0..*old_len {
+                        let old_idx = old_index + i;
+                        let (is_removal, additions) = &match_lines_meta[old_idx];
+                        if !*is_removal
+                            && is_at_eof
+                            && is_last_op
+                            && location.length < match_block_content.len()
+                        {
+                            // Restore truncated context at EOF
+                            let line = match_block_content[old_idx];
+                            // Adjust it to match target style? Best effort using last known.
+                            final_lines.push(adjust_indentation(
+                                line,
+                                current_hunk_indent,
+                                current_target_indent,
+                            ));
+                            for add in additions {
+                                final_lines.push(adjust_indentation(
+                                    add,
+                                    current_hunk_indent,
+                                    current_target_indent,
+                                ));
+                            }
+                        } else if !*is_removal && !additions.is_empty() {
+                            // Context line from hunk is missing in target, but had additions attached.
+                            // Splicing additions whose anchor context does not exist causes syntax corruption.
+                            warn!(
+                                        "    Fuzzy match rejected: Context line {:?} is missing from target, cannot anchor {} addition(s).",
+                                        match_block_content[old_idx],
+                                        additions.len()
                                     );
-                                    found = true;
-                                    break;
-                                }
+                            return Err(HunkApplyError::ContextNotFound);
+                        } else if *is_removal {
+                            for add in additions {
+                                final_lines.push(adjust_indentation(
+                                    add,
+                                    current_hunk_indent,
+                                    current_target_indent,
+                                ));
                             }
                         }
-                        similar::DiffOp::Replace {
-                            old_index,
-                            new_index,
-                            old_len,
-                            new_len,
-                        } => {
-                            let min_len = std::cmp::min(*old_len, *new_len);
-                            for i in 0..min_len {
-                                let h_line = match_block_content[*old_index + i];
-                                let t_line = file_block_content[*new_index + i];
-                                let h_ind = get_indent(h_line);
-                                let t_ind = get_indent(t_line);
-                                if (!h_ind.is_empty() || !t_ind.is_empty())
-                                    && !h_line.trim().is_empty()
-                                    && !t_line.trim().is_empty()
-                                {
+                    }
+                }
+                similar::DiffOp::Insert {
+                    new_index, new_len, ..
+                } => {
+                    // Extra lines in the file (local insertions).
+                    // We preserve them.
+                    for i in 0..*new_len {
+                        let new_idx = new_index + i;
+                        final_lines.push(file_matched_lines[new_idx].clone());
+                    }
+                }
+                similar::DiffOp::Replace {
+                    old_index,
+                    old_len,
+                    new_index,
+                    new_len,
+                } => {
+                    // A region where the file differs significantly from the hunk.
+                    // Try to update indentation from the first non-empty line of the replacement block
+                    if *old_len > 0 && *new_len > 0 {
+                        let min_len = std::cmp::min(*old_len, *new_len);
+                        for i in 0..min_len {
+                            let h_line = match_block_content[*old_index + i];
+                            let t_line = &file_matched_lines[*new_index + i];
+                            let h_ind = get_indent(h_line);
+                            let t_ind = get_indent(t_line);
+                            if (!h_ind.is_empty() || !t_ind.is_empty())
+                                && !h_line.trim().is_empty()
+                                && !t_line.trim().is_empty()
+                            {
+                                if current_hunk_indent != h_ind || current_target_indent != t_ind {
+                                    trace!("      Dynamic Indentation Update (Replace search): Hunk='{}', Target='{}'", h_ind.escape_debug(), t_ind.escape_debug());
                                     current_hunk_indent = h_ind;
                                     current_target_indent = t_ind;
-                                    trace!("      Initial Indentation Context (from Replace): Hunk='{}', Target='{}'", h_ind.escape_debug(), t_ind.escape_debug());
-                                    found = true;
-                                    break;
                                 }
+                                break;
                             }
                         }
-                        _ => {}
                     }
-                    if found {
-                        break;
-                    }
-                }
 
-                // 5. Reconstruct the block
-                let mut final_lines = Vec::new();
+                    // If lengths match, we assume a 1-to-1 correspondence (e.g. whitespace changes).
+                    if *old_len == *new_len {
+                        for i in 0..*old_len {
+                            let old_idx = old_index + i;
+                            let new_idx = new_index + i;
+                            let (is_removal, additions) = &match_lines_meta[old_idx];
 
-                // Apply initial additions using the seeded indentation
-                for line in initial_additions {
-                    final_lines.push(adjust_indentation(
-                        &line,
-                        current_hunk_indent,
-                        current_target_indent,
-                    ));
-                }
+                            // If a context line has additions attached, ensure it actually matches
+                            // the target line rather than being an entirely different code block.
+                            if !*is_removal && !additions.is_empty() {
+                                let old_trimmed = match_block_trimmed[old_idx];
+                                let new_trimmed = file_block_trimmed[new_idx];
+                                let sim_words =
+                                    similar::TextDiff::from_words(old_trimmed, new_trimmed).ratio();
+                                let old_no_ws: String =
+                                    old_trimmed.chars().filter(|c| !c.is_whitespace()).collect();
+                                let new_no_ws: String =
+                                    new_trimmed.chars().filter(|c| !c.is_whitespace()).collect();
+                                let sim_chars =
+                                    similar::TextDiff::from_chars(&old_no_ws, &new_no_ws).ratio();
 
-                let is_at_eof = (location.start_index + location.length) == target_lines.len();
-                let ops = diff.ops().to_vec();
+                                if sim_words < 0.5 || sim_chars < 0.6 {
+                                    warn!(
+                                                "    Fuzzy match rejected: Context line {:?} differs completely from target line {:?}, cannot anchor {} addition(s).",
+                                                match_block_content[old_idx],
+                                                file_matched_lines[new_idx],
+                                                additions.len()
+                                            );
+                                    return Err(HunkApplyError::ContextNotFound);
+                                }
+                            }
 
-                for (op_idx, op) in ops.iter().enumerate() {
-                    match op {
-                        similar::DiffOp::Equal {
-                            old_index,
-                            new_index,
-                            len,
-                        } => {
-                            // The file content matches the hunk's expectation (fuzzy or exact).
-                            for i in 0..*len {
+                            let h_line = match_block_content[old_idx];
+                            let t_line = &file_matched_lines[new_idx];
+                            let h_ind = get_indent(h_line);
+                            let t_ind = get_indent(t_line);
+                            if (!h_ind.is_empty() || !t_ind.is_empty())
+                                && !h_line.trim().is_empty()
+                                && !t_line.trim().is_empty()
+                                && (current_hunk_indent != h_ind || current_target_indent != t_ind)
+                            {
+                                trace!("      Dynamic Indentation Update (Replace match): Hunk='{}', Target='{}'", h_ind.escape_debug(), t_ind.escape_debug());
+                                current_hunk_indent = h_ind;
+                                current_target_indent = t_ind;
+                            }
+
+                            if !*is_removal {
+                                final_lines.push(file_matched_lines[new_idx].clone());
+                            }
+                            for add in additions {
+                                final_lines.push(adjust_indentation(
+                                    add,
+                                    current_hunk_indent,
+                                    current_target_indent,
+                                ));
+                            }
+                        }
+                    } else {
+                        let mut has_context = false;
+                        for i in 0..*old_len {
+                            if !match_lines_meta[old_index + i].0 {
+                                has_context = true;
+                                break;
+                            }
+                        }
+
+                        let match_in_new = find_statement_match_in_block(
+                            &match_block_content[*old_index..*old_index + *old_len],
+                            &file_matched_lines[*new_index..*new_index + *new_len],
+                            has_context,
+                        );
+
+                        if let Some(matching_sub_idx) = match_in_new {
+                            let absolute_target_match = *new_index + matching_sub_idx;
+                            for line in &file_matched_lines[*new_index..absolute_target_match] {
+                                final_lines.push(line.clone());
+                            }
+
+                            let t_line = &file_matched_lines[absolute_target_match];
+                            let t_ind = get_indent(t_line);
+                            if !t_ind.is_empty() && !t_line.trim().is_empty() {
+                                current_target_indent = t_ind;
+                            }
+
+                            for i in 0..*old_len {
                                 let old_idx = old_index + i;
-                                let new_idx = new_index + i;
                                 let (is_removal, additions) = &match_lines_meta[old_idx];
-
-                                // Update indentation context dynamically based on this matching line
-                                let h_line = match_block_content[old_idx];
-                                let t_line = &file_matched_lines[new_idx];
-                                let h_ind = get_indent(h_line);
-                                let t_ind = get_indent(t_line);
-                                if (!h_ind.is_empty() || !t_ind.is_empty())
-                                    && !h_line.trim().is_empty()
-                                    && !t_line.trim().is_empty()
-                                    && (current_hunk_indent != h_ind
-                                        || current_target_indent != t_ind)
-                                {
-                                    trace!("      Dynamic Indentation Update (Equal): Hunk='{}', Target='{}'", h_ind.escape_debug(), t_ind.escape_debug());
-                                    current_hunk_indent = h_ind;
-                                    current_target_indent = t_ind;
-                                }
-
-                                // If it's not a removal, keep the file's version of the line (preserves local edits)
                                 if !*is_removal {
-                                    final_lines.push(file_matched_lines[new_idx].clone());
+                                    let h_line = match_block_content[old_idx];
+                                    final_lines.push(adjust_indentation(
+                                        h_line,
+                                        current_hunk_indent,
+                                        current_target_indent,
+                                    ));
                                 }
-                                // Always insert the additions associated with this line
+                                for add in additions {
+                                    final_lines.push(adjust_indentation(
+                                        add,
+                                        current_hunk_indent,
+                                        current_target_indent,
+                                    ));
+                                }
+                            }
+
+                            for line in &file_matched_lines
+                                [(absolute_target_match + 1)..(*new_index + *new_len)]
+                            {
+                                final_lines.push(line.clone());
+                            }
+                        } else {
+                            // Heuristic: If the hunk region contains ANY context lines, we assume
+                            // the file content is a modified version of that context, so we KEEP it.
+                            // If the hunk region is PURELY removals, we assume the file content
+                            // is what needs to be removed, so we DROP it.
+
+                            if has_context {
+                                for i in 0..*new_len {
+                                    final_lines.push(file_matched_lines[new_index + i].clone());
+                                }
+                            }
+
+                            // If any context line in an unaligned replacement has additions attached,
+                            // it cannot be safely anchored.
+                            for i in 0..*old_len {
+                                let (is_removal, additions) = &match_lines_meta[old_index + i];
+                                if !*is_removal && !additions.is_empty() {
+                                    warn!(
+                                            "    Fuzzy match rejected: Context line {:?} was unaligned in replacement block, cannot anchor {} addition(s).",
+                                            match_block_content[old_index + i],
+                                            additions.len()
+                                        );
+                                    return Err(HunkApplyError::ContextNotFound);
+                                }
+                            }
+
+                            // Always append additions associated with the old lines
+                            for i in 0..*old_len {
+                                let (_, additions) = &match_lines_meta[old_index + i];
                                 for add in additions {
                                     final_lines.push(adjust_indentation(
                                         add,
@@ -5683,225 +6026,28 @@ pub fn apply_hunk_to_lines(
                                 }
                             }
                         }
-                        similar::DiffOp::Delete {
-                            old_index, old_len, ..
-                        } => {
-                            // Lines in hunk match block that are missing in the file.
-                            // If it was a REMOVAL line, it's already gone, so we skip it.
-                            // If it was a CONTEXT line, we only restore it if we are at the EOF
-                            // and this is the trailing part of the patch (implying truncation).
-                            // Otherwise, we assume it's stale context (extra line in patch) and skip it.
-                            let is_last_op = op_idx == ops.len() - 1;
-                            for i in 0..*old_len {
-                                let old_idx = old_index + i;
-                                let (is_removal, additions) = &match_lines_meta[old_idx];
-                                if !*is_removal && is_at_eof && is_last_op {
-                                    // Restore truncated context at EOF
-                                    let line = match_block_content[old_idx];
-                                    // Adjust it to match target style? Best effort using last known.
-                                    final_lines.push(adjust_indentation(
-                                        line,
-                                        current_hunk_indent,
-                                        current_target_indent,
-                                    ));
-                                    for add in additions {
-                                        final_lines.push(adjust_indentation(
-                                            add,
-                                            current_hunk_indent,
-                                            current_target_indent,
-                                        ));
-                                    }
-                                } else if !*is_removal && !additions.is_empty() {
-                                    // Context line from hunk is missing in target, but had additions attached.
-                                    // Splicing additions whose anchor context does not exist causes syntax corruption.
-                                    warn!(
-                                        "    Fuzzy match rejected: Context line {:?} is missing from target, cannot anchor {} addition(s).",
-                                        match_block_content[old_idx],
-                                        additions.len()
-                                    );
-                                    return HunkApplyStatus::Failed(
-                                        HunkApplyError::ContextNotFound,
-                                    );
-                                } else if *is_removal {
-                                    for add in additions {
-                                        final_lines.push(adjust_indentation(
-                                            add,
-                                            current_hunk_indent,
-                                            current_target_indent,
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                        similar::DiffOp::Insert {
-                            new_index, new_len, ..
-                        } => {
-                            // Extra lines in the file (local insertions).
-                            // We preserve them.
-                            for i in 0..*new_len {
-                                let new_idx = new_index + i;
-                                final_lines.push(file_matched_lines[new_idx].clone());
-                            }
-                        }
-                        similar::DiffOp::Replace {
-                            old_index,
-                            old_len,
-                            new_index,
-                            new_len,
-                        } => {
-                            // A region where the file differs significantly from the hunk.
-                            // Try to update indentation from the first non-empty line of the replacement block
-                            if *old_len > 0 && *new_len > 0 {
-                                let min_len = std::cmp::min(*old_len, *new_len);
-                                for i in 0..min_len {
-                                    let h_line = match_block_content[*old_index + i];
-                                    let t_line = &file_matched_lines[*new_index + i];
-                                    let h_ind = get_indent(h_line);
-                                    let t_ind = get_indent(t_line);
-                                    if (!h_ind.is_empty() || !t_ind.is_empty())
-                                        && !h_line.trim().is_empty()
-                                        && !t_line.trim().is_empty()
-                                    {
-                                        if current_hunk_indent != h_ind
-                                            || current_target_indent != t_ind
-                                        {
-                                            trace!("      Dynamic Indentation Update (Replace search): Hunk='{}', Target='{}'", h_ind.escape_debug(), t_ind.escape_debug());
-                                            current_hunk_indent = h_ind;
-                                            current_target_indent = t_ind;
-                                        }
-                                        break;
-                                    }
-                                }
-                            }
-
-                            // If lengths match, we assume a 1-to-1 correspondence (e.g. whitespace changes).
-                            if *old_len == *new_len {
-                                for i in 0..*old_len {
-                                    let old_idx = old_index + i;
-                                    let new_idx = new_index + i;
-                                    let (is_removal, additions) = &match_lines_meta[old_idx];
-
-                                    // If a context line has additions attached, ensure it actually matches
-                                    // the target line rather than being an entirely different code block.
-                                    if !*is_removal && !additions.is_empty() {
-                                        let sim = similar::TextDiff::from_words(
-                                            match_block_trimmed[old_idx],
-                                            file_block_trimmed[new_idx],
-                                        )
-                                        .ratio();
-                                        if sim < 0.4 {
-                                            warn!(
-                                                "    Fuzzy match rejected: Context line {:?} differs completely from target line {:?}, cannot anchor {} addition(s).",
-                                                match_block_content[old_idx],
-                                                file_matched_lines[new_idx],
-                                                additions.len()
-                                            );
-                                            return HunkApplyStatus::Failed(
-                                                HunkApplyError::ContextNotFound,
-                                            );
-                                        }
-                                    }
-
-                                    let h_line = match_block_content[old_idx];
-                                    let t_line = &file_matched_lines[new_idx];
-                                    let h_ind = get_indent(h_line);
-                                    let t_ind = get_indent(t_line);
-                                    if (!h_ind.is_empty() || !t_ind.is_empty())
-                                        && !h_line.trim().is_empty()
-                                        && !t_line.trim().is_empty()
-                                        && (current_hunk_indent != h_ind
-                                            || current_target_indent != t_ind)
-                                    {
-                                        trace!("      Dynamic Indentation Update (Replace match): Hunk='{}', Target='{}'", h_ind.escape_debug(), t_ind.escape_debug());
-                                        current_hunk_indent = h_ind;
-                                        current_target_indent = t_ind;
-                                    }
-
-                                    if !*is_removal {
-                                        final_lines.push(file_matched_lines[new_idx].clone());
-                                    }
-                                    for add in additions {
-                                        final_lines.push(adjust_indentation(
-                                            add,
-                                            current_hunk_indent,
-                                            current_target_indent,
-                                        ));
-                                    }
-                                }
-                            } else {
-                                // Heuristic: If the hunk region contains ANY context lines, we assume
-                                // the file content is a modified version of that context, so we KEEP it.
-                                // If the hunk region is PURELY removals, we assume the file content
-                                // is what needs to be removed, so we DROP it.
-                                let mut has_context = false;
-                                for i in 0..*old_len {
-                                    if !match_lines_meta[old_index + i].0 {
-                                        has_context = true;
-                                        break;
-                                    }
-                                }
-
-                                if has_context {
-                                    for i in 0..*new_len {
-                                        final_lines.push(file_matched_lines[new_index + i].clone());
-                                    }
-                                }
-
-                                // If any context line in an unaligned replacement has additions attached,
-                                // it cannot be safely anchored.
-                                for i in 0..*old_len {
-                                    let (is_removal, additions) = &match_lines_meta[old_index + i];
-                                    if !*is_removal && !additions.is_empty() {
-                                        warn!(
-                                            "    Fuzzy match rejected: Context line {:?} was unaligned in replacement block, cannot anchor {} addition(s).",
-                                            match_block_content[old_index + i],
-                                            additions.len()
-                                        );
-                                        return HunkApplyStatus::Failed(
-                                            HunkApplyError::ContextNotFound,
-                                        );
-                                    }
-                                }
-
-                                // Always append additions associated with the old lines
-                                for i in 0..*old_len {
-                                    let (_, additions) = &match_lines_meta[old_index + i];
-                                    for add in additions {
-                                        final_lines.push(adjust_indentation(
-                                            add,
-                                            current_hunk_indent,
-                                            current_target_indent,
-                                        ));
-                                    }
-                                }
-                            }
-                        }
                     }
                 }
-                final_lines
-            };
-
-            let replaced_lines: Vec<String> = target_lines
-                .splice(
-                    location.start_index..location.start_index + location.length,
-                    final_replace_block,
-                )
-                .collect();
-            trace!(
-                "  Successfully spliced changes into target lines. Replaced {} lines.",
-                replaced_lines.len()
-            );
-            HunkApplyStatus::Applied {
-                location,
-                match_type,
-                replaced_lines,
             }
         }
-        Err(error) => {
-            // The calling function will log the failure with context (e.g., hunk index).
-            HunkApplyStatus::Failed(error)
-        }
-    }
+        final_lines
+    };
+
+    let replaced_lines: Vec<String> = target_lines
+        .splice(
+            location.start_index..location.start_index + location.length,
+            final_replace_block,
+        )
+        .collect();
+    trace!(
+        "  Successfully spliced changes into target lines. Replaced {} lines.",
+        replaced_lines.len()
+    );
+    Ok(HunkApplyStatus::Applied {
+        location,
+        match_type,
+        replaced_lines,
+    })
 }
 
 /// A trait for strategies that find the location to apply a hunk.
@@ -6083,6 +6229,24 @@ impl<'a> DefaultHunkFinder<'a> {
         Self { options }
     }
 
+    pub fn find_candidate_locations<T: AsRef<str> + Sync>(
+        &self,
+        hunk: &Hunk,
+        target_lines: &[T],
+    ) -> Result<Vec<(HunkLocation, MatchType)>, HunkApplyError> {
+        let match_block = hunk.get_match_block();
+        let min_span = hunk.required_match_span();
+        let mut candidates =
+            self.find_hunk_location_internal(&match_block, target_lines, hunk.old_start_line)?;
+        if min_span > 0 {
+            candidates.retain(|(loc, _)| loc.length >= min_span);
+            if candidates.is_empty() {
+                return Err(HunkApplyError::ContextNotFound);
+            }
+        }
+        Ok(candidates)
+    }
+
     /// Finds optimized search ranges within the target file to perform the fuzzy search.
     ///
     /// This is a performance heuristic. It tries to find an "anchor" line from the
@@ -6099,6 +6263,7 @@ impl<'a> DefaultHunkFinder<'a> {
         // Search radius is this factor times the hunk size, with a minimum.
         const SEARCH_RADIUS_FACTOR: usize = 2;
         const MIN_SEARCH_RADIUS: usize = 15;
+        const MAX_SEARCH_RADIUS: usize = 120;
 
         if hunk_size == 0 {
             return vec![(0, target_lines.len())];
@@ -6139,8 +6304,8 @@ impl<'a> DefaultHunkFinder<'a> {
                         );
                         trace!("        Anchor text: '{}'", anchor_line);
                         let mut ranges = Vec::new();
-                        let search_radius =
-                            (hunk_size * SEARCH_RADIUS_FACTOR).max(MIN_SEARCH_RADIUS);
+                        let search_radius = (hunk_size * SEARCH_RADIUS_FACTOR)
+                            .clamp(MIN_SEARCH_RADIUS, MAX_SEARCH_RADIUS);
 
                         for &occurrence_idx in &occurrences {
                             // Estimate where the hunk would start based on the anchor's position.
@@ -6192,7 +6357,7 @@ impl<'a> DefaultHunkFinder<'a> {
         match_block: &[&str],
         target_lines: &[T],
         old_start_line: Option<usize>,
-    ) -> Result<(HunkLocation, MatchType), HunkApplyError> {
+    ) -> Result<Vec<(HunkLocation, MatchType)>, HunkApplyError> {
         let match_has_entropy = match_block.iter().any(|l| !is_low_entropy_line(l));
 
         trace!(
@@ -6206,13 +6371,13 @@ impl<'a> DefaultHunkFinder<'a> {
             trace!("    Match block is empty (file creation).");
             return if target_lines.is_empty() {
                 trace!("    Target is empty, match successful at (0, 0).");
-                Ok((
+                Ok(vec![(
                     HunkLocation {
                         start_index: 0,
                         length: 0,
                     },
                     MatchType::Exact,
-                ))
+                )])
             } else {
                 trace!("    Target is not empty, match failed.");
                 Err(HunkApplyError::ContextNotFound)
@@ -6247,13 +6412,13 @@ impl<'a> DefaultHunkFinder<'a> {
             match result {
                 Ok(Some(index)) => {
                     debug!("    Found unique exact match at index {}.", index);
-                    return Ok((
+                    return Ok(vec![(
                         HunkLocation {
                             start_index: index,
                             length: match_block.len(),
                         },
                         MatchType::Exact,
-                    ));
+                    )]);
                 }
                 Ok(None) => {} // No exact matches, continue to next strategy.
                 Err(matches) => return Err(HunkApplyError::AmbiguousExactMatch(matches)),
@@ -6306,13 +6471,13 @@ impl<'a> DefaultHunkFinder<'a> {
                         "    Found unique whitespace-insensitive match at index {}.",
                         index
                     );
-                    return Ok((
+                    return Ok(vec![(
                         HunkLocation {
                             start_index: index,
                             length: match_block.len(),
                         },
                         MatchType::ExactIgnoringWhitespace,
-                    ));
+                    )]);
                 }
                 Ok(None) => {} // No matches, continue.
                 Err(matches) => return Err(HunkApplyError::AmbiguousExactMatch(matches)),
@@ -6345,6 +6510,10 @@ impl<'a> DefaultHunkFinder<'a> {
             // Pre-calculate trimmed versions for "loose" matching (ignoring indentation)
             let match_loose_lines: Vec<&str> = match_block.iter().map(|s| s.trim()).collect();
             let match_loose_content = match_loose_lines.join("\n");
+            let match_no_ws: String = match_content
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
 
             let mut best_score = -1.0;
             let mut best_ratio_at_best_score = -1.0;
@@ -6354,8 +6523,8 @@ impl<'a> DefaultHunkFinder<'a> {
             // Define how far to search for different-sized windows.
             // Expand generously based on hunk size so local doc comments or inserted
             // statements don't push the target block outside the search window.
-            let max_expansion = ((len / 2) + 6).clamp(8, 36);
-            let min_reduction = (len / 4).clamp(2, 8);
+            let max_expansion = ((len / 2) + 20).clamp(15, 50);
+            let min_reduction = ((len as f64 * 0.75) as usize).clamp(3, 20);
             let min_len = len.saturating_sub(min_reduction).max(1);
             let max_len = len.saturating_add(max_expansion);
             let fuzz_distance = max_expansion;
@@ -6384,11 +6553,15 @@ impl<'a> DefaultHunkFinder<'a> {
                     let match_content = &match_content;
                     let match_loose_lines = &match_loose_lines;
                     let match_loose_content = &match_loose_content;
+                    let match_no_ws = &match_no_ws;
                     let target_slice = &target_refs[range_start..range_end];
 
                     (min_len..=max_len)
                         .into_par_iter()
                         .filter(move |&window_len| window_len <= target_slice.len())
+                        .filter(move |&window_len| {
+                            len == 0 || window_len >= len.saturating_sub(min_reduction)
+                        })
                         .flat_map(move |window_len| {
                             (0..=target_slice.len() - window_len)
                                 .into_par_iter()
@@ -6403,6 +6576,14 @@ impl<'a> DefaultHunkFinder<'a> {
                                     );
                                     let ratio_lines = diff_lines.ratio();
 
+                                    let window_loose_lines: Vec<&str> =
+                                        window_stripped_lines.iter().map(|s| s.trim()).collect();
+                                    let diff_loose_lines = similar::TextDiff::from_slices(
+                                        &window_loose_lines,
+                                        match_loose_lines,
+                                    );
+                                    let ratio_loose_lines = diff_loose_lines.ratio();
+
                                     let mut capacity = 0;
                                     for line in window_stripped_lines {
                                         capacity += line.len() + 1;
@@ -6414,12 +6595,24 @@ impl<'a> DefaultHunkFinder<'a> {
                                         }
                                         window_content.push_str(line);
                                     }
-
-                                    let diff_words = similar::TextDiff::from_words(
+                                    let ratio_words = similar::TextDiff::from_words(
                                         &window_content,
                                         match_content,
-                                    );
-                                    let ratio_words = diff_words.ratio();
+                                    )
+                                    .ratio();
+                                    let wlc = window_loose_lines.join("\n");
+                                    let ratio_loose_words =
+                                        similar::TextDiff::from_words(&wlc, match_loose_content)
+                                            .ratio();
+
+                                    let window_no_ws: String = window_content
+                                        .chars()
+                                        .filter(|c| !c.is_whitespace())
+                                        .collect();
+                                    let ratio_no_ws =
+                                        similar::TextDiff::from_chars(&window_no_ws, match_no_ws)
+                                            .ratio();
+
                                     // HYBRID SCORING: Give more weight to word-based ratio, as it's
                                     // better at detecting small changes within a line. Line-based
                                     // ratio is still important for overall structure, especially
@@ -6430,34 +6623,23 @@ impl<'a> DefaultHunkFinder<'a> {
                                     // --- LOOSE MATCHING (Ignore Indentation) ---
                                     // Calculate a score based on fully trimmed lines. This helps
                                     // when the patch is nested (e.g. in a markdown list) but the file is flat.
-                                    let window_loose_lines: Vec<&str> =
-                                        window_stripped_lines.iter().map(|s| s.trim()).collect();
-                                    let diff_loose_lines = similar::TextDiff::from_slices(
-                                        &window_loose_lines,
-                                        match_loose_lines,
-                                    );
-                                    let ratio_loose_lines = diff_loose_lines.ratio();
-
-                                    let window_loose_content = window_loose_lines.join("\n");
-                                    let diff_loose_words = similar::TextDiff::from_words(
-                                        &window_loose_content,
-                                        match_loose_content,
-                                    );
-                                    let ratio_loose_words = diff_loose_words.ratio();
                                     let ratio_loose = 0.3 * ratio_loose_lines as f64
                                         + 0.7 * ratio_loose_words as f64;
 
-                                    // The ratio from the `similar` crate already implicitly includes a
-                                    // penalty for size differences. We use the raw ratio as the score.
-                                    // We take the MAX of strict and loose to support both exact indentation and nested patches.
-                                    //
-                                    // We also factor in pure `ratio_lines` and `ratio_loose_lines`. This ensures that multi-anchor
-                                    // hunks spanning across newly inserted comments or code blocks in the target file are not
-                                    // rejected purely because the added word volume dilutes `ratio_words`.
+                                    let ratio_very_loose =
+                                        0.1 * ratio_lines as f64 + 0.9 * ratio_no_ws as f64;
+
+                                    let scale = if window_len > len && len > 0 {
+                                        (window_len + len) as f64 / (2.0 * len as f64)
+                                    } else {
+                                        1.0
+                                    };
+
                                     let ratio = ratio_strict
                                         .max(ratio_loose)
-                                        .max(ratio_lines as f64)
-                                        .max(ratio_loose_lines as f64);
+                                        .max(ratio_very_loose)
+                                        .max(ratio_lines as f64 * scale)
+                                        .max(ratio_loose_lines as f64 * scale);
                                     let score = ratio;
 
                                     (
@@ -6484,10 +6666,14 @@ impl<'a> DefaultHunkFinder<'a> {
                     let match_content = &match_content;
                     let match_loose_lines = &match_loose_lines;
                     let match_loose_content = &match_loose_content;
+                    let match_no_ws = &match_no_ws;
                     let target_slice = &target_refs[range_start..range_end];
 
                     (min_len..=max_len)
                         .filter(move |&window_len| window_len <= target_slice.len())
+                        .filter(move |&window_len| {
+                            len == 0 || window_len >= len.saturating_sub(min_reduction)
+                        })
                         .flat_map(move |window_len| {
                             (0..=target_slice.len() - window_len).map(move |i| {
                                 let window_stripped_lines = &target_slice[i..i + window_len];
@@ -6500,6 +6686,14 @@ impl<'a> DefaultHunkFinder<'a> {
                                 );
                                 let ratio_lines = diff_lines.ratio();
 
+                                let window_loose_lines: Vec<&str> =
+                                    window_stripped_lines.iter().map(|s| s.trim()).collect();
+                                let diff_loose_lines = similar::TextDiff::from_slices(
+                                    &window_loose_lines,
+                                    match_loose_lines,
+                                );
+                                let ratio_loose_lines = diff_loose_lines.ratio();
+
                                 let mut capacity = 0;
                                 for line in window_stripped_lines {
                                     capacity += line.len() + 1;
@@ -6511,10 +6705,22 @@ impl<'a> DefaultHunkFinder<'a> {
                                     }
                                     window_content.push_str(line);
                                 }
+                                let ratio_words =
+                                    similar::TextDiff::from_words(&window_content, match_content)
+                                        .ratio();
+                                let wlc = window_loose_lines.join("\n");
+                                let ratio_loose_words =
+                                    similar::TextDiff::from_words(&wlc, match_loose_content)
+                                        .ratio();
 
-                                let diff_words =
-                                    similar::TextDiff::from_words(&window_content, match_content);
-                                let ratio_words = diff_words.ratio();
+                                let window_no_ws: String = window_content
+                                    .chars()
+                                    .filter(|c| !c.is_whitespace())
+                                    .collect();
+                                let ratio_no_ws =
+                                    similar::TextDiff::from_chars(&window_no_ws, match_no_ws)
+                                        .ratio();
+
                                 // HYBRID SCORING: Give more weight to word-based ratio, as it's
                                 // better at detecting small changes within a line. Line-based
                                 // ratio is still important for overall structure, especially
@@ -6525,34 +6731,23 @@ impl<'a> DefaultHunkFinder<'a> {
                                 // --- LOOSE MATCHING (Ignore Indentation) ---
                                 // Calculate a score based on fully trimmed lines. This helps
                                 // when the patch is nested (e.g. in a markdown list) but the file is flat.
-                                let window_loose_lines: Vec<&str> =
-                                    window_stripped_lines.iter().map(|s| s.trim()).collect();
-                                let diff_loose_lines = similar::TextDiff::from_slices(
-                                    &window_loose_lines,
-                                    match_loose_lines,
-                                );
-                                let ratio_loose_lines = diff_loose_lines.ratio();
-
-                                let window_loose_content = window_loose_lines.join("\n");
-                                let diff_loose_words = similar::TextDiff::from_words(
-                                    &window_loose_content,
-                                    match_loose_content,
-                                );
-                                let ratio_loose_words = diff_loose_words.ratio();
                                 let ratio_loose =
                                     0.3 * ratio_loose_lines as f64 + 0.7 * ratio_loose_words as f64;
 
-                                // The ratio from the `similar` crate already implicitly includes a
-                                // penalty for size differences. We use the raw ratio as the score.
-                                // We take the MAX of strict and loose to support both exact indentation and nested patches.
-                                //
-                                // We also factor in pure `ratio_lines` and `ratio_loose_lines`. This ensures that multi-anchor
-                                // hunks spanning across newly inserted comments or code blocks in the target file are not
-                                // rejected purely because the added word volume dilutes `ratio_words`.
+                                let ratio_very_loose =
+                                    0.1 * ratio_lines as f64 + 0.9 * ratio_no_ws as f64;
+
+                                let scale = if window_len > len && len > 0 {
+                                    (window_len + len) as f64 / (2.0 * len as f64)
+                                } else {
+                                    1.0
+                                };
+
                                 let ratio = ratio_strict
                                     .max(ratio_loose)
-                                    .max(ratio_lines as f64)
-                                    .max(ratio_loose_lines as f64);
+                                    .max(ratio_very_loose)
+                                    .max(ratio_lines as f64 * scale)
+                                    .max(ratio_loose_lines as f64 * scale);
                                 let score = ratio;
 
                                 (
@@ -6587,8 +6782,8 @@ impl<'a> DefaultHunkFinder<'a> {
             }
 
             // Process the collected results sequentially to find the best match and handle tie-breaking.
-            for (score, ratio, ratio_lines, ratio_words, absolute_index, window_len) in
-                all_scored_windows
+            for &(score, ratio, ratio_lines, ratio_words, absolute_index, window_len) in
+                &all_scored_windows
             {
                 // This is the same logic as in the original sequential loop.
                 if score > best_score {
@@ -6637,87 +6832,95 @@ impl<'a> DefaultHunkFinder<'a> {
                 }
             }
 
-            trace!(
-                "    Fuzzy search complete. Best score: {:.3}, best ratio: {:.3}, potential matches: {:?}",
-                best_score,
-                best_ratio_at_best_score,
-                potential_matches
-            );
+            let threshold = f64::from(self.options.fuzz_factor);
+            let mut passing: Vec<(f64, usize, usize)> = all_scored_windows
+                .iter()
+                .filter(|(s, r, _, _, _, _)| *s >= threshold || *r >= threshold)
+                .map(|(s, _, _, _, idx, len)| (*s, *idx, *len))
+                .collect();
+            passing.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
-            // Check if the best match found meets the user-defined threshold.
-            if best_ratio_at_best_score >= f64::from(self.options.fuzz_factor) {
-                if potential_matches.len() == 1 {
-                    let (start, len) = potential_matches[0];
-                    debug!(
-                        "    Found best fuzzy match at index {} (length {}, similarity: {:.3} >= threshold: {:.3}).",
-                        start, len, best_ratio_at_best_score, self.options.fuzz_factor
-                    );
-                    return Ok((
+            if !passing.is_empty() {
+                let mut candidates: Vec<(HunkLocation, MatchType)> = Vec::new();
+                let top_score = passing[0].0;
+
+                let mut top_candidates = Vec::new();
+                for &(score, start, len) in &passing {
+                    if (top_score - score).abs() < 1e-9
+                        && !top_candidates.iter().any(|&(s, _)| s == start)
+                    {
+                        top_candidates.push((start, len));
+                    }
+                }
+
+                if top_candidates.len() > 1 {
+                    let iter = top_candidates.iter().map(|&(start, _)| start);
+                    match Self::tie_break_with_line_number(
+                        iter,
+                        old_start_line,
+                        "fuzzy",
+                        match_has_entropy,
+                    ) {
+                        Ok(Some(best_start)) => {
+                            let best_len = top_candidates
+                                .iter()
+                                .find(|&&(s, _)| s == best_start)
+                                .unwrap()
+                                .1;
+                            candidates.push((
+                                HunkLocation {
+                                    start_index: best_start,
+                                    length: best_len,
+                                },
+                                MatchType::Fuzzy { score: top_score },
+                            ));
+                        }
+                        Ok(None) => unreachable!(),
+                        Err(matches) => {
+                            let locs = top_candidates
+                                .into_iter()
+                                .filter(|&(s, _)| matches.contains(&s))
+                                .collect();
+                            return Err(HunkApplyError::AmbiguousFuzzyMatch(locs));
+                        }
+                    }
+                } else {
+                    let (start, len) = top_candidates[0];
+                    candidates.push((
                         HunkLocation {
                             start_index: start,
                             length: len,
                         },
-                        MatchType::Fuzzy {
-                            score: best_ratio_at_best_score,
-                        },
+                        MatchType::Fuzzy { score: top_score },
                     ));
                 }
-                // AMBIGUOUS FUZZY MATCH - TRY TO TIE-BREAK
-                if let Some(line) = old_start_line {
-                    if !match_has_entropy {
-                        trace!("    Ambiguous fuzzy match: Match block has low entropy, refusing to tie-break by line number.");
-                        return Err(HunkApplyError::AmbiguousFuzzyMatch(potential_matches));
+
+                let mut counts_per_start = std::collections::HashMap::new();
+                for (loc, _) in &candidates {
+                    *counts_per_start.entry(loc.start_index).or_insert(0) += 1;
+                }
+
+                for &(score, start, len) in &passing {
+                    let count = counts_per_start.entry(start).or_insert(0);
+                    if *count < 5
+                        && !candidates
+                            .iter()
+                            .any(|(loc, _)| loc.start_index == start && loc.length == len)
+                    {
+                        candidates.push((
+                            HunkLocation {
+                                start_index: start,
+                                length: len,
+                            },
+                            MatchType::Fuzzy { score },
+                        ));
+                        *count += 1;
                     }
-
-                    trace!(
-                            "    Ambiguous fuzzy match found at {:?}. Attempting to tie-break using line number hint: {}",
-                            potential_matches,
-                            line
-                        );
-                    let mut closest_match: Option<(usize, usize)> = None;
-                    let mut min_distance = usize::MAX;
-                    let mut is_tie = false;
-
-                    for &(match_index, match_len) in &potential_matches {
-                        // Hunk line numbers are 1-based, indices are 0-based.
-                        let distance = (match_index + 1).abs_diff(line);
-                        trace!(
-                            "      Candidate {:?}: distance from line hint {} is {}",
-                            (match_index, match_len),
-                            line,
-                            distance
-                        );
-                        if distance < min_distance {
-                            min_distance = distance;
-                            closest_match = Some((match_index, match_len));
-                            is_tie = false;
-                        } else if distance == min_distance {
-                            is_tie = true;
-                        }
-                    }
-
-                    if !is_tie {
-                        if let Some((start, len)) = closest_match {
-                            debug!(
-                                    "    Tie-broke ambiguous fuzzy match using line number. Best match is at index {} (length {}, similarity: {:.3} >= threshold: {:.3}).",
-                                    start, len, best_ratio_at_best_score, self.options.fuzz_factor
-                                );
-                            return Ok((
-                                HunkLocation {
-                                    start_index: start,
-                                    length: len,
-                                },
-                                MatchType::Fuzzy {
-                                    score: best_ratio_at_best_score,
-                                },
-                            ));
-                        }
-                    } else {
-                        trace!("    Tie-breaking failed: multiple fuzzy matches are equidistant from the line number hint.");
+                    if candidates.len() >= 20 {
+                        break;
                     }
                 }
-                warn!("    Ambiguous fuzzy match: Multiple locations found with same top score ({:.3}): {:?}. Skipping.", best_ratio_at_best_score, potential_matches);
-                return Err(HunkApplyError::AmbiguousFuzzyMatch(potential_matches));
+                return Ok(candidates);
             } else if best_ratio_at_best_score >= 0.0 {
                 // Did not meet threshold
                 let (start, len) = potential_matches.first().copied().unwrap_or((0, 0));
@@ -6768,7 +6971,7 @@ impl<'a> DefaultHunkFinder<'a> {
                     ratio, effective_threshold
                 );
                 // We are matching the entire file from the beginning.
-                return Ok((
+                return Ok(vec![(
                     HunkLocation {
                         start_index: 0,
                         length: target_lines.len(),
@@ -6776,7 +6979,7 @@ impl<'a> DefaultHunkFinder<'a> {
                     MatchType::Fuzzy {
                         score: ratio as f64,
                     },
-                ));
+                )]);
             } else {
                 trace!(
                     "    End-of-file fuzzy match ratio {:.3} did not meet effective threshold {:.3}.",
@@ -6939,8 +7142,11 @@ impl<'a> HunkFinder for DefaultHunkFinder<'a> {
         hunk: &Hunk,
         target_lines: &[T],
     ) -> Result<(HunkLocation, MatchType), HunkApplyError> {
-        let match_block = hunk.get_match_block();
-        self.find_hunk_location_internal(&match_block, target_lines, hunk.old_start_line)
+        let candidates = self.find_candidate_locations(hunk, target_lines)?;
+        candidates
+            .into_iter()
+            .next()
+            .ok_or(HunkApplyError::ContextNotFound)
     }
 }
 
