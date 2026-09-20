@@ -2,3 +2,9 @@
 
 # IDE
 .vscode
+
+# Python & Linters
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.pytest_cache/
