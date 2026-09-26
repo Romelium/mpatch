@@ -510,7 +510,7 @@ def apply_directory(
     Applies a diff containing multiple patches to a target directory.
 
     Args:
-        diff (str): The patch content containing one or more file changes.
+        diff (str): The patch content containing one or more file changes (Markdown, Unified, Aider, or Conflict Markers).
         target_dir (str | os.PathLike): The base directory to apply the patches.
         fuzz_factor (float, optional): Similarity threshold (0.0 to 1.0). Default is 0.7.
         dry_run (bool, optional): If True, previews changes without writing to disk. Default is False.

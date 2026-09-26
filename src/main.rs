@@ -292,6 +292,11 @@ impl Anonymizer {
 type ReportData = (Arc<Mutex<File>>, HashMap<PathBuf, String>, Anonymizer);
 
 /// Logs the reasons why hunks failed to apply.
+///
+/// # Arguments
+///
+/// * `apply_result` - The [`mpatch::ApplyResult`] report containing per-hunk status outcomes.
+/// * `patch` - The original [`Patch`] being applied, used to retrieve failed hunk content for display.
 fn log_failed_hunks(apply_result: &mpatch::ApplyResult, patch: &Patch) {
     if !log::log_enabled!(log::Level::Warn) {
         return;
@@ -384,6 +389,20 @@ impl Write for TeeWriter {
 }
 
 /// Sets up the global logger, creating a report file if verbosity is >= 4.
+///
+/// # Arguments
+///
+/// * `args` - Parsed command-line arguments.
+/// * `patch_content` - Raw string content of the input patch.
+/// * `patches` - Slice of parsed [`Patch`] objects.
+///
+/// # Returns
+///
+/// `Ok(Some(ReportData))` if debug reporting mode is active, `Ok(None)` otherwise.
+///
+/// # Errors
+///
+/// Returns an error if initializing the report file fails.
 fn setup_logging_and_reporting(
     args: &Args,
     patch_content: &str,
@@ -430,6 +449,21 @@ fn setup_logging_and_reporting(
 }
 
 /// Creates the report file, writes the header, and returns a shared pointer to it.
+///
+/// # Arguments
+///
+/// * `args` - Parsed command-line arguments.
+/// * `patch_content` - Raw string content of the input patch.
+/// * `patches` - Slice of parsed [`Patch`] objects.
+/// * `anonymizer` - Path anonymizer used to redact sensitive paths from metadata.
+///
+/// # Returns
+///
+/// A tuple containing the thread-safe report file handle and a map of original target file contents.
+///
+/// # Errors
+///
+/// Returns an error if creating or writing to the report file fails.
 #[allow(clippy::type_complexity)]
 fn create_report_file(
     args: &Args,
@@ -509,6 +543,15 @@ fn create_report_file(
 }
 
 /// Writes the final sections of the debug report, including the discrepancy check.
+///
+/// # Arguments
+///
+/// * `file_arc` - Thread-safe handle to the report file.
+/// * `args` - Parsed command-line arguments.
+/// * `all_patches` - Slice of all patches attempted.
+/// * `batch_result` - Optional batch result if patch application was attempted.
+/// * `original_contents` - Map of original target file contents prior to patching.
+/// * `anonymizer` - Path anonymizer used to redact sensitive paths.
 fn write_report_footer(
     file_arc: &Arc<Mutex<File>>,
     args: &Args,
@@ -677,6 +720,14 @@ fn write_report_footer(
 /// Formats a [`Patch`] struct into a normalized string for robust discrepancy checking.
 /// It excludes context lines, ignores interleaving of +/- lines, removes self-replacements,
 /// and sorts additions/deletions globally to ignore hunk ordering differences.
+///
+/// # Arguments
+///
+/// * `patch` - The [`Patch`] to normalize.
+///
+/// # Returns
+///
+/// A normalized string representing the patch edits for comparison.
 fn format_normalized_patch(patch: &Patch) -> String {
     let mut all_removed = Vec::new();
     let mut all_added = Vec::new();
@@ -735,6 +786,14 @@ fn format_normalized_patch(patch: &Patch) -> String {
 
 /// Replaces sensitive paths in command line arguments with placeholders.
 /// This helps protect user privacy when sharing debug reports.
+///
+/// # Arguments
+///
+/// * `args` - Parsed command-line arguments.
+///
+/// # Returns
+///
+/// An anonymized command-line invocation string.
 fn anonymize_command_args(args: &Args) -> String {
     let mut anonymized_args = Vec::new();
     let mut args_iter = std::env::args();
@@ -778,6 +837,15 @@ fn anonymize_command_args(args: &Args) -> String {
 /// Compares two patches for semantic equivalence, focusing on the actual line changes.
 /// It ignores context lines, hunk headers, interleaving, self-replacements, and hunk order
 /// by comparing their normalized string representations.
+///
+/// # Arguments
+///
+/// * `original` - The original input patch.
+/// * `recreated` - The patch regenerated from the modified target files.
+///
+/// # Returns
+///
+/// `true` if the normalized patches are identical, `false` otherwise.
 fn compare_patches(original: &Patch, recreated: &Patch) -> bool {
     format_normalized_patch(original) == format_normalized_patch(recreated)
 }

@@ -20,6 +20,8 @@ if sys.platform == "win32":
 
 # --- ANSI Color Helpers ---
 class Style:
+    """ANSI terminal styling and color escape sequences."""
+
     RESET = "\033[0m"
     BOLD = "\033[1m"
     DIM = "\033[2m"
@@ -31,30 +33,35 @@ class Style:
 
 
 def supports_color() -> bool:
+    """Determines whether the terminal output environment supports ANSI color codes."""
     if os.environ.get("NO_COLOR") or os.environ.get("TERM") == "dumb":
         return False
     return sys.stdout.isatty()
 
 
 def info(msg: str) -> None:
+    """Prints a styled informational message with a blue indicator."""
     c = Style.BLUE + Style.BOLD if supports_color() else ""
     r = Style.RESET if supports_color() else ""
     print(f"{c}==>{r} {msg}")
 
 
 def success(msg: str) -> None:
+    """Prints a styled success message with a green checkmark."""
     c = Style.GREEN + Style.BOLD if supports_color() else ""
     r = Style.RESET if supports_color() else ""
     print(f"{c}✔{r} {msg}")
 
 
 def warn(msg: str) -> None:
+    """Prints a styled warning message with a yellow alert symbol."""
     c = Style.YELLOW + Style.BOLD if supports_color() else ""
     r = Style.RESET if supports_color() else ""
     print(f"{c}▲ WARNING:{r} {msg}")
 
 
 def error(msg: str) -> None:
+    """Prints a styled error message with a red cross to stderr."""
     c = Style.RED + Style.BOLD if supports_color() else ""
     r = Style.RESET if supports_color() else ""
     print(f"{c}✖ ERROR:{r} {msg}", file=sys.stderr)
@@ -74,6 +81,7 @@ def run_cmd(
     check: bool = True,
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    """Executes a subprocess command with environment merging and error capturing."""
     cwd_str = f" (in {cwd})" if cwd else ""
     dim = Style.DIM if supports_color() else ""
     reset = Style.RESET if supports_color() else ""
@@ -388,6 +396,8 @@ def run_tool_diagnostics(
 
 # --- Rollback Context ---
 class ReleaseContext:
+    """Tracks modified files during the release process with rollback capabilities."""
+
     def __init__(self, root: Path, dry_run: bool):
         self.root = root
         self.dry_run = dry_run
@@ -395,10 +405,12 @@ class ReleaseContext:
         self.committed = False
 
     def track(self, path: Path) -> None:
+        """Registers a file path as modified for rollback tracking."""
         if path not in self.modified_files:
             self.modified_files.append(path)
 
     def rollback(self) -> None:
+        """Reverts all tracked files to git HEAD state in case of failure."""
         if self.dry_run or self.committed or not self.modified_files:
             return
         warn("Rolling back modified files to git HEAD state...")

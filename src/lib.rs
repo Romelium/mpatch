@@ -25,6 +25,8 @@
 //!   locations if an initial fuzzy window fails validation (e.g., orphan additions).
 //! - **Statement Re-alignment**: Recognizing statements across line-break or
 //!   formatting differences to prevent multi-line refactoring mismatches.
+//! - **Wildcard & Ellipsis Matching**: Recognizing code omissions (`...`, `// ... existing code ...`)
+//!   formatting differences to prevent multi-line refactoring mismatches.
 //!
 //! ## Format Support & Limitations
 //!
@@ -143,12 +145,13 @@
 //!   directly, without needing markdown fences.
 //! - [`parse_aider()`]: Parses a string containing Aider-style search/replace blocks
 //!   (`<<<<<<< SEARCH`, `=======`, `>>>>>>> REPLACE`) into patches.
+//! - [`parse_aider_from_lines()`]: Parses an iterator of lines containing Aider-style search/replace blocks.
 //! - [`parse_conflict_markers()`]: Parses a string containing conflict markers
 //!   (`<<<<`, `====`, `>>>>`) into patches.
 //! - [`parse_patches_from_lines()`]: The lowest-level parser. It operates on an iterator
 //!   of lines, which is useful for streaming or avoiding large string allocations.
 //!
-//! You can also use [`detect_patch()`] to identify the format (Markdown, Unified, or Conflict)
+//! You can also use [`detect_patch()`] to identify the format (Markdown, Unified, Aider, or Conflict)
 //! without parsing the full content.
 //!
 //! #### 2. Applying
@@ -179,6 +182,10 @@
 //! - [`find_hunk_location()`]: Finds the location to apply a hunk to a given text content without modifying it.
 //! - [`find_hunk_location_in_lines()`]: Finds the location to apply a hunk to a slice of lines without modifying it.
 //! - [`DefaultHunkFinder`]: The default, built-in search strategy for locating hunks and candidate match locations.
+//! - [`is_ellipsis_line()`]: Tests whether a line represents an omitted code ellipsis wildcard.
+//! - [`is_plausible_file_path()`]: Validates whether a candidate string represents a plausible file path.
+//! - [`extract_file_path_from_line()`]: Extracts a target file path from conversational headings or preceding markdown lines.
+//! - [`normalize_candidate_path()`]: Normalizes relative paths by stripping enclosing delimiters and prefixes.
 //!
 //! ### Core Data Structures
 //!
@@ -209,6 +216,10 @@
 //! - **Smart Indentation:** When applying a patch via fuzzy matching, `mpatch`
 //!   dynamically adjusts the indentation of added lines to match the surrounding
 //!   code in the target file, preventing style corruption.
+//! - **Wildcard Matching:** When applying search/replace hunks containing wildcard ellipsis lines
+//!   (such as `...` or `// ... existing code ...`), `mpatch` reconstructs the multi-line gaps
+//!   between anchors, preserving untouched intermediate code while strictly guarding against
+//!   runaway gaps or syntax false positives.
 //!
 //! ## Advanced Usage
 //!
@@ -3220,6 +3231,14 @@ fn count_leading_backticks(s: &str) -> usize {
 }
 
 /// Checks whether a line represents an Aider search/original fence (e.g. `<<<<<<< SEARCH`, `<<<<<<< ORIGINAL`).
+///
+/// # Arguments
+///
+/// * `trimmed` - A string slice with leading whitespace trimmed.
+///
+/// # Returns
+///
+/// `true` if `trimmed` begins with `<<<<` and an accepted search keyword, `false` otherwise.
 #[inline]
 fn is_aider_search_fence(trimmed: &str) -> bool {
     if trimmed.starts_with("<<<<") {
@@ -3237,6 +3256,14 @@ fn is_aider_search_fence(trimmed: &str) -> bool {
 }
 
 /// Extracts an optional file path from an Aider search fence line (e.g. `<<<<<<< SEARCH path/to/file` or `<<<<<<< ORIGINAL path/to/file`).
+///
+/// # Arguments
+///
+/// * `trimmed` - A string slice with leading whitespace trimmed.
+///
+/// # Returns
+///
+/// `Some(PathBuf)` containing the normalized path if present on the fence line, or `None`.
 fn extract_file_path_from_search_fence(trimmed: &str) -> Option<PathBuf> {
     if trimmed.starts_with("<<<<") {
         let after = trimmed.trim_start_matches('<').trim_start();
@@ -3255,6 +3282,14 @@ fn extract_file_path_from_search_fence(trimmed: &str) -> Option<PathBuf> {
 }
 
 /// Checks whether a line represents an Aider dividing fence (`=======`).
+///
+/// # Arguments
+///
+/// * `trimmed` - A string slice with leading whitespace trimmed.
+///
+/// # Returns
+///
+/// `true` if `trimmed` begins with `====`, `false` otherwise.
 #[inline]
 fn is_aider_divide_fence(trimmed: &str) -> bool {
     if trimmed.starts_with("====") {
@@ -3268,6 +3303,14 @@ fn is_aider_divide_fence(trimmed: &str) -> bool {
 }
 
 /// Checks whether a line represents an Aider replace/updated fence (e.g. `>>>>>>> REPLACE`, `>>>>>>> UPDATED`).
+///
+/// # Arguments
+///
+/// * `trimmed` - A string slice with leading whitespace trimmed.
+///
+/// # Returns
+///
+/// `true` if `trimmed` begins with `>>>>` and an accepted replace keyword, `false` otherwise.
 #[inline]
 fn is_aider_replace_fence(trimmed: &str) -> bool {
     if trimmed.starts_with(">>>>") {
@@ -3289,6 +3332,37 @@ fn is_aider_replace_fence(trimmed: &str) -> bool {
 }
 
 /// Determines whether a line represents an ellipsis / wildcard indicating omitted code.
+///
+/// This function identifies omitted code markers across a wide variety of comment and syntax
+/// conventions (such as `...`, `…`, `// ... existing code ...`, `# ... rest of function ...`,
+/// `<!-- ... -->`, `/* ... */`, `[...]`, etc.) while strictly rejecting valid code constructs
+/// that happen to contain dots or variadic syntax (such as JS/TS object spread `{ ...props }`,
+/// Python array slicing `tensor[..., 0]`, C variadics `printf(fmt, ...)`, and conversational text).
+///
+/// # Arguments
+///
+/// * `line` - A string slice containing the single line of text to evaluate.
+///
+/// # Returns
+///
+/// `true` if the line represents an ellipsis or omitted code wildcard, `false` otherwise.
+///
+/// # Examples
+///
+/// ```
+/// use mpatch::is_ellipsis_line;
+///
+/// assert!(is_ellipsis_line("..."));
+/// assert!(is_ellipsis_line("    // ... existing code ..."));
+/// assert!(is_ellipsis_line("# ... rest of function ..."));
+/// assert!(is_ellipsis_line("<!-- ... -->"));
+/// assert!(is_ellipsis_line("[...]"));
+///
+/// // Code constructs using spread, slicing, or variadics are not ellipsis lines:
+/// assert!(!is_ellipsis_line("const copy = [...items];"));
+/// assert!(!is_ellipsis_line("let x = tensor[..., 0];"));
+/// assert!(!is_ellipsis_line("fn log(...args: any[]) {}"));
+/// ```
 pub fn is_ellipsis_line(line: &str) -> bool {
     let trimmed = line.trim();
     if trimmed.is_empty() {
@@ -3497,6 +3571,39 @@ pub fn is_ellipsis_line(line: &str) -> bool {
 }
 
 /// Normalizes and cleans a candidate relative path string.
+///
+/// Strips enclosing quotes, backticks, brackets, asterisks, leading relative prefixes
+/// (`./`, `.\`), diff header prefixes (`a/`, `b/`), and trailing line/column number markers
+/// (e.g., `:42`, `:10:5`).
+///
+/// # Arguments
+///
+/// * `s` - A string slice containing the candidate path string to clean.
+///
+/// # Returns
+///
+/// `Some(PathBuf)` containing the normalized relative path, or `None` if the input is empty or invalid.
+///
+/// # Examples
+///
+/// ```
+/// use mpatch::normalize_candidate_path;
+/// use std::path::PathBuf;
+///
+/// assert_eq!(
+///     normalize_candidate_path("`src/main.rs`"),
+///     Some(PathBuf::from("src/main.rs"))
+/// );
+/// assert_eq!(
+///     normalize_candidate_path("b/src/components/Button.tsx:42:10"),
+///     Some(PathBuf::from("src/components/Button.tsx"))
+/// );
+/// assert_eq!(
+///     normalize_candidate_path("./config/.env.local"),
+///     Some(PathBuf::from("config/.env.local"))
+/// );
+/// assert_eq!(normalize_candidate_path(""), None);
+/// ```
 pub fn normalize_candidate_path(s: &str) -> Option<PathBuf> {
     let mut s = s.trim();
     if s.is_empty() {
@@ -3549,6 +3656,36 @@ pub fn normalize_candidate_path(s: &str) -> Option<PathBuf> {
 }
 
 /// Determines whether a string looks like a plausible file path rather than conversational prose.
+///
+/// Evaluates candidate strings by checking for path separators (`/`, `\`), standard file
+/// extensions, known special filenames (such as `Dockerfile`, `Makefile`, `.gitignore`),
+/// and rejecting conversational English stop words, URLs, sentences, mathematical expressions,
+/// and illegal filename characters.
+///
+/// # Arguments
+///
+/// * `s` - A string slice containing the candidate text to inspect.
+///
+/// # Returns
+///
+/// `true` if `s` is a plausible file path, `false` otherwise.
+///
+/// # Examples
+///
+/// ```
+/// use mpatch::is_plausible_file_path;
+///
+/// assert!(is_plausible_file_path("src/main.rs"));
+/// assert!(is_plausible_file_path("components/Button.test.tsx"));
+/// assert!(is_plausible_file_path(".gitignore"));
+/// assert!(is_plausible_file_path("Dockerfile"));
+/// assert!(is_plausible_file_path("config/.env.production"));
+///
+/// // Conversational English, web URLs, and sentences are rejected:
+/// assert!(!is_plausible_file_path("Here is the code in main.rs:"));
+/// assert!(!is_plausible_file_path("https://example.com/file.rs"));
+/// assert!(!is_plausible_file_path("Please check the following file"));
+/// ```
 pub fn is_plausible_file_path(s: &str) -> bool {
     let mut s = s.trim();
     while (s.starts_with('"') && s.ends_with('"'))
@@ -3716,6 +3853,45 @@ pub fn is_plausible_file_path(s: &str) -> bool {
 }
 
 /// Extracts a plausible file path from a line preceding or introducing an Aider block.
+///
+/// Searches for target file paths in common AI and developer conversational conventions:
+/// - Diff header lines (`diff --git a/path b/path`, `--- a/path`, `+++ b/path`)
+/// - Quoted or backtick-enclosed paths (`` `src/file.rs` ``, `"src/file.rs"`, `'src/file.rs'`)
+/// - Markdown links (`[Label](path/to/file.rs)`)
+/// - Markdown headings or list items (`### src/models/user.rs`, `1. config.toml:`)
+/// - Code comments or conversational prompts (`// filepath: internal/auth.go`, `In src/app.py:`)
+///
+/// # Arguments
+///
+/// * `line` - A string slice containing the candidate line preceding or introducing a diff block.
+///
+/// # Returns
+///
+/// `Some(PathBuf)` containing the extracted file path if a plausible path is found, or `None`.
+///
+/// # Examples
+///
+/// ```
+/// use mpatch::extract_file_path_from_line;
+/// use std::path::PathBuf;
+///
+/// assert_eq!(
+///     extract_file_path_from_line("Update `src/server.ts` with the new handler:"),
+///     Some(PathBuf::from("src/server.ts"))
+/// );
+/// assert_eq!(
+///     extract_file_path_from_line("// filepath: internal/auth/token.go"),
+///     Some(PathBuf::from("internal/auth/token.go"))
+/// );
+/// assert_eq!(
+///     extract_file_path_from_line("### src/models/user.py:42"),
+///     Some(PathBuf::from("src/models/user.py"))
+/// );
+/// assert_eq!(
+///     extract_file_path_from_line("Here is the updated implementation:"),
+///     None
+/// );
+/// ```
 pub fn extract_file_path_from_line(line: &str) -> Option<PathBuf> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
@@ -3858,14 +4034,15 @@ pub fn extract_file_path_from_line(line: &str) -> Option<PathBuf> {
 ///
 /// This function scans the content efficiently (without parsing the full structure)
 /// to determine if it contains Markdown code blocks, standard unified diff headers,
-/// or conflict markers.
+/// Aider search/replace blocks, or conflict markers.
 ///
 /// ## Behavior
 ///
 /// The detection follows this priority:
 /// 1. **Markdown**: If code fences (3+ backticks) are found containing diff signatures, it is treated as Markdown.
 /// 2. **Unified**: If `--- a/` or `diff --git` headers are found, it is treated as a Unified Diff.
-/// 3. **Conflict**: If `<<<<` markers are found, it is treated as Conflict Markers.
+/// 3. **Aider**: If `<<<<<<< SEARCH` / `ORIGINAL` markers are found, it is treated as Aider search/replace blocks.
+/// 4. **Conflict**: If `<<<<` markers are found, it is treated as Conflict Markers.
 ///
 /// # Arguments
 ///
@@ -3884,6 +4061,9 @@ pub fn extract_file_path_from_line(line: &str) -> Option<PathBuf> {
 ///
 /// let raw = "--- a/f\n+++ b/f\n@@ -1 +1 @@";
 /// assert_eq!(detect_patch(raw), PatchFormat::Unified);
+///
+/// let aider = "app.py\n<<<<<<< SEARCH\nold\n=======\nnew\n>>>>>>> REPLACE";
+/// assert_eq!(detect_patch(aider), PatchFormat::Aider);
 /// ```
 pub fn detect_patch(content: &str) -> PatchFormat {
     let mut lines = content.lines().peekable();
@@ -3984,6 +4164,8 @@ pub fn detect_patch(content: &str) -> PatchFormat {
 /// 1.  **Markdown:** Code blocks fenced with backticks (e.g., ` ```diff `) containing
 ///     diff content. This is the standard output format for AI coding assistants.
 /// 2.  **Unified Diff:** Standard diffs containing `--- a/path` and `+++ b/path` headers.
+/// 3.  **Aider Search/Replace:** Blocks delimited by `<<<<<<< SEARCH` (or `ORIGINAL`), `=======`,
+///     and `>>>>>>> REPLACE` (or `UPDATED`). File paths are detected automatically.
 /// 3.  **Conflict Markers:** Blocks delimited by `<<<<`, `====`, and `>>>>`. These are
 ///     parsed into patches where the "old" content is removed and the "new" content is added.
 ///
@@ -3994,6 +4176,7 @@ pub fn detect_patch(content: &str) -> PatchFormat {
 ///
 /// - If **Markdown** is detected, it extracts patches from all valid code blocks.
 /// - If **Unified Diff** headers are detected, it parses the entire string as a raw diff.
+/// - If **Aider Search/Replace** blocks are detected, it parses them into patches.
 /// - If **Conflict Markers** are detected, it parses the blocks into patches targeting a generic file path.
 /// - If the format is **Unknown**, it attempts to parse the content as a raw diff
 ///   as a fallback. This allows parsing fragments that might lack full file headers
@@ -4048,6 +4231,26 @@ pub fn detect_patch(content: &str) -> PatchFormat {
 ///
 /// let patches = parse_auto(raw).unwrap();
 /// assert_eq!(patches.len(), 1);
+/// ````
+///
+/// **Parsing Aider Search/Replace Blocks:**
+/// ````
+/// use mpatch::parse_auto;
+///
+/// let aider = r#"
+/// src/app.py
+/// <<<<<<< SEARCH
+/// def run():
+///     old_logic()
+/// =======
+/// def run():
+///     new_logic()
+/// >>>>>>> REPLACE
+/// "#;
+///
+/// let patches = parse_auto(aider).unwrap();
+/// assert_eq!(patches.len(), 1);
+/// assert_eq!(patches[0].file_path.to_str(), Some("src/app.py"));
 /// ````
 ///
 /// **Parsing Conflict Markers:**
@@ -4126,10 +4329,11 @@ pub fn parse_auto(content: &str) -> Result<Vec<Patch>, ParseError> {
 /// at the top level of the block. Diffs inside nested code blocks (e.g., examples within documentation)
 /// are ignored. Blocks that do not contain recognizable patch signatures are skipped efficiently.
 ///
-/// It supports two formats within the blocks:
+/// It supports the following formats within the blocks:
 /// 1. **Unified Diff:** Standard `--- a/file`, `+++ b/file`, `@@ ... @@` format.
-/// 2. **Conflict Markers:** `<<<<`, `====`, `>>>>` blocks. Since these lack file headers,
-///    patches will be assigned a generic file path (`patch_target`).
+/// 2. **Aider Search/Replace:** `<<<<<<< SEARCH`, `=======`, `>>>>>>> REPLACE` blocks.
+/// 3. **Conflict Markers:** `<<<<`, `====`, `>>>>` blocks. Since these lack file headers,
+///    patches will be assigned a generic file path (`patch_target`) unless a preceding path is found.
 ///
 /// For automatic format detection (supporting raw diffs and conflict markers outside of markdown),
 /// use [`parse_auto()`].
@@ -4293,7 +4497,11 @@ fn has_patch_signature_at_level_1<S: AsRef<str>>(lines: &[S]) -> bool {
     false
 }
 
-/// Helper function to parse a block of lines that could be Unified or Conflict.
+/// Helper function to parse a block of lines that could be Unified, Aider, or Conflict.
+///
+/// This consolidates the fallback logic inside [`parse_diffs`]. It first
+/// attempts standard unified diff parsing; if no patches or headers are found,
+/// it attempts Aider search/replace parsing, and finally falls back to parsing conflict markers.
 ///
 /// This consolidates the fallback logic previously inside [`parse_diffs`]. It first
 /// attempts standard unified diff parsing; if no patches or headers are found,
@@ -4379,6 +4587,19 @@ fn parse_generic_block_lines(
 }
 
 /// Constructs a structured [`Hunk`] from Aider `SEARCH` and `REPLACE` blocks.
+///
+/// Aligns the search and replace lines using [`similar::TextDiff`], normalizing wildcard
+/// ellipsis lines and generating corresponding context (` `), addition (`+`), and deletion (`-`)
+/// hunk lines.
+///
+/// # Arguments
+///
+/// * `search_lines` - Lines from the `SEARCH` / `ORIGINAL` block.
+/// * `replace_lines` - Lines from the `REPLACE` / `UPDATED` block.
+///
+/// # Returns
+///
+/// A structured [`Hunk`] representing the diff between the two blocks.
 fn create_hunk_from_search_replace(search_lines: &[String], replace_lines: &[String]) -> Hunk {
     let mut search_norm = Vec::with_capacity(search_lines.len());
     for s in search_lines {
@@ -4528,7 +4749,39 @@ pub fn parse_aider(content: &str) -> Vec<Patch> {
 
 /// Parses an iterator of lines containing "Aider" style search/replace blocks.
 ///
-/// See [`parse_aider`] for details.
+/// This is the line-iterator counterpart to [`parse_aider`]. It processes lines sequentially,
+/// extracting search and replace fences (`<<<<<<< SEARCH` / `ORIGINAL`, `=======`,
+/// `>>>>>>> REPLACE` / `UPDATED`), reconstructing context and changes into structured [`Hunk`]
+/// objects, and grouping consecutive hunks for the same file into unified [`Patch`] instances.
+///
+/// # Arguments
+///
+/// * `lines` - An iterator yielding string slices for each line.
+/// * `default_file_path` - An optional fallback [`PathBuf`] to use if a block does not specify a file.
+///
+/// # Returns
+///
+/// A vector of [`Patch`] objects parsed from the lines.
+///
+/// # Examples
+///
+/// ```
+/// use mpatch::parse_aider_from_lines;
+///
+/// let lines = vec![
+///     "src/lib.rs",
+///     "<<<<<<< SEARCH",
+///     "fn old() {}",
+///     "=======",
+///     "fn new() {}",
+///     ">>>>>>> REPLACE",
+/// ];
+///
+/// let patches = parse_aider_from_lines(lines.into_iter(), None);
+/// assert_eq!(patches.len(), 1);
+/// assert_eq!(patches[0].file_path.to_str(), Some("src/lib.rs"));
+/// assert_eq!(patches[0].hunks[0].added_lines(), vec!["fn new() {}"]);
+/// ```
 pub fn parse_aider_from_lines<'a, I>(lines: I, default_file_path: Option<PathBuf>) -> Vec<Patch>
 where
     I: Iterator<Item = &'a str>,
@@ -4693,6 +4946,15 @@ where
     merged_patches
 }
 
+/// Splits a slice of lines into segments separated by ellipsis wildcard lines.
+///
+/// # Arguments
+///
+/// * `lines` - Slice of lines to split around ellipsis boundaries.
+///
+/// # Returns
+///
+/// A vector of line segments excluding the ellipsis separator lines.
 fn split_lines_by_ellipsis(lines: &[String]) -> Vec<Vec<String>> {
     let mut segs = Vec::new();
     let mut current = Vec::new();
@@ -6693,6 +6955,15 @@ fn find_statement_match_in_block(
     best_match
 }
 
+/// Checks whether an entire slice of lines consists solely of low-entropy syntax tokens.
+///
+/// # Arguments
+///
+/// * `seg` - Slice of string slices to check.
+///
+/// # Returns
+///
+/// `true` if every line in `seg` is low-entropy, `false` otherwise.
 fn is_low_entropy_segment(seg: &[&str]) -> bool {
     seg.iter().all(|l| is_low_entropy_line(l))
 }
@@ -8856,6 +9127,25 @@ impl<'a> DefaultHunkFinder<'a> {
         }
     }
 
+    /// Locates candidate target windows for a multi-segment hunk split by wildcard ellipsis lines.
+    ///
+    /// Matches individual segments in the target lines and chains consecutive segments together
+    /// within bounded gap distances, ensuring anchors appear in the correct forward sequence without
+    /// runaway gaps or low-entropy anchor corruption.
+    ///
+    /// # Arguments
+    ///
+    /// * `segments` - Slice of non-ellipsis line segments to match in sequence.
+    /// * `target_lines` - The lines of the file being patched.
+    /// * `old_start_line` - Optional line number hint from the hunk header for tie-breaking.
+    ///
+    /// # Returns
+    ///
+    /// A vector of candidate `(HunkLocation, MatchType)` tuples ordered by proximity and gap compactness.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HunkApplyError::ContextNotFound`] if segments cannot be matched in sequence.
     fn find_wildcard_segments_location<T: AsRef<str> + Sync>(
         &self,
         segments: &[&[&str]],
@@ -8941,6 +9231,16 @@ impl<'a> DefaultHunkFinder<'a> {
         Ok(candidates)
     }
 
+    /// Recursively collects valid combinations of segment matches that satisfy forward ordering and gap bounds.
+    ///
+    /// # Arguments
+    ///
+    /// * `seg_idx` - Current segment index being chained.
+    /// * `min_start` - Minimum start index for the next segment match.
+    /// * `max_gap` - Maximum allowed line gap between adjacent segments.
+    /// * `current` - Accumulator of `(start_index, length)` matches for the current chain.
+    /// * `segment_matches` - Matches found for each segment in the target file.
+    /// * `all_chains` - Collection of all completed valid match chains.
     fn collect_wildcard_chains(
         seg_idx: usize,
         min_start: usize,
