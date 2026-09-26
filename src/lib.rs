@@ -6361,27 +6361,80 @@ fn precompute_target<'a>(target_refs: &[&'a str]) -> TargetPrecomputed<'a> {
     }
 }
 
-fn score_window(
-    window_stripped_lines: &[&str],
-    match_stripped_lines: &[&str],
-    window_loose_lines: &[&str],
-    match_loose_lines: &[&str],
-    window_str: &str,
-    match_content: &str,
-    wlc: &str,
-    match_loose_content: &str,
-    window_no_ws: &str,
-    match_no_ws: &str,
-    match_no_ws_chars: usize,
-    match_is_ascii: bool,
+struct MatchPrecomputed<'a> {
+    stripped_lines: Vec<&'a str>,
+    loose_lines: Vec<&'a str>,
+    content: String,
+    loose_content: String,
+    no_ws: String,
+    no_ws_chars: usize,
+    is_ascii: bool,
     len: usize,
-    window_len: usize,
+}
+
+fn precompute_match<'a>(match_block: &[&'a str]) -> MatchPrecomputed<'a> {
+    let stripped_lines: Vec<&str> = match_block.iter().map(|s| s.trim_end()).collect();
+    let content = stripped_lines.join("\n");
+    let loose_lines: Vec<&str> = match_block.iter().map(|s| s.trim()).collect();
+    let loose_content = loose_lines.join("\n");
+    let no_ws: String = content.chars().filter(|c| !c.is_whitespace()).collect();
+    let no_ws_chars = no_ws.chars().count();
+    let is_ascii = no_ws.is_ascii();
+    let len = match_block.len();
+
+    MatchPrecomputed {
+        stripped_lines,
+        loose_lines,
+        content,
+        loose_content,
+        no_ws,
+        no_ws_chars,
+        is_ascii,
+        len,
+    }
+}
+
+struct WindowData<'w, 'a> {
+    stripped_lines: &'w [&'a str],
+    loose_lines: &'w [&'a str],
+    content: &'w str,
+    loose_content: &'w str,
+    no_ws: &'w str,
+}
+
+impl<'a> TargetPrecomputed<'a> {
+    fn window_data<'w>(
+        &'w self,
+        target_refs: &'w [&'a str],
+        index: usize,
+        len: usize,
+    ) -> WindowData<'w, 'a> {
+        WindowData {
+            stripped_lines: &target_refs[index..index + len],
+            loose_lines: &self.target_loose_refs[index..index + len],
+            content: &self.target_content[self.line_starts[index]..self.line_ends[index + len - 1]],
+            loose_content: &self.target_loose_content
+                [self.loose_line_starts[index]..self.loose_line_ends[index + len - 1]],
+            no_ws: &self.target_no_ws_content
+                [self.no_ws_line_starts[index]..self.no_ws_line_ends[index + len - 1]],
+        }
+    }
+}
+
+fn score_window(
+    window: &WindowData<'_, '_>,
+    match_data: &MatchPrecomputed<'_>,
 ) -> (f64, f64, f64, f64) {
-    let diff_lines = similar::TextDiff::from_slices(window_stripped_lines, match_stripped_lines);
+    let diff_lines =
+        similar::TextDiff::from_slices(window.stripped_lines, &match_data.stripped_lines);
     let ratio_lines = diff_lines.ratio();
 
-    let diff_loose_lines = similar::TextDiff::from_slices(window_loose_lines, match_loose_lines);
+    let diff_loose_lines =
+        similar::TextDiff::from_slices(window.loose_lines, &match_data.loose_lines);
     let ratio_loose_lines = diff_loose_lines.ratio();
+
+    let window_len = window.stripped_lines.len();
+    let len = match_data.len;
 
     let scale = if window_len > len && len > 0 {
         (window_len + len) as f64 / (2.0 * len as f64)
@@ -6398,30 +6451,32 @@ fn score_window(
         return (1.0, 1.0, ratio_lines as f64, 1.0);
     }
 
-    let ratio_words = if window_str == match_content {
+    let ratio_words = if window.content == match_data.content {
         1.0
     } else {
-        similar::TextDiff::from_words(window_str, match_content).ratio()
+        similar::TextDiff::from_words(window.content, &match_data.content).ratio()
     };
 
-    let ratio_loose_words = if wlc == match_loose_content {
+    let ratio_loose_words = if window.loose_content == match_data.loose_content {
         1.0
-    } else if window_str == wlc && match_content == match_loose_content {
+    } else if window.content == window.loose_content
+        && match_data.content == match_data.loose_content
+    {
         ratio_words
     } else {
-        similar::TextDiff::from_words(wlc, match_loose_content).ratio()
+        similar::TextDiff::from_words(window.loose_content, &match_data.loose_content).ratio()
     };
 
     let ratio_strict = 0.3 * ratio_lines as f64 + 0.7 * ratio_words as f64;
     let ratio_loose = 0.3 * ratio_loose_lines as f64 + 0.7 * ratio_loose_words as f64;
     let current_max = ratio_strict.max(ratio_loose).max(line_score);
 
-    let c_w = if match_is_ascii && window_no_ws.is_ascii() {
-        window_no_ws.len()
+    let c_w = if match_data.is_ascii && window.no_ws.is_ascii() {
+        window.no_ws.len()
     } else {
-        window_no_ws.chars().count()
+        window.no_ws.chars().count()
     };
-    let c_m = match_no_ws_chars;
+    let c_m = match_data.no_ws_chars;
 
     let ub_no_ws = if c_w == 0 && c_m == 0 {
         1.0
@@ -6435,10 +6490,10 @@ fn score_window(
 
     let ratio_no_ws = if ub_very_loose <= current_max {
         0.0
-    } else if window_no_ws == match_no_ws {
+    } else if window.no_ws == match_data.no_ws {
         1.0
     } else {
-        similar::TextDiff::from_chars(window_no_ws, match_no_ws).ratio()
+        similar::TextDiff::from_chars(window.no_ws, &match_data.no_ws).ratio()
     };
 
     let ratio_very_loose = 0.1 * ratio_lines as f64 + 0.9 * ratio_no_ws as f64;
@@ -6788,19 +6843,7 @@ impl<'a> DefaultHunkFinder<'a> {
             }
 
             // Hoist invariants for performance
-            let match_stripped_lines: Vec<&str> =
-                match_block.iter().map(|s| s.trim_end()).collect();
-            let match_content = match_stripped_lines.join("\n");
-
-            // Pre-calculate trimmed versions for "loose" matching (ignoring indentation)
-            let match_loose_lines: Vec<&str> = match_block.iter().map(|s| s.trim()).collect();
-            let match_loose_content = match_loose_lines.join("\n");
-            let match_no_ws: String = match_content
-                .chars()
-                .filter(|c| !c.is_whitespace())
-                .collect();
-            let match_no_ws_chars = match_no_ws.chars().count();
-            let match_is_ascii = match_no_ws.is_ascii();
+            let match_pre = precompute_match(match_block);
 
             let mut best_score = -1.0;
             let mut best_ratio_at_best_score = -1.0;
@@ -6837,11 +6880,7 @@ impl<'a> DefaultHunkFinder<'a> {
                 .flat_map(|&(range_start, range_end)| {
                     let pre = &pre;
                     let target_refs = &target_refs;
-                    let match_stripped_lines = &match_stripped_lines;
-                    let match_content = &match_content;
-                    let match_loose_lines = &match_loose_lines;
-                    let match_loose_content = &match_loose_content;
-                    let match_no_ws = &match_no_ws;
+                    let match_pre = &match_pre;
                     let target_len = range_end.saturating_sub(range_start);
 
                     (min_len..=max_len)
@@ -6853,35 +6892,10 @@ impl<'a> DefaultHunkFinder<'a> {
                         .flat_map(move |window_len| {
                             (0..=target_len - window_len).into_par_iter().map(move |i| {
                                 let absolute_index = range_start + i;
-                                let window_stripped_lines =
-                                    &target_refs[absolute_index..absolute_index + window_len];
-                                let window_loose_lines = &pre.target_loose_refs
-                                    [absolute_index..absolute_index + window_len];
-                                let window_str = &pre.target_content[pre.line_starts[absolute_index]
-                                    ..pre.line_ends[absolute_index + window_len - 1]];
-                                let wlc = &pre.target_loose_content[pre.loose_line_starts
-                                    [absolute_index]
-                                    ..pre.loose_line_ends[absolute_index + window_len - 1]];
-                                let window_no_ws = &pre.target_no_ws_content[pre.no_ws_line_starts
-                                    [absolute_index]
-                                    ..pre.no_ws_line_ends[absolute_index + window_len - 1]];
-
-                                let (score, ratio, ratio_lines, ratio_words) = score_window(
-                                    window_stripped_lines,
-                                    match_stripped_lines,
-                                    window_loose_lines,
-                                    match_loose_lines,
-                                    window_str,
-                                    match_content,
-                                    wlc,
-                                    match_loose_content,
-                                    window_no_ws,
-                                    match_no_ws,
-                                    match_no_ws_chars,
-                                    match_is_ascii,
-                                    len,
-                                    window_len,
-                                );
+                                let window =
+                                    pre.window_data(target_refs, absolute_index, window_len);
+                                let (score, ratio, ratio_lines, ratio_words) =
+                                    score_window(&window, match_pre);
 
                                 (
                                     score,
@@ -6902,11 +6916,7 @@ impl<'a> DefaultHunkFinder<'a> {
                 .flat_map(|&(range_start, range_end)| {
                     let pre = &pre;
                     let target_refs = &target_refs;
-                    let match_stripped_lines = &match_stripped_lines;
-                    let match_content = &match_content;
-                    let match_loose_lines = &match_loose_lines;
-                    let match_loose_content = &match_loose_content;
-                    let match_no_ws = &match_no_ws;
+                    let match_pre = &match_pre;
                     let target_len = range_end.saturating_sub(range_start);
 
                     (min_len..=max_len)
@@ -6917,35 +6927,10 @@ impl<'a> DefaultHunkFinder<'a> {
                         .flat_map(move |window_len| {
                             (0..=target_len - window_len).map(move |i| {
                                 let absolute_index = range_start + i;
-                                let window_stripped_lines =
-                                    &target_refs[absolute_index..absolute_index + window_len];
-                                let window_loose_lines = &pre.target_loose_refs
-                                    [absolute_index..absolute_index + window_len];
-                                let window_str = &pre.target_content[pre.line_starts[absolute_index]
-                                    ..pre.line_ends[absolute_index + window_len - 1]];
-                                let wlc = &pre.target_loose_content[pre.loose_line_starts
-                                    [absolute_index]
-                                    ..pre.loose_line_ends[absolute_index + window_len - 1]];
-                                let window_no_ws = &pre.target_no_ws_content[pre.no_ws_line_starts
-                                    [absolute_index]
-                                    ..pre.no_ws_line_ends[absolute_index + window_len - 1]];
-
-                                let (score, ratio, ratio_lines, ratio_words) = score_window(
-                                    window_stripped_lines,
-                                    match_stripped_lines,
-                                    window_loose_lines,
-                                    match_loose_lines,
-                                    window_str,
-                                    match_content,
-                                    wlc,
-                                    match_loose_content,
-                                    window_no_ws,
-                                    match_no_ws,
-                                    match_no_ws_chars,
-                                    match_is_ascii,
-                                    len,
-                                    window_len,
-                                );
+                                let window =
+                                    pre.window_data(target_refs, absolute_index, window_len);
+                                let (score, ratio, ratio_lines, ratio_words) =
+                                    score_window(&window, match_pre);
 
                                 (
                                     score,
