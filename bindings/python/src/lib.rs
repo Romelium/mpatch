@@ -1260,6 +1260,43 @@ fn apply_patches_to_dir(
     PyBatchResult { inner: result }
 }
 
+#[pyfunction]
+#[pyo3(signature = (expected_lines, actual_lines))]
+/// Formats an inline word-level diff between expected lines and actual lines.
+///
+/// Args:
+///     expected_lines (list[str]): The expected lines (e.g. from hunk match block).
+///     actual_lines (list[str]): The actual lines from the target file.
+///
+/// Returns:
+///     str: A formatted diff string with word-level highlights.
+fn format_inline_diff(expected_lines: Vec<String>, actual_lines: Vec<String>) -> String {
+    let exp_refs: Vec<&str> = expected_lines.iter().map(|s| s.as_str()).collect();
+    ::mpatch::format_inline_diff(&exp_refs, &actual_lines)
+}
+
+#[pyfunction]
+#[pyo3(signature = (base, ours, theirs, *, labels=None))]
+/// Performs a 3-way line merge among a common ancestor (base), current content (ours),
+/// and incoming changes (theirs).
+///
+/// Args:
+///     base (str): The common ancestor content.
+///     ours (str): Current local content.
+///     theirs (str): Incoming changes.
+///     labels (tuple[str, str, str] | None, optional): Labels for conflict markers (base, ours, theirs).
+///
+/// Returns:
+///     tuple[str, bool]: (merged_content, is_conflicted)
+fn merge_three_way(
+    base: &str,
+    ours: &str,
+    theirs: &str,
+    labels: Option<(&str, &str, &str)>,
+) -> (String, bool) {
+    ::mpatch::merge_three_way(base, ours, theirs, labels)
+}
+
 #[pymodule]
 fn mpatch(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("MpatchError", py.get_type::<MpatchError>())?;
@@ -1289,6 +1326,8 @@ fn mpatch(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(apply_patch_to_content, m)?)?;
     m.add_function(wrap_pyfunction!(apply_patch_to_file, m)?)?;
     m.add_function(wrap_pyfunction!(apply_patches_to_dir, m)?)?;
+    m.add_function(wrap_pyfunction!(format_inline_diff, m)?)?;
+    m.add_function(wrap_pyfunction!(merge_three_way, m)?)?;
 
     // Add library version
     m.add("VERSION", env!("CARGO_PKG_VERSION"))?;

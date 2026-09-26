@@ -500,6 +500,31 @@ def create_unified_diff(
     """
     ...
 
+def format_inline_diff(expected_lines: list[str], actual_lines: list[str]) -> str:
+    """
+    Formats an inline word-level diff between expected lines and actual lines.
+
+    Args:
+        expected_lines (list[str]): The expected lines.
+        actual_lines (list[str]): The actual lines.
+
+    Returns:
+        str: Formatted diff string with sub-line word highlights.
+    """
+    ...
+
+def merge_three_way(
+    base: str,
+    ours: str,
+    theirs: str,
+    *,
+    labels: tuple[str, str, str] | None = None,
+) -> tuple[str, bool]:
+    """
+    Performs a 3-way line merge among base, ours, and theirs. Returns (merged_content, is_conflicted).
+    """
+    ...
+
 def patch_content(
     diff: str,
     original: str | None = None,

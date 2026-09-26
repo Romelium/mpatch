@@ -800,3 +800,126 @@ def test_python_atomic_multi_file_failure_discards_all(tmp_path: Path):
     assert success is False
     assert f1.read_text() == "foo\n"
     assert f2.read_text() == "bar\n"
+
+
+# --- Similar v3.2.0 Integration Tests ---
+
+
+def test_format_inline_diff():
+    expected = ["fn calculate(x: i32) -> i32 {"]
+    actual = ["fn calculate(x: i64) -> i32 {"]
+    diff = mpatch.format_inline_diff(expected, actual)
+    assert "calculate" in diff
+    assert "i32" in diff
+    assert "i64" in diff
+
+
+def test_merge_three_way():
+    base = "alpha\nbeta\ncommon\ngamma\ndelta\n"
+    ours = "alpha\nbeta_mod\ncommon\ngamma\ndelta\n"
+    theirs = "alpha\nbeta\ncommon\ngamma_mod\ndelta\n"
+    merged, conflicted = mpatch.merge_three_way(base, ours, theirs)
+    assert conflicted is False
+    assert merged == "alpha\nbeta_mod\ncommon\ngamma_mod\ndelta\n"
+
+    base_c = "val = 1\n"
+    ours_c = "val = 2\n"
+    theirs_c = "val = 3\n"
+    merged_c, conflicted_c = mpatch.merge_three_way(
+        base_c, ours_c, theirs_c, labels=("base", "ours", "theirs")
+    )
+    assert conflicted_c is True
+    assert "<<<<<<< ours" in merged_c
+    assert ">>>>>>> theirs" in merged_c
+
+
+def test_python_format_inline_diff_multiline():
+    expected = [
+        "def handle_request(req, timeout):",
+        "    verify_auth(req)",
+        "    return process(req)",
+    ]
+    actual = [
+        "def handle_request(req, timeout, retry=3):",
+        "    verify_auth(req)",
+        "    return process_request(req)",
+    ]
+    diff = mpatch.format_inline_diff(expected, actual)
+    assert "handle_request" in diff
+    assert "timeout" in diff
+    assert "retry=3" in diff
+    assert "process_request" in diff
+
+
+def test_python_merge_three_way_identical_and_disjoint():
+    # Identical edits resolve cleanly
+    base = "a\nb\nc\n"
+    ours = "a\nB_MOD\nc\n"
+    theirs = "a\nB_MOD\nc\n"
+    merged, conflicted = mpatch.merge_three_way(base, ours, theirs)
+    assert conflicted is False
+    assert merged == "a\nB_MOD\nc\n"
+
+    # Disjoint edits resolve cleanly
+    base = "first\nmiddle\nlast\n"
+    ours = "FIRST_MOD\nmiddle\nlast\n"
+    theirs = "first\nmiddle\nLAST_MOD\n"
+    merged, conflicted = mpatch.merge_three_way(base, ours, theirs)
+    assert conflicted is False
+    assert merged == "FIRST_MOD\nmiddle\nLAST_MOD\n"
+
+
+def test_python_merge_three_way_custom_labels():
+    base = "var = 'base'\n"
+    ours = "var = 'local'\n"
+    theirs = "var = 'remote'\n"
+    merged, conflicted = mpatch.merge_three_way(
+        base, ours, theirs, labels=("BASE_VER", "LOCAL_VER", "REMOTE_VER")
+    )
+    assert conflicted is True
+    assert "<<<<<<< LOCAL_VER" in merged
+    assert "||||||| BASE_VER" in merged
+    assert "=======" in merged
+    assert ">>>>>>> REMOTE_VER" in merged
+
+
+def test_python_large_scale_three_way_merge():
+    # 300-line base file
+    base_lines = [f"item_{i} = {i}\n" for i in range(300)]
+    base = "".join(base_lines)
+
+    # Ours updates items 0..50
+    ours_lines = list(base_lines)
+    for i in range(50):
+        ours_lines[i] = f"item_{i} = 'ours_{i}'\n"
+    ours = "".join(ours_lines)
+
+    # Theirs updates items 250..300
+    theirs_lines = list(base_lines)
+    for i in range(250, 300):
+        theirs_lines[i] = f"item_{i} = 'theirs_{i}'\n"
+    theirs = "".join(theirs_lines)
+
+    merged, is_conflicted = mpatch.merge_three_way(base, ours, theirs)
+    assert is_conflicted is False
+    assert "item_0 = 'ours_0'" in merged
+    assert "item_49 = 'ours_49'" in merged
+    assert "item_150 = 150" in merged
+    assert "item_250 = 'theirs_250'" in merged
+    assert "item_299 = 'theirs_299'" in merged
+
+
+def test_python_large_scale_inline_diff():
+    expected = [
+        f"def compute_step_{i}(val: int, factor: float = 1.0) -> float:"
+        for i in range(80)
+    ]
+    actual = [
+        f"def compute_step_{i}(val: int, factor: float = 2.5, verbose: bool = False) -> float:"
+        for i in range(80)
+    ]
+    diff = mpatch.format_inline_diff(expected, actual)
+    assert "compute_step_0" in diff
+    assert "compute_step_79" in diff
+    assert "factor: float = 2.5" in diff
+    assert "verbose: bool = False" in diff

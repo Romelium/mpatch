@@ -460,9 +460,9 @@
 use log::{debug, info, trace, warn};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use similar::udiff::unified_diff;
 use similar::TextDiff;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -2930,14 +2930,19 @@ impl Patch {
         context_len: usize,
     ) -> Result<Self, ParseError> {
         let path = file_path.into();
-        let diff = TextDiff::from_lines(old_text, new_text);
-        let old_slices = diff.old_slices();
-        let new_slices = diff.new_slices();
+        let diff = TextDiff::configure()
+            .algorithm(similar::Algorithm::Patience)
+            .diff_lines(old_text, new_text);
         let mut hunks = Vec::new();
         let push_prefixed =
-            |lines: &mut Vec<String>, prefix: char, slices: &[&str], start: usize, len: usize| {
+            |lines: &mut Vec<String>, prefix: char, is_old: bool, start: usize, len: usize| {
                 for i in 0..len {
-                    let line = slices[start + i].trim_end_matches(['\r', '\n']);
+                    let slice = if is_old {
+                        diff.old_slice(start + i).unwrap_or("")
+                    } else {
+                        diff.new_slice(start + i).unwrap_or("")
+                    };
+                    let line = slice.trim_end_matches(['\r', '\n']);
                     let mut s = String::with_capacity(line.len() + 1);
                     s.push(prefix);
                     s.push_str(line);
@@ -2958,17 +2963,17 @@ impl Patch {
             for op in group {
                 match op {
                     similar::DiffOp::Equal { old_index, len, .. } => {
-                        push_prefixed(&mut lines, ' ', old_slices, old_index, len);
+                        push_prefixed(&mut lines, ' ', true, old_index, len);
                     }
                     similar::DiffOp::Delete {
                         old_index, old_len, ..
                     } => {
-                        push_prefixed(&mut lines, '-', old_slices, old_index, old_len);
+                        push_prefixed(&mut lines, '-', true, old_index, old_len);
                     }
                     similar::DiffOp::Insert {
                         new_index, new_len, ..
                     } => {
-                        push_prefixed(&mut lines, '+', new_slices, new_index, new_len);
+                        push_prefixed(&mut lines, '+', false, new_index, new_len);
                     }
                     similar::DiffOp::Replace {
                         old_index,
@@ -2976,8 +2981,8 @@ impl Patch {
                         new_index,
                         new_len,
                     } => {
-                        push_prefixed(&mut lines, '-', old_slices, old_index, old_len);
-                        push_prefixed(&mut lines, '+', new_slices, new_index, new_len);
+                        push_prefixed(&mut lines, '-', true, old_index, old_len);
+                        push_prefixed(&mut lines, '+', false, new_index, new_len);
                     }
                 }
             }
@@ -4846,7 +4851,9 @@ fn create_hunk_from_search_replace(search_lines: &[String], replace_lines: &[Str
     let search_refs: Vec<&str> = search_norm.iter().map(|s| s.as_str()).collect();
     let replace_refs: Vec<&str> = replace_norm.iter().map(|s| s.as_str()).collect();
 
-    let diff = similar::TextDiff::from_slices(&search_refs, &replace_refs);
+    let diff = similar::TextDiff::configure()
+        .algorithm(similar::Algorithm::Patience)
+        .diff_slices(&search_refs, &replace_refs);
     let mut hunk_lines = Vec::new();
 
     let push_line = |lines: &mut Vec<String>, prefix: char, s: &str| {
@@ -6045,14 +6052,15 @@ pub fn apply_patches_to_dir_atomic(
         if options.dry_run {
             let a_path = format!("a/{}", patch.file_path.display());
             let b_path = format!("b/{}", patch.file_path.display());
-            let diff_text = unified_diff(
-                similar::Algorithm::default(),
+            let diff_text = TextDiff::from_lines(
                 original_before_patch.as_deref().unwrap_or(""),
                 &in_memory_res.new_content,
-                3,
-                Some((&a_path, &b_path)),
-            );
-            diff = Some(diff_text.to_string());
+            )
+            .unified_diff()
+            .context_radius(3)
+            .header(&a_path, &b_path)
+            .to_string();
+            diff = Some(diff_text);
         }
 
         staged.current_content = Some(in_memory_res.new_content);
@@ -6414,14 +6422,15 @@ pub fn apply_patch_to_file(
 
         let a_path = format!("a/{}", patch.file_path.display());
         let b_path = format!("b/{}", patch.file_path.display());
-        let diff_text = unified_diff(
-            similar::Algorithm::default(),
+        let diff_text = TextDiff::from_lines(
             &original_content,
             &new_content,
-            3,
-            Some((&a_path, &b_path)),
-        );
-        diff = Some(diff_text.to_string());
+        )
+        .unified_diff()
+        .context_radius(3)
+        .header(&a_path, &b_path)
+        .to_string();
+        diff = Some(diff_text);
     } else {
         // Write the modified content to the file system.
         // The parent directory might have been created by `ensure_path_is_safe`
@@ -7855,7 +7864,9 @@ fn find_statement_match_in_block(
         if trimmed.is_empty() {
             continue;
         }
-        let diff = similar::TextDiff::from_words(old_trimmed, trimmed);
+        let diff = similar::TextDiff::configure()
+            .algorithm(similar::Algorithm::Histogram)
+            .diff_words(old_trimmed, trimmed);
         let ratio = diff.ratio();
 
         let new_no_ws: String = trimmed.chars().filter(|c| !c.is_whitespace()).collect();
@@ -8484,7 +8495,10 @@ fn try_apply_hunk_at_location(
                                 let old_trimmed = match_block_trimmed[old_idx];
                                 let new_trimmed = file_block_trimmed[new_idx];
                                 let sim_words =
-                                    similar::TextDiff::from_words(old_trimmed, new_trimmed).ratio();
+                                    similar::TextDiff::configure()
+                                        .algorithm(similar::Algorithm::Histogram)
+                                        .diff_words(old_trimmed, new_trimmed)
+                                        .ratio();
                                 let old_no_ws: String =
                                     old_trimmed.chars().filter(|c| !c.is_whitespace()).collect();
                                 let new_no_ws: String =
@@ -9064,7 +9078,10 @@ fn score_window(
     let ratio_words = if window.content == match_data.content {
         1.0
     } else {
-        similar::TextDiff::from_words(window.content, &match_data.content).ratio()
+        similar::TextDiff::configure()
+            .algorithm(similar::Algorithm::Histogram)
+            .diff_words(window.content, &match_data.content)
+            .ratio()
     };
 
     let ratio_loose_words = if window.loose_content == match_data.loose_content {
@@ -9074,7 +9091,10 @@ fn score_window(
     {
         ratio_words
     } else {
-        similar::TextDiff::from_words(window.loose_content, &match_data.loose_content).ratio()
+        similar::TextDiff::configure()
+            .algorithm(similar::Algorithm::Histogram)
+            .diff_words(window.loose_content, &match_data.loose_content)
+            .ratio()
     };
 
     let ratio_strict = 0.3 * ratio_lines as f64 + 0.7 * ratio_words as f64;
@@ -10432,4 +10452,159 @@ fn parse_hunk_header(line: &str) -> (Option<usize>, Option<usize>) {
         .and_then(|s| s.split(',').next())
         .and_then(|s| s.parse::<usize>().ok());
     (old_line, new_line)
+}
+
+/// Formats an inline word-level diff between expected context lines and actual target lines.
+///
+/// Uses `similar`'s `inline` feature to highlight exact sub-line word additions and deletions.
+/// Terminal color codes are applied via `colored` and will automatically be suppressed
+/// in non-TTY or `NO_COLOR` environments.
+///
+/// # Arguments
+///
+/// * `expected_lines` - Slice of expected lines (e.g., from a hunk's match block).
+/// * `actual_lines` - Slice of actual lines from the target file.
+///
+/// # Returns
+///
+/// A formatted string containing the annotated inline diff with word-level highlights.
+pub fn format_inline_diff<T: AsRef<str>>(expected_lines: &[&str], actual_lines: &[T]) -> String {
+    use colored::Colorize;
+    let expected_str = expected_lines.join("\n");
+    let actual_refs: Vec<&str> = actual_lines.iter().map(|s| s.as_ref()).collect();
+    let actual_str = actual_refs.join("\n");
+    let diff = TextDiff::from_lines(&expected_str, &actual_str);
+
+    let mut out = String::new();
+    for op in diff.ops() {
+        for change in diff.iter_inline_changes(op) {
+            let sign = match change.tag() {
+                similar::ChangeTag::Delete => "-".red(),
+                similar::ChangeTag::Insert => "+".green(),
+                similar::ChangeTag::Equal => " ".normal(),
+            };
+            let _ = write!(out, "{} ", sign);
+            for (emphasized, token) in change.iter_strings_lossy() {
+                if emphasized {
+                    match change.tag() {
+                        similar::ChangeTag::Delete => {
+                            let _ = write!(out, "{}", token.red().bold().underline());
+                        }
+                        similar::ChangeTag::Insert => {
+                            let _ = write!(out, "{}", token.green().bold().underline());
+                        }
+                        similar::ChangeTag::Equal => {
+                            let _ = write!(out, "{}", token.normal());
+                        }
+                    }
+                } else {
+                    match change.tag() {
+                        similar::ChangeTag::Delete => {
+                            let _ = write!(out, "{}", token.red());
+                        }
+                        similar::ChangeTag::Insert => {
+                            let _ = write!(out, "{}", token.green());
+                        }
+                        similar::ChangeTag::Equal => {
+                            let _ = write!(out, "{}", token.normal());
+                        }
+                    }
+                }
+            }
+            if change.missing_newline() {
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
+/// Performs a three-way line merge among a common ancestor (`base`), current content (`ours`),
+/// and incoming changes (`theirs`).
+///
+/// Uses `similar`'s `TextMerge` engine. If conflicts exist, standard Diff3 conflict markers
+/// (`<<<<<<<`, `|||||||`, `=======`, `>>>>>>>`) are inserted into the output.
+///
+/// # Arguments
+///
+/// * `base` - The common ancestor content string.
+/// * `ours` - The current local content string.
+/// * `theirs` - The incoming changed content string.
+/// * `labels` - Optional tuple `(base_label, ours_label, theirs_label)` for conflict marker headers.
+///
+/// # Returns
+///
+/// A tuple `(merged_text, is_conflicted)` where `is_conflicted` is `true` if any conflict occurred.
+pub fn merge_three_way(
+    base: &str,
+    ours: &str,
+    theirs: &str,
+    labels: Option<(&str, &str, &str)>,
+) -> (String, bool) {
+    let mut merge = similar::TextMerge::from_lines(base, ours, theirs);
+    let is_conflicted = merge.is_conflicted();
+    if is_conflicted {
+        merge.conflict_style(similar::ConflictStyle::Diff3);
+        if let Some((base_lbl, ours_lbl, theirs_lbl)) = labels {
+            merge.labels(base_lbl, ours_lbl, theirs_lbl);
+        }
+    }
+    (merge.to_string(), is_conflicted)
+}
+
+/// Finds close matching file paths in a target directory when a patch specifies a missing file.
+///
+/// Uses `similar::get_close_matches` to suggest possible intended files among existing paths in `dir`.
+pub fn suggest_close_file_paths(missing_path: &Path, base_dir: &Path, limit: usize) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    fn visit_dir(dir: &Path, base: &Path, candidates: &mut Vec<String>, depth: usize) {
+        if depth > 8 || candidates.len() > 300 {
+            return;
+        }
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    if let Ok(rel) = path.strip_prefix(base) {
+                        candidates.push(rel.to_string_lossy().into_owned());
+                    }
+                } else if path.is_dir() {
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    if !name_str.starts_with('.') && name_str != "target" && name_str != "node_modules" {
+                        visit_dir(&path, base, candidates, depth + 1);
+                    }
+                }
+            }
+        }
+    }
+    visit_dir(base_dir, base_dir, &mut candidates, 0);
+
+    let query_rel = if missing_path.is_relative() {
+        missing_path
+    } else {
+        missing_path
+            .strip_prefix(base_dir)
+            .or_else(|_| {
+                fs::canonicalize(base_dir)
+                    .ok()
+                    .and_then(|cb| missing_path.strip_prefix(&cb).ok().map(Path::new))
+                    .ok_or(())
+            })
+            .unwrap_or_else(|_| {
+                if let Some(name) = missing_path.file_name() {
+                    Path::new(name)
+                } else {
+                    missing_path
+                }
+            })
+    };
+
+    let query_rel = query_rel.strip_prefix("./").unwrap_or(query_rel);
+    let query = query_rel.to_string_lossy().replace('\\', "/");
+    let query_str: &str = &query;
+    let cand_refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
+    let matches = similar::get_close_matches(query_str, &cand_refs, limit, 0.6);
+
+    matches.into_iter().map(PathBuf::from).collect()
 }

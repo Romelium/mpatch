@@ -197,10 +197,17 @@ fn run(args: Args) -> Result<()> {
                 } else {
                     fail_count += 1;
                     error!("--- FAILED to apply patch for: {}", path.display());
-                    log_failed_hunks(&patch_result.report, patch);
+                    log_failed_hunks(&patch_result.report, patch, Some(&actual_target_dir));
                 }
             }
             Err(e) => {
+                if let mpatch::PatchError::TargetNotFound(missing_path) = e {
+                    let suggestions = mpatch::suggest_close_file_paths(missing_path, &actual_target_dir, 3);
+                    if !suggestions.is_empty() {
+                        let formatted: Vec<String> = suggestions.iter().map(|p| format!("'{}'", p.display())).collect();
+                        warn!("  Target file not found. Did you mean: {}?", formatted.join(", "));
+                    }
+                }
                 // A "hard" error occurred (e.g., I/O error, path traversal).
                 // This is fatal, so we stop and return the error.
                 if args.atomic {
@@ -361,7 +368,7 @@ type ReportData = (Arc<Mutex<File>>, HashMap<PathBuf, String>, Anonymizer);
 ///
 /// * `apply_result` - The [`mpatch::ApplyResult`] report containing per-hunk status outcomes.
 /// * `patch` - The original [`Patch`] being applied, used to retrieve failed hunk content for display.
-fn log_failed_hunks(apply_result: &mpatch::ApplyResult, patch: &Patch) {
+fn log_failed_hunks(apply_result: &mpatch::ApplyResult, patch: &Patch, target_dir: Option<&Path>) {
     if !log::log_enabled!(log::Level::Warn) {
         return;
     }
@@ -372,6 +379,36 @@ fn log_failed_hunks(apply_result: &mpatch::ApplyResult, patch: &Patch) {
             warn!("    Failed Hunk Content:");
             for line in &hunk.lines {
                 warn!("      {}", line);
+            }
+
+            if let mpatch::HunkApplyError::FuzzyMatchBelowThreshold {
+                best_score,
+                threshold,
+                location,
+            } = &failure.reason
+            {
+                if let Some(target_dir) = target_dir {
+                    let target_path = target_dir.join(&patch.file_path);
+                    if let Ok(content) = fs::read_to_string(&target_path) {
+                        let lines: Vec<&str> = content.lines().collect();
+                        if location.start_index + location.length <= lines.len() {
+                            let near_miss_slice = &lines
+                                [location.start_index..location.start_index + location.length];
+                            let match_block = hunk.get_match_block();
+                            let inline_diff =
+                                mpatch::format_inline_diff(&match_block, near_miss_slice);
+                            warn!(
+                                "    Near-miss candidate at {} (similarity: {:.1}%, required: {:.1}%):",
+                                location,
+                                best_score * 100.0,
+                                threshold * 100.0
+                            );
+                            for diff_line in inline_diff.lines() {
+                                warn!("      {}", diff_line);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -764,13 +801,11 @@ fn write_report_footer(
                     } else {
                         let original_norm = format_normalized_patch(original_patch);
                         let recreated_norm = format_normalized_patch(&recreated_patch);
-                        let diff_text = similar::udiff::unified_diff(
-                            similar::Algorithm::default(),
-                            &original_norm,
-                            &recreated_norm,
-                            3,
-                            Some(("Original Input Patch", "Regenerated Patch")),
-                        );
+                        let diff_text = similar::TextDiff::from_lines(&original_norm, &recreated_norm)
+                            .unified_diff()
+                            .context_radius(3)
+                            .header("Original Input Patch", "Regenerated Patch")
+                            .to_string();
 
                         let _ = writeln!(file, "\n- **Result:** <span style='color:red;'>FAILURE</span>\n- **Details:** The regenerated patch does not match the input patch. This may indicate an issue with how a fuzzy match was applied.");
                         let _ = writeln!(file, "\n**Diff (Original vs. Regenerated):**");

@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Dependencies & Similar v3.2.0:** Upgraded `similar` from `2.7.0` to `3.2.0` with `inline` feature enabled.
+- **Diagnostics & Inline Diffs:** Added `mpatch::format_inline_diff` for sub-line word-level diff visualization. CLI failed hunk diagnostics now display near-miss comparisons with highlighted word differences on `FuzzyMatchBelowThreshold` errors.
+- **Core API & 3-Way Merge:** Added `mpatch::merge_three_way` backed by `similar::TextMerge` to perform 3-way line merges with Diff3 conflict markers.
+- **CLI & Path Suggestions:** Added `mpatch::suggest_close_file_paths` powered by `similar::get_close_matches` to suggest existing file candidates when a patch targets a nonexistent path (`TargetNotFound`).
+- **Python Bindings:** Exposed `mpatch.format_inline_diff` and `mpatch.merge_three_way` with full type stubs (`mpatch.pyi`).
 - **CLI & Stdin:** Added first-class Standard Input (stdin) piping support via `-` (e.g., `cat patch.diff | mpatch - ./src`, `git diff | mpatch -R - ./src`, `curl -s https://example.com/fix.patch | mpatch - ./src`), including implicit piping and automatic fallback to the current directory (`.`) when a target path is omitted.
 - **CLI & Atomicity:** Added `-a` / `--atomic` (aliased as `--all-or-nothing`) flag to guarantee that changes are only written to disk if all patches and hunks apply cleanly. If any hunk fails or encounters an error, the filesystem remains completely untouched.
 - **Core API & Atomicity:** Added atomic disk application via `apply_patches_to_dir_atomic`, `try_apply_patches_to_dir_atomic`, `apply_patch_to_file_atomic`, and `try_apply_patch_to_file_atomic`. Operations are staged in-memory and committed to disk if and only if all hunks across all patches succeed, with automatic rollback on commit failure.
@@ -20,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CLI & Diagnostics:** Added Aider search/replace format detection to CLI diagnostics and benchmark suites.
 
 ### Performance
+- **Fuzzy Matching:** Switched word-level sequence comparisons in `score_window`, `find_statement_match_in_block`, and `try_apply_hunk_at_location` to `similar::Algorithm::Histogram`, eliminating quadratic Myers degradations on repetitive code.
+- **Patch Generation:** Switched `Patch::from_texts` and `parse_aider` to `similar::Algorithm::Patience` for cleaner, semantically aligned hunk boundaries across refactored functions and moved blocks.
 - **Patch Application:** Eliminated redundant target slice cloning and heap string allocations in `try_apply_hunk_at_location` by referencing `target_lines` directly and borrowing hunk addition slices.
 - **Diagnostics & Results:** Optimized `ApplyResult::failure_count()`, `success_count()`, and `has_failures()` to count in-place with zero heap allocations or error cloning.
 - **Python Bindings:** Optimized `ApplyResult.__getitem__` to convert individual hunk status items on demand rather than translating the entire status vector per indexed lookup.

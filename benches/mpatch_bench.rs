@@ -1,8 +1,9 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use indoc::indoc;
 use mpatch::{
-    apply_patch_to_content, detect_patch, find_hunk_location_in_lines, parse_aider,
-    parse_conflict_markers, parse_diffs, parse_patches, ApplyOptions, Patch,
+    apply_patch_to_content, detect_patch, find_hunk_location_in_lines, format_inline_diff,
+    merge_three_way, parse_aider, parse_conflict_markers, parse_diffs, parse_patches,
+    suggest_close_file_paths, ApplyOptions, Patch,
 };
 
 // --- Detecting Benchmarks ---
@@ -375,11 +376,95 @@ fn applying_benches(c: &mut Criterion) {
     group.finish();
 }
 
+// --- Similar v3.2.0 Capabilities Benchmarks ---
+
+fn similar_v3_benches(c: &mut Criterion) {
+    let mut group = c.benchmark_group("SimilarV3");
+    group.sample_size(10);
+
+    // 1. Large 3-Way Merge Benchmark (1,000 lines, 200 functions)
+    let mut base = String::with_capacity(25_000);
+    let mut ours = String::with_capacity(25_000);
+    let mut theirs = String::with_capacity(25_000);
+
+    for i in 0..200 {
+        base.push_str(&format!("fn comp_{}() {{\n    step();\n}}\n\n", i));
+        if i % 4 == 0 {
+            ours.push_str(&format!("fn comp_{}() {{\n    ours_step();\n}}\n\n", i));
+        } else {
+            ours.push_str(&format!("fn comp_{}() {{\n    step();\n}}\n\n", i));
+        }
+        if i % 4 == 2 {
+            theirs.push_str(&format!("fn comp_{}() {{\n    theirs_step();\n}}\n\n", i));
+        } else {
+            theirs.push_str(&format!("fn comp_{}() {{\n    step();\n}}\n\n", i));
+        }
+    }
+
+    group.bench_function("merge_three_way_200_functions", |b| {
+        b.iter(|| {
+            black_box(merge_three_way(
+                black_box(&base),
+                black_box(&ours),
+                black_box(&theirs),
+                None,
+            ))
+        });
+    });
+
+    // 2. Large Inline Diff Formatting Benchmark (100 functions)
+    let mut expected_lines = Vec::with_capacity(100);
+    let mut actual_lines = Vec::with_capacity(100);
+    for i in 0..100 {
+        expected_lines.push(format!("pub fn handle_event_{}(ctx: &mut Context, id: u32) -> Result<(), Error> {{", i));
+        actual_lines.push(format!("pub fn handle_event_{}(ctx: &mut Context, id: u64, flags: EventFlags) -> Result<(), AppError> {{", i));
+    }
+    let exp_refs: Vec<&str> = expected_lines.iter().map(|s| s.as_str()).collect();
+
+    group.bench_function("format_inline_diff_100_lines", |b| {
+        b.iter(|| {
+            black_box(format_inline_diff(
+                black_box(&exp_refs),
+                black_box(&actual_lines),
+            ))
+        });
+    });
+
+    // 3. Patience Diff Generation Benchmark (1,000 lines)
+    let mut orig_text = String::with_capacity(25_000);
+    let mut mod_text = String::with_capacity(25_000);
+    for i in 0..100 {
+        orig_text.push_str(&format!("fn task_{}() {{\n    compute_a();\n    compute_b();\n}}\n\n", i));
+        if i % 10 == 0 {
+            mod_text.push_str(&format!("fn injected_helper_{}() {{}}\n\n", i));
+        }
+        if i % 4 == 0 {
+            mod_text.push_str(&format!("fn task_{}() {{\n    compute_a_fast();\n    compute_b();\n}}\n\n", i));
+        } else {
+            mod_text.push_str(&format!("fn task_{}() {{\n    compute_a();\n    compute_b();\n}}\n\n", i));
+        }
+    }
+
+    group.bench_function("patience_diff_generation_1000_lines", |b| {
+        b.iter(|| {
+            black_box(Patch::from_texts(
+                "bench.rs",
+                black_box(&orig_text),
+                black_box(&mod_text),
+                3,
+            ).unwrap())
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     detecting_benches,
     parsing_benches,
     finding_benches,
-    applying_benches
+    applying_benches,
+    similar_v3_benches
 );
 criterion_main!(benches);

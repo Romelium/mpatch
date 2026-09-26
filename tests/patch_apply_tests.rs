@@ -10788,7 +10788,7 @@ mod atomic_apply_tests {
         StrictApplyError, StrictBatchApplyError,
     };
     use std::fs;
-    use std::process::{Command, Stdio};
+    use std::process::Command;
     use tempfile::tempdir;
 
     fn mpatch_bin() -> &'static str {
@@ -11011,4 +11011,456 @@ mod atomic_apply_tests {
         assert_eq!(fs::read_to_string(&f1).unwrap(), "content_1\n");
         assert_eq!(fs::read_to_string(&f2).unwrap(), "content_2\n");
     }
+}
+
+#[test]
+fn test_similar_v3_format_inline_diff() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let expected = vec!["fn compute(x: i32) -> i32 {"];
+    let actual = vec!["fn compute(x: i64) -> i32 {"];
+    let diff = mpatch::format_inline_diff(&expected, &actual);
+    assert!(diff.contains("compute"));
+    assert!(diff.contains("i32"));
+    assert!(diff.contains("i64"));
+}
+
+#[test]
+fn test_similar_v3_merge_three_way_clean() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let base = "alpha\nbeta\ncommon\ngamma\ndelta\n";
+    let ours = "alpha\nbeta_modified\ncommon\ngamma\ndelta\n";
+    let theirs = "alpha\nbeta\ncommon\ngamma_modified\ndelta\n";
+    let (merged, is_conflicted) = mpatch::merge_three_way(base, ours, theirs, None);
+    assert!(!is_conflicted);
+    assert_eq!(merged, "alpha\nbeta_modified\ncommon\ngamma_modified\ndelta\n");
+}
+
+#[test]
+fn test_similar_v3_merge_three_way_conflicted() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let base = "status = draft\n";
+    let ours = "status = review\n";
+    let theirs = "status = published\n";
+    let (merged, is_conflicted) = mpatch::merge_three_way(
+        base,
+        ours,
+        theirs,
+        Some(("base", "ours", "theirs")),
+    );
+    assert!(is_conflicted);
+    assert!(merged.contains("<<<<<<< ours"));
+    assert!(merged.contains("||||||| base"));
+    assert!(merged.contains("======="));
+    assert!(merged.contains(">>>>>>> theirs"));
+}
+
+#[test]
+fn test_similar_v3_suggest_close_file_paths() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempfile::tempdir().unwrap();
+    let f1 = dir.path().join("service.rs");
+    let f2 = dir.path().join("controller.rs");
+    std::fs::write(&f1, "fn service() {}\n").unwrap();
+    std::fs::write(&f2, "fn controller() {}\n").unwrap();
+
+    let suggestions = mpatch::suggest_close_file_paths(
+        std::path::Path::new("services.rs"),
+        dir.path(),
+        3,
+    );
+    assert!(!suggestions.is_empty());
+    assert_eq!(suggestions[0].to_str().unwrap(), "service.rs");
+}
+
+#[test]
+fn test_similar_v3_format_inline_diff_multiline() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let expected = vec![
+        "def run_server(host, port):",
+        "    init_logger()",
+        "    bind_socket(host, port)",
+        "    start_loop()",
+    ];
+    let actual = vec![
+        "def run_server(host, port, timeout=30):",
+        "    init_logger()",
+        "    bind_socket(host, port)",
+        "    start_event_loop()",
+    ];
+
+    let diff = mpatch::format_inline_diff(&expected, &actual);
+    assert!(diff.contains("run_server"));
+    assert!(diff.contains("timeout=30"));
+    assert!(diff.contains("start_event_loop"));
+    assert!(diff.contains("init_logger"));
+    assert!(diff.contains('-'));
+    assert!(diff.contains('+'));
+}
+
+#[test]
+fn test_similar_v3_format_inline_diff_whitespace_and_punctuation() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let expected = vec!["fn compute(data: &[u8], timeout: u64) -> Result<()> {"];
+    let actual = vec!["fn compute(data: &[u8], timeout: Duration, force: bool) -> Result<()> {"];
+
+    let diff = mpatch::format_inline_diff(&expected, &actual);
+    assert!(diff.contains("compute"));
+    assert!(diff.contains("timeout"));
+    assert!(diff.contains("Duration"));
+    assert!(diff.contains("force: bool"));
+}
+
+#[test]
+fn test_similar_v3_merge_three_way_identical_edits() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let base = "line 1\nline 2\nline 3\n";
+    let ours = "line 1\nline TWO\nline 3\n";
+    let theirs = "line 1\nline TWO\nline 3\n";
+
+    let (merged, is_conflicted) = mpatch::merge_three_way(base, ours, theirs, None);
+    assert!(!is_conflicted, "Identical edits on both branches must not conflict");
+    assert_eq!(merged, "line 1\nline TWO\nline 3\n");
+}
+
+#[test]
+fn test_similar_v3_merge_three_way_disjoint_edits() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let base = "header\nmiddle 1\nmiddle 2\nfooter\n";
+    let ours = "NEW HEADER\nmiddle 1\nmiddle 2\nfooter\n";
+    let theirs = "header\nmiddle 1\nmiddle 2\nNEW FOOTER\n";
+
+    let (merged, is_conflicted) = mpatch::merge_three_way(base, ours, theirs, None);
+    assert!(!is_conflicted, "Disjoint edits must merge cleanly");
+    assert_eq!(merged, "NEW HEADER\nmiddle 1\nmiddle 2\nNEW FOOTER\n");
+}
+
+#[test]
+fn test_similar_v3_merge_three_way_custom_labels_diff3() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let base = "timeout = 30\n";
+    let ours = "timeout = 60\n";
+    let theirs = "timeout = 120\n";
+
+    let (merged, is_conflicted) = mpatch::merge_three_way(
+        base,
+        ours,
+        theirs,
+        Some(("ancestor-v1", "feature-timeout", "main-branch")),
+    );
+
+    assert!(is_conflicted);
+    assert!(merged.contains("<<<<<<< feature-timeout"));
+    assert!(merged.contains("||||||| ancestor-v1"));
+    assert!(merged.contains("======="));
+    assert!(merged.contains(">>>>>>> main-branch"));
+}
+
+#[test]
+fn test_similar_v3_suggest_close_file_paths_nested_and_exclusions() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path();
+
+    // Create nested source directories
+    std::fs::create_dir_all(base.join("crates/core/src/parser")).unwrap();
+    std::fs::create_dir_all(base.join("target/debug/build")).unwrap();
+    std::fs::create_dir_all(base.join("node_modules/some_lib")).unwrap();
+    std::fs::create_dir_all(base.join(".git/objects")).unwrap();
+
+    std::fs::write(base.join("crates/core/src/parser/engine.rs"), "pub struct Engine;").unwrap();
+    std::fs::write(base.join("target/debug/build/engine.rs"), "noise").unwrap();
+    std::fs::write(base.join("node_modules/some_lib/engine.rs"), "noise").unwrap();
+
+    // Query with a slight typo in the filename
+    let suggestions = mpatch::suggest_close_file_paths(
+        std::path::Path::new("crates/core/src/parser/engin.rs"),
+        base,
+        5,
+    );
+
+    assert!(!suggestions.is_empty());
+    let found = suggestions[0].to_str().unwrap().replace('\\', "/");
+    assert_eq!(found, "crates/core/src/parser/engine.rs");
+
+    // Ensure target, node_modules, and hidden dirs are never suggested
+    assert!(!suggestions.iter().any(|p| {
+        let s = p.to_string_lossy();
+        s.starts_with("target") || s.starts_with("node_modules") || s.starts_with(".git")
+    }));
+}
+
+#[test]
+fn test_similar_v3_suggest_close_file_paths_no_match() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path();
+    std::fs::write(base.join("main.rs"), "fn main() {}\n").unwrap();
+
+    let suggestions = mpatch::suggest_close_file_paths(
+        std::path::Path::new("totally_unrelated_xyz_12345.dat"),
+        base,
+        3,
+    );
+    assert!(suggestions.is_empty());
+}
+
+#[test]
+fn test_cli_suggests_close_path_on_target_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let target_file = dir.path().join("calculator.rs");
+    std::fs::write(&target_file, "fn add() {}\n").unwrap();
+
+    // Patch targets 'calculate.rs' instead of 'calculator.rs'
+    let diff = indoc! {r#"
+        --- a/calculate.rs
+        +++ b/calculate.rs
+        @@ -1 +1 @@
+        -fn add() {}
+        +fn add_numbers() {}
+    "#};
+    let patch_file = dir.path().join("patch.diff");
+    std::fs::write(&patch_file, diff).unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_mpatch"))
+        .arg(&patch_file)
+        .arg(dir.path())
+        .output()
+        .expect("Failed to execute mpatch binary");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Target file not found. Did you mean: 'calculator.rs'?"),
+        "Expected suggestion in stderr, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_cli_near_miss_inline_diagnostic_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let target_file = dir.path().join("worker.rs");
+    // Target file has slightly different context line to trigger FuzzyMatchBelowThreshold with fuzz_factor=0.99
+    std::fs::write(
+        &target_file,
+        "fn worker_task(id: u64, queue: &Queue) {\n    execute(id);\n}\n",
+    )
+    .unwrap();
+
+    let diff = indoc! {r#"
+        --- a/worker.rs
+        +++ b/worker.rs
+        @@ -1,3 +1,3 @@
+         fn worker_task(id: usize, queue: &Queue) {
+        -    execute(id);
+        +    execute_task(id);
+         }
+    "#};
+    let patch_file = dir.path().join("patch.diff");
+    std::fs::write(&patch_file, diff).unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_mpatch"))
+        .arg("-vv")
+        .arg("-f")
+        .arg("0.99") // Strict threshold ensures fuzzy near-miss failure
+        .arg(&patch_file)
+        .arg(dir.path())
+        .output()
+        .expect("Failed to execute mpatch binary");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Near-miss candidate at"),
+        "Expected near-miss candidate message in stderr, got: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("worker_task"),
+        "Expected diff lines in stderr, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_large_scale_patience_diff_roundtrip() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    // Generate 1,000+ lines of realistic code
+    let mut original = String::with_capacity(30_000);
+    for i in 0..100 {
+        original.push_str(&format!("fn function_{}(val: i32) -> i32 {{\n", i));
+        original.push_str(&format!("    let step_a = val + {};\n", i));
+        original.push_str("    let step_b = step_a * 2;\n");
+        original.push_str("    step_b\n");
+        original.push_str("}\n\n");
+    }
+
+    let mut modified = String::with_capacity(35_000);
+    // Insert helper functions every 15 items, and modify step_b calculation every 5 items
+    for i in 0..100 {
+        if i % 15 == 0 {
+            modified.push_str(&format!("// Added helper for module {}\nfn helper_module_{}() -> bool {{ true }}\n\n", i, i));
+        }
+        modified.push_str(&format!("fn function_{}(val: i32) -> i32 {{\n", i));
+        modified.push_str(&format!("    let step_a = val + {};\n", i));
+        if i % 5 == 0 {
+            modified.push_str(&format!("    let step_b = step_a * 10 + {};\n",i));
+        } else {
+            modified.push_str("    let step_b = step_a * 2;\n");
+        }
+        modified.push_str("    step_b\n");
+        modified.push_str("}\n\n");
+    }
+
+    // Generate patch using Algorithm::Patience
+    let patch = mpatch::Patch::from_texts("large.rs", &original, &modified, 3).unwrap();
+    assert!(patch.hunks.len() >= 20, "Should generate dozens of hunks across 1,000 lines");
+
+    // Apply patch to original and verify byte-for-byte equality with modified
+    let options = mpatch::ApplyOptions::exact();
+    let result = mpatch::apply_patch_to_content(&patch, Some(&original), &options);
+    assert!(
+        result.report.all_applied_cleanly(),
+        "All hunks generated by Patience diff should apply cleanly"
+    );
+    assert_eq!(result.new_content, modified);
+}
+
+#[test]
+fn test_large_scale_three_way_merge_concurrent_disjoint() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    // 1,000+ line base file containing 200 functions
+    let mut base = String::with_capacity(30_000);
+    for i in 0..200 {
+        base.push_str(&format!("// Component {}\nfn comp_{}() {{\n    step();\n}}\n\n", i, i));
+    }
+
+    // Branch A (ours) modifies every 4th function (0, 4, 8, ...)
+    let mut ours = String::with_capacity(30_000);
+    for i in 0..200 {
+        if i % 4 == 0 {
+            ours.push_str(&format!("// Component {}\nfn comp_{}() {{\n    ours_step();\n}}\n\n", i, i));
+        } else {
+            ours.push_str(&format!("// Component {}\nfn comp_{}() {{\n    step();\n}}\n\n", i, i));
+        }
+    }
+
+    // Branch B (theirs) modifies every 4th function with offset 2 (2, 6, 10, ...)
+    let mut theirs = String::with_capacity(30_000);
+    for i in 0..200 {
+        if i % 4 == 2 {
+            theirs.push_str(&format!("// Component {}\nfn comp_{}() {{\n    theirs_step();\n}}\n\n", i, i));
+        } else {
+            theirs.push_str(&format!("// Component {}\nfn comp_{}() {{\n    step();\n}}\n\n", i, i));
+        }
+    }
+
+    // 3-way merge across 200 functions with 100 concurrent edits
+    let (merged, is_conflicted) = mpatch::merge_three_way(&base, &ours, &theirs, None);
+    assert!(
+        !is_conflicted,
+        "Large-scale disjoint 3-way merge across 200 functions must resolve cleanly"
+    );
+
+    for i in 0..200 {
+        if i % 4 == 0 {
+            assert!(merged.contains(&format!("fn comp_{}() {{\n    ours_step();\n}}", i)));
+        } else if i % 4 == 2 {
+            assert!(merged.contains(&format!("fn comp_{}() {{\n    theirs_step();\n}}", i)));
+        }
+    }
+}
+
+#[test]
+fn test_large_scale_three_way_merge_interleaved_conflicts() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let mut base = String::new();
+    let mut ours = String::new();
+    let mut theirs = String::new();
+
+    for i in 0..50 {
+        base.push_str(&format!("// Module {}\nfn setup_{}() {{}}\n", i, i));
+        ours.push_str(&format!("// Module {}\nfn setup_{}() {{}}\n", i, i));
+        theirs.push_str(&format!("// Module {}\nfn setup_{}() {{}}\n", i, i));
+
+        if i % 2 == 0 {
+            base.push_str("state = 'base'\n\n");
+            ours.push_str("state = 'ours'\n\n");
+            theirs.push_str("state = 'theirs'\n\n");
+        } else {
+            base.push_str("state = 'base'\n\n");
+            ours.push_str("state = 'base'\n\n");
+            theirs.push_str("state = 'clean_theirs'\n\n");
+        }
+    }
+
+    let (merged, is_conflicted) = mpatch::merge_three_way(
+        &base,
+        &ours,
+        &theirs,
+        Some(("BASE", "OURS", "THEIRS")),
+    );
+
+    assert!(is_conflicted);
+    assert_eq!(merged.matches("<<<<<<< OURS").count(), 25);
+    assert_eq!(merged.matches("||||||| BASE").count(), 25);
+    assert_eq!(merged.matches(">>>>>>> THEIRS").count(), 25);
+
+    // The 25 odd non-conflicting modules must be merged cleanly without conflict markers
+    for i in (1..50).step_by(2) {
+        assert!(merged.contains(&format!("// Module {}\nfn setup_{}() {{}}\nstate = 'clean_theirs'\n\n", i, i)));
+    }
+}
+
+#[test]
+fn test_large_scale_suggest_close_file_paths_deep_tree() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path();
+
+    // Generate 250 files across deeply nested subdirectories
+    for module in &["auth", "billing", "analytics", "storage", "compute"] {
+        for layer in &["models", "views", "controllers", "services", "helpers"] {
+            let dir_path = base.join(format!("src/{}/{}", module, layer));
+            std::fs::create_dir_all(&dir_path).unwrap();
+            for k in 0..10 {
+                std::fs::write(dir_path.join(format!("handler_{}.rs", k)), "pub struct Handler;").unwrap();
+            }
+        }
+    }
+
+    // Query for a typo deep in the directory hierarchy
+    let suggestions = mpatch::suggest_close_file_paths(
+        std::path::Path::new("src/bililng/services/handler_7.rs"),
+        base,
+        3,
+    );
+
+    assert!(!suggestions.is_empty());
+    let top = suggestions[0].to_str().unwrap().replace('\\', "/");
+    assert_eq!(top, "src/billing/services/handler_7.rs");
+}
+
+#[test]
+fn test_large_scale_inline_diff_rendering() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let mut expected = Vec::with_capacity(100);
+    let mut actual = Vec::with_capacity(100);
+
+    for i in 0..100 {
+        expected.push(format!("pub fn handle_event_{}(ctx: &mut Context, id: u32) -> Result<(), Error> {{", i));
+        actual.push(format!("pub fn handle_event_{}(ctx: &mut Context, id: u64, flags: EventFlags) -> Result<(), AppError> {{", i));
+    }
+
+    let exp_refs: Vec<&str> = expected.iter().map(|s| s.as_str()).collect();
+    let diff = mpatch::format_inline_diff(&exp_refs, &actual);
+
+    assert!(diff.contains("handle_event_0"));
+    assert!(diff.contains("handle_event_99"));
+    assert!(diff.contains("EventFlags"));
+    assert!(diff.contains("AppError"));
 }
