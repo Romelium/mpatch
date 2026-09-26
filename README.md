@@ -43,6 +43,7 @@ You ask an AI to modify some code. You get the diff. Except, the comment inside 
 *   **🧠 Fuzzy Matching:** Runs a similarity algorithm to find the most suitable place to apply a patch if no exact matching is found. It supports stale context, whitespaces changes, and minor code differences.
 *   **🤖 Format Independent:** Automatically recognizes and processes:
     *   **Markdown** diff code blocks (standard chat output format).
+    *   **Atomic (All-or-Nothing) Mode:** With `-a` / `--atomic`, changes are only applied to disk if every single patch and hunk succeeds cleanly.
     *   **Aider Search/Replace** blocks (popularized by Aider and LLM coding assistants).
     *   **Wildcard / Ellipsis Matching:** Supports `...` and comment-wrapped ellipsis lines (`// ... existing code ...`) in search/replace blocks, preserving unchanged gaps.
     *   **Unified Diff** (output from `git diff` command).
@@ -116,6 +117,13 @@ Apply a patch file (Markdown, Diff, or Conflict markers) to a target directory.
 
 ```bash
 mpatch changes.md ./src
+```
+
+### Atomic (All-or-Nothing) Mode
+Only modify files on disk if **all** patches and hunks apply cleanly. If any hunk fails, zero files on disk are touched.
+
+```bash
+mpatch -a changes.md ./src
 ```
 
 ### From Standard Input (Stdin)

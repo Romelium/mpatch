@@ -192,6 +192,8 @@
 //!
 //! - [`apply_patches_to_dir()`]: Applies a list of patches to a directory. This is
 //!   ideal for processing multi-file diffs.
+//! - [`apply_patches_to_dir_atomic()`]: Applies a list of patches to a directory atomically.
+//!   Changes are written to disk if and only if all hunks across all patches apply cleanly.
 //! - [`apply_patch_to_file()`]: The most convenient function for applying a single
 //!   patch to a file. It handles reading the original file and writing the new content
 //!   back to disk. If the patch results in empty content, the file is deleted.
@@ -830,6 +832,22 @@ pub enum StrictApplyError {
         /// }
         /// ```
         report: ApplyResult,
+    },
+}
+
+/// Represents errors that can occur during strict batch patch operations.
+///
+/// This enum is returned by functions like [`try_apply_patches_to_dir()`] and
+/// [`try_apply_patches_to_dir_atomic()`], which treat partial applications or hard errors
+/// across any patch in a batch as an error.
+#[derive(Error, Debug)]
+#[non_exhaustive]
+pub enum StrictBatchApplyError {
+    /// One or more patch operations failed or applied partially.
+    #[error("One or more patch operations failed. See batch result for details.")]
+    Failed {
+        /// The aggregated results of the batch operations.
+        batch_result: BatchResult,
     },
 }
 
@@ -2102,6 +2120,27 @@ impl BatchResult {
             .filter_map(|(path, res)| res.as_ref().err().map(|e| (path, e)))
             .collect()
     }
+
+    /// Checks if all patches in the batch succeeded without hard errors AND all hunks in every
+    /// patch applied cleanly.
+    ///
+    /// # Returns
+    ///
+    /// `true` if every patch succeeded and every hunk in every patch applied cleanly, `false` otherwise.
+    pub fn all_applied_cleanly(&self) -> bool {
+        self.results
+            .iter()
+            .all(|(_, res)| res.as_ref().map_or(false, |p| p.report.all_applied_cleanly()))
+    }
+
+    /// Checks if any patch in the batch had a hard error or any hunk failed to apply.
+    ///
+    /// # Returns
+    ///
+    /// `true` if any patch had a hard error or any hunk failed to apply, `false` otherwise.
+    pub fn has_failures(&self) -> bool {
+        !self.all_applied_cleanly()
+    }
 }
 
 impl ApplyResult {
@@ -3069,6 +3108,75 @@ impl Patch {
                 .iter()
                 .all(|h| h.new_start_line == Some(0) || h.get_replace_block().is_empty())
     }
+
+    /// Applies this patch to a file on disk.
+    ///
+    /// This is an associated method equivalent to [`apply_patch_to_file()`].
+    ///
+    /// # Arguments
+    ///
+    /// * `target_dir` - The base directory where the patch should be applied.
+    /// * `options` - Configuration for the patch operation.
+    ///
+    /// # Returns
+    ///
+    /// A [`PatchResult`] on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(`[`PatchError`]`)` on hard errors like I/O failures or path traversal.
+    pub fn apply_to_file(
+        &self,
+        target_dir: &Path,
+        options: ApplyOptions,
+    ) -> Result<PatchResult, PatchError> {
+        apply_patch_to_file(self, target_dir, options)
+    }
+
+    /// Applies this patch to a file on disk atomically.
+    ///
+    /// Changes are written to disk if and only if all hunks in this patch apply cleanly.
+    /// If any hunk fails or encounters an error, the file on disk remains completely unmodified.
+    ///
+    /// # Arguments
+    ///
+    /// * `target_dir` - The base directory where the patch should be applied.
+    /// * `options` - Configuration for the patch operation.
+    ///
+    /// # Returns
+    ///
+    /// A [`PatchResult`] on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(`[`PatchError`]`)` on hard errors like I/O failures or path traversal.
+    pub fn apply_to_file_atomic(
+        &self,
+        target_dir: &Path,
+        options: ApplyOptions,
+    ) -> Result<PatchResult, PatchError> {
+        apply_patch_to_file_atomic(self, target_dir, options)
+    }
+
+    /// Applies this patch to string content in memory.
+    ///
+    /// This is an associated method equivalent to [`apply_patch_to_content()`].
+    ///
+    /// # Arguments
+    ///
+    /// * `original_content` - Optional string slice of the content to patch.
+    /// * `options` - Configuration for the patch operation.
+    ///
+    /// # Returns
+    ///
+    /// An [`InMemoryResult`] containing the new content and report.
+    pub fn apply_to_content(
+        &self,
+        original_content: Option<&str>,
+        options: &ApplyOptions,
+    ) -> InMemoryResult {
+        apply_patch_to_content(self, original_content, options)
+    }
 }
 
 impl std::fmt::Display for Patch {
@@ -3376,6 +3484,89 @@ fn is_aider_replace_fence(trimmed: &str) -> bool {
 /// * `line` - A string slice containing the single line of text to evaluate.
 ///
 /// # Returns
+
+/// Applies a single [`Patch`] to the filesystem atomically.
+///
+/// The target file is modified on disk **if and only if all hunks in the patch apply cleanly**.
+/// If any hunk fails or encounters an error, the file on disk remains completely untouched.
+///
+/// # Arguments
+///
+/// * `patch` - The [`Patch`] object to apply.
+/// * `target_dir` - The base directory where the patch should be applied.
+/// * `options` - Configuration for the patch operation.
+///
+/// # Returns
+///
+/// A [`PatchResult`] on success.
+///
+/// # Errors
+///
+/// Returns `Err(`[`PatchError`]`)` on hard errors like I/O problems or a missing target file.
+///
+/// # Examples
+///
+/// ```rust
+/// # use mpatch::{parse_single_patch, apply_patch_to_file_atomic, ApplyOptions};
+/// # use std::fs;
+/// # use tempfile::tempdir;
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let dir = tempdir()?;
+/// let file_path = dir.path().join("partial.txt");
+/// fs::write(&file_path, "line 1\nline 2\n")?;
+///
+/// // Second hunk will fail due to wrong context.
+/// let diff = r#"
+/// ```diff
+/// --- a/partial.txt
+/// +++ b/partial.txt
+/// @@ -1,1 +1,1 @@
+/// -line 1
+/// +line one
+/// @@ -2,1 +2,1 @@
+/// -WRONG
+/// +line two
+/// ```
+/// "#;
+/// let patch = parse_single_patch(diff)?;
+/// let options = ApplyOptions::exact();
+///
+/// let res = apply_patch_to_file_atomic(&patch, dir.path(), options)?;
+/// assert!(!res.report.all_applied_cleanly());
+///
+/// // In atomic mode, partial changes were discarded; file remains untouched!
+/// assert_eq!(fs::read_to_string(&file_path)?, "line 1\nline 2\n");
+/// # Ok(())
+/// # }
+/// ```
+pub fn apply_patch_to_file_atomic(
+    patch: &Patch,
+    target_dir: &Path,
+    options: ApplyOptions,
+) -> Result<PatchResult, PatchError> {
+    let mut batch = apply_patches_to_dir_atomic(std::slice::from_ref(patch), target_dir, options);
+    let (_, res) = batch.results.remove(0);
+    res
+}
+
+/// A strict variant of [`apply_patch_to_file_atomic()`] that treats partial applications as an error.
+///
+/// If any hunk fails to apply, the file on disk remains completely unmodified and an
+/// `Err(`[`StrictApplyError::PartialApply`]`)` is returned.
+pub fn try_apply_patch_to_file_atomic(
+    patch: &Patch,
+    target_dir: &Path,
+    options: ApplyOptions,
+) -> Result<PatchResult, StrictApplyError> {
+    let result = apply_patch_to_file_atomic(patch, target_dir, options)?;
+    if result.report.all_applied_cleanly() {
+        Ok(result)
+    } else {
+        Err(StrictApplyError::PartialApply {
+            report: result.report,
+        })
+    }
+}
 ///
 /// `true` if the line represents an ellipsis or omitted code wildcard, `false` otherwise.
 ///
@@ -5684,6 +5875,374 @@ pub fn apply_patches_to_dir(
         .collect();
 
     BatchResult { results }
+}
+
+/// Internal representation of applied file actions used during atomic disk commit rollback.
+#[derive(Debug)]
+enum AppliedCommitAction {
+    Created(PathBuf),
+    Overwritten { path: PathBuf, prev_content: String },
+    Deleted { path: PathBuf, prev_content: String },
+}
+
+/// Rolls back committed filesystem actions in reverse order upon encountering an unexpected I/O error.
+fn rollback_committed_actions(actions: Vec<AppliedCommitAction>) {
+    for action in actions.into_iter().rev() {
+        match action {
+            AppliedCommitAction::Created(path) => {
+                let _ = fs::remove_file(&path);
+            }
+            AppliedCommitAction::Overwritten { path, prev_content }
+            | AppliedCommitAction::Deleted { path, prev_content } => {
+                let _ = fs::write(&path, prev_content);
+            }
+        }
+    }
+}
+
+/// Applies a slice of [`Patch`] objects to a target directory atomically.
+///
+/// Unlike [`apply_patches_to_dir()`], this function stages all file modifications in-memory
+/// first. Changes are committed to disk **if and only if all hunks across all patches apply
+/// cleanly without errors**.
+///
+/// If any hunk in any patch fails, or if any hard error (such as a missing target file or path
+/// traversal attempt) occurs:
+/// - **Zero files on disk are modified, created, or deleted.**
+/// - The filesystem remains in its exact, original state.
+/// - The returned [`BatchResult`] details the status of every hunk and patch.
+///
+/// # Arguments
+///
+/// * `patches` - A slice of [`Patch`] objects to apply.
+/// * `target_dir` - The base directory where patches should be applied.
+/// * `options` - Configuration for the patch operation.
+///
+/// # Returns
+///
+/// A [`BatchResult`] containing the outcome of each patch operation.
+///
+/// # Examples
+///
+/// ```rust
+/// # use mpatch::{parse_auto, apply_patches_to_dir_atomic, ApplyOptions};
+/// # use std::fs;
+/// # use tempfile::tempdir;
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let dir = tempdir()?;
+/// let file1 = dir.path().join("file1.txt");
+/// let file2 = dir.path().join("file2.txt");
+/// fs::write(&file1, "foo\n")?;
+/// fs::write(&file2, "bar\n")?;
+///
+/// // Second patch has invalid context and will fail.
+/// let diff = r#"
+/// --- a/file1.txt
+/// +++ b/file1.txt
+/// @@ -1 +1 @@
+/// -foo
+/// +foo_updated
+/// --- a/file2.txt
+/// +++ b/file2.txt
+/// @@ -1 +1 @@
+/// -WRONG_CONTEXT
+/// +bar_updated
+/// "#;
+/// let patches = parse_auto(diff)?;
+/// let options = ApplyOptions::exact();
+///
+/// let batch = apply_patches_to_dir_atomic(&patches, dir.path(), options);
+///
+/// // Because patch 2 failed, neither file was modified on disk!
+/// assert!(!batch.all_applied_cleanly());
+/// assert_eq!(fs::read_to_string(&file1)?, "foo\n");
+/// assert_eq!(fs::read_to_string(&file2)?, "bar\n");
+/// # Ok(())
+/// # }
+/// ```
+pub fn apply_patches_to_dir_atomic(
+    patches: &[Patch],
+    target_dir: &Path,
+    options: ApplyOptions,
+) -> BatchResult {
+    debug!(
+        "Applying {} patch(es) to '{}' in atomic mode.",
+        patches.len(),
+        target_dir.display()
+    );
+
+    struct StagedFile {
+        safe_path: PathBuf,
+        existed_on_disk: bool,
+        original_disk_content: Option<String>,
+        current_content: Option<String>,
+    }
+
+    let mut staged_files: HashMap<PathBuf, StagedFile> = HashMap::new();
+    let mut results: Vec<(PathBuf, Result<PatchResult, PatchError>)> =
+        Vec::with_capacity(patches.len());
+
+    for patch in patches {
+        let safe_target_path = match ensure_path_is_safe(target_dir, &patch.file_path) {
+            Ok(p) => p,
+            Err(e) => {
+                results.push((patch.file_path.clone(), Err(e)));
+                continue;
+            }
+        };
+
+        if safe_target_path.is_dir() {
+            results.push((
+                patch.file_path.clone(),
+                Err(PatchError::TargetIsDirectory {
+                    path: safe_target_path,
+                }),
+            ));
+            continue;
+        }
+
+        // Retrieve existing staged state or read from disk
+        let staged = match staged_files.entry(safe_target_path.clone()) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let (existed, content) = if safe_target_path.is_file() {
+                    match fs::read_to_string(&safe_target_path) {
+                        Ok(c) => (true, Some(c)),
+                        Err(e) => {
+                            results.push((
+                                patch.file_path.clone(),
+                                Err(map_io_error(safe_target_path.clone(), e)),
+                            ));
+                            continue;
+                        }
+                    }
+                } else {
+                    (false, None)
+                };
+                let curr = content.clone();
+                entry.insert(StagedFile {
+                    safe_path: safe_target_path.clone(),
+                    existed_on_disk: existed,
+                    original_disk_content: content,
+                    current_content: curr,
+                })
+            }
+        };
+
+        if staged.current_content.is_none() && !patch.is_creation() {
+            results.push((
+                patch.file_path.clone(),
+                Err(PatchError::TargetNotFound(target_dir.join(&patch.file_path))),
+            ));
+            continue;
+        }
+
+        let original_before_patch = staged.current_content.clone();
+        let in_memory_res =
+            apply_patch_to_content(patch, original_before_patch.as_deref(), &options);
+
+        let mut diff = None;
+        if options.dry_run {
+            let a_path = format!("a/{}", patch.file_path.display());
+            let b_path = format!("b/{}", patch.file_path.display());
+            let diff_text = unified_diff(
+                similar::Algorithm::default(),
+                original_before_patch.as_deref().unwrap_or(""),
+                &in_memory_res.new_content,
+                3,
+                Some((&a_path, &b_path)),
+            );
+            diff = Some(diff_text.to_string());
+        }
+
+        staged.current_content = Some(in_memory_res.new_content);
+
+        results.push((
+            patch.file_path.clone(),
+            Ok(PatchResult {
+                report: in_memory_res.report,
+                diff,
+            }),
+        ));
+    }
+
+    // Check if every patch succeeded without hard error and all hunks applied cleanly
+    let all_applied_cleanly = results
+        .iter()
+        .all(|(_, res)| res.as_ref().map_or(false, |r| r.report.all_applied_cleanly()));
+
+    if !all_applied_cleanly || options.dry_run || staged_files.is_empty() {
+        if options.dry_run {
+            info!(
+                "  DRY RUN (atomic): Evaluated {} patch(es). No files modified on disk.",
+                patches.len()
+            );
+        } else if !all_applied_cleanly {
+            info!("  ATOMIC APPLY ABORTED: Not all patches or hunks applied cleanly. Zero files modified on disk.");
+        }
+        return BatchResult { results };
+    }
+
+    // Commit phase: Write all staged files to disk in deterministic order
+    info!(
+        "  Atomic check passed! Committing changes for {} file(s) to disk...",
+        staged_files.len()
+    );
+
+    let mut staged_list: Vec<_> = staged_files.into_values().collect();
+    staged_list.sort_by(|a, b| a.safe_path.cmp(&b.safe_path));
+
+    let mut applied_actions: Vec<AppliedCommitAction> = Vec::new();
+
+    for staged in staged_list {
+        let new_content = staged.current_content.unwrap_or_default();
+        if new_content.is_empty() {
+            if staged.existed_on_disk && staged.safe_path.exists() {
+                if let Err(e) = fs::remove_file(&staged.safe_path) {
+                    warn!(
+                        "  I/O error removing file '{}' during atomic commit: {}. Rolling back...",
+                        staged.safe_path.display(),
+                        e
+                    );
+                    rollback_committed_actions(applied_actions);
+                    let err_kind = e.kind();
+                    let err_str = e.to_string();
+                    for (path, res) in &mut results {
+                        if ensure_path_is_safe(target_dir, path).ok().as_ref()
+                            == Some(&staged.safe_path)
+                        {
+                            *res = Err(map_io_error(
+                                staged.safe_path.clone(),
+                                std::io::Error::new(err_kind, err_str.clone()),
+                            ));
+                        }
+                    }
+                    return BatchResult { results };
+                }
+                applied_actions.push(AppliedCommitAction::Deleted {
+                    path: staged.safe_path,
+                    prev_content: staged.original_disk_content.unwrap_or_default(),
+                });
+            }
+        } else {
+            if let Some(parent) = staged.safe_path.parent() {
+                if let Err(e) = fs::create_dir_all(parent) {
+                    warn!("  I/O error creating parent directory '{}' during atomic commit: {}. Rolling back...", parent.display(), e);
+                    rollback_committed_actions(applied_actions);
+                    let err_kind = e.kind();
+                    let err_str = e.to_string();
+                    for (path, res) in &mut results {
+                        if ensure_path_is_safe(target_dir, path).ok().as_ref()
+                            == Some(&staged.safe_path)
+                        {
+                            *res = Err(map_io_error(
+                                parent.to_path_buf(),
+                                std::io::Error::new(err_kind, err_str.clone()),
+                            ));
+                        }
+                    }
+                    return BatchResult { results };
+                }
+            }
+
+            let was_file = staged.existed_on_disk;
+            let prev = staged.original_disk_content;
+
+            if let Err(e) = fs::write(&staged.safe_path, &new_content) {
+                warn!(
+                    "  I/O error writing file '{}' during atomic commit: {}. Rolling back...",
+                    staged.safe_path.display(),
+                    e
+                );
+                rollback_committed_actions(applied_actions);
+                let err_kind = e.kind();
+                let err_str = e.to_string();
+                for (path, res) in &mut results {
+                    if ensure_path_is_safe(target_dir, path).ok().as_ref()
+                        == Some(&staged.safe_path)
+                    {
+                        *res = Err(map_io_error(
+                            staged.safe_path.clone(),
+                            std::io::Error::new(err_kind, err_str.clone()),
+                        ));
+                    }
+                }
+                return BatchResult { results };
+            }
+
+            if was_file {
+                applied_actions.push(AppliedCommitAction::Overwritten {
+                    path: staged.safe_path,
+                    prev_content: prev.unwrap_or_default(),
+                });
+            } else {
+                applied_actions.push(AppliedCommitAction::Created(staged.safe_path));
+            }
+        }
+    }
+
+    info!("  Successfully committed all atomic changes to disk.");
+    BatchResult { results }
+}
+
+/// A strict variant of [`apply_patches_to_dir_atomic()`] that treats partial applications as an error.
+///
+/// # Arguments
+///
+/// * `patches` - A slice of [`Patch`] objects to apply.
+/// * `target_dir` - The base directory where patches should be applied.
+/// * `options` - Configuration for the patch operation.
+///
+/// # Returns
+///
+/// `Ok(`[`BatchResult`]`)` if all patches and hunks applied cleanly.
+///
+/// # Errors
+///
+/// Returns `Err(`[`StrictBatchApplyError::Failed`]`)` if any patch had a hard error or any hunk failed.
+pub fn try_apply_patches_to_dir_atomic(
+    patches: &[Patch],
+    target_dir: &Path,
+    options: ApplyOptions,
+) -> Result<BatchResult, StrictBatchApplyError> {
+    let result = apply_patches_to_dir_atomic(patches, target_dir, options);
+    if result.all_applied_cleanly() {
+        Ok(result)
+    } else {
+        Err(StrictBatchApplyError::Failed {
+            batch_result: result,
+        })
+    }
+}
+
+/// A strict variant of [`apply_patches_to_dir()`] that treats partial applications as an error.
+///
+/// # Arguments
+///
+/// * `patches` - A slice of [`Patch`] objects to apply.
+/// * `target_dir` - The base directory where patches should be applied.
+/// * `options` - Configuration for the patch operation.
+///
+/// # Returns
+///
+/// `Ok(`[`BatchResult`]`)` if all patches and hunks applied cleanly.
+///
+/// # Errors
+///
+/// Returns `Err(`[`StrictBatchApplyError::Failed`]`)` if any patch had a hard error or any hunk failed.
+pub fn try_apply_patches_to_dir(
+    patches: &[Patch],
+    target_dir: &Path,
+    options: ApplyOptions,
+) -> Result<BatchResult, StrictBatchApplyError> {
+    let result = apply_patches_to_dir(patches, target_dir, options);
+    if result.all_applied_cleanly() {
+        Ok(result)
+    } else {
+        Err(StrictBatchApplyError::Failed {
+            batch_result: result,
+        })
+    }
 }
 
 /// Inverts a list of patches.

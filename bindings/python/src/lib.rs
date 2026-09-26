@@ -372,6 +372,7 @@ impl PyPatch {
     ///     target_dir (str | os.PathLike): The base directory to apply the patch.
     ///     fuzz_factor (float, optional): Similarity threshold (0.0 to 1.0). Default is 0.7.
     ///     dry_run (bool, optional): If True, previews changes without writing to disk. Default is False.
+    ///     atomic (bool, optional): If True, only writes to disk if all hunks apply cleanly. Default is False.
     ///
     /// Returns:
     ///     PatchResult: The result of the application.
@@ -379,15 +380,17 @@ impl PyPatch {
     /// Raises:
     ///     PathTraversalError: If the target file path resolves outside the target directory.
     ///     ApplyError: If an I/O error or permission issue occurs while accessing the file.
-    #[pyo3(signature = (target_dir, *, fuzz_factor=0.7, dry_run=false))]
+    #[pyo3(signature = (target_dir, *, fuzz_factor=0.7, dry_run=false, atomic=false))]
     fn apply_to_file(
+        &self,
         &self,
         py: Python<'_>,
         target_dir: PathBuf,
         fuzz_factor: f32,
         dry_run: bool,
+        atomic: bool,
     ) -> PyResult<PyPatchResult> {
-        apply_patch_to_file(py, self, target_dir, fuzz_factor, dry_run)
+        apply_patch_to_file(py, self, target_dir, fuzz_factor, dry_run, atomic)
     }
 
     /// Applies the patch to a string in memory.
@@ -796,6 +799,12 @@ impl PyBatchResult {
     }
 
     #[getter]
+    /// True if all patches in the batch succeeded and all hunks applied cleanly.
+    fn all_applied_cleanly(&self) -> bool {
+        self.inner.all_applied_cleanly()
+    }
+
+    #[getter]
     /// A list of operations that resulted in a hard error.
     fn hard_failures(&self) -> Vec<(String, String)> {
         self.inner
@@ -1091,7 +1100,7 @@ fn patch_content(
 }
 
 #[pyfunction]
-#[pyo3(signature = (diff, target_dir, *, fuzz_factor=0.7, dry_run=false))]
+#[pyo3(signature = (diff, target_dir, *, fuzz_factor=0.7, dry_run=false, atomic=false))]
 /// Applies a diff containing multiple patches to a target directory.
 ///
 /// Args:
@@ -1099,6 +1108,7 @@ fn patch_content(
 ///     target_dir (str | os.PathLike): The base directory to apply the patches.
 ///     fuzz_factor (float, optional): Similarity threshold (0.0 to 1.0). Default is 0.7.
 ///     dry_run (bool, optional): If True, previews changes without writing to disk. Default is False.
+///     atomic (bool, optional): If True, only writes to disk if all patches and hunks succeed cleanly. Default is False.
 ///
 /// Returns:
 ///     bool: True if all patches succeeded, False if any hard errors occurred.
@@ -1111,6 +1121,7 @@ fn apply_directory(
     target_dir: PathBuf,
     fuzz_factor: f32,
     dry_run: bool,
+    atomic: bool,
 ) -> PyResult<bool> {
     let options = build_apply_options(fuzz_factor, dry_run);
 
@@ -1118,8 +1129,16 @@ fn apply_directory(
 
     let success = py.detach(move || -> PyResult<bool> {
         let patches = ::mpatch::parse_auto(&diff_str).map_err(map_parse_err)?;
-        let result = ::mpatch::apply_patches_to_dir(&patches, &target_dir, options);
-        Ok(result.all_succeeded())
+        let result = if atomic {
+            ::mpatch::apply_patches_to_dir_atomic(&patches, &target_dir, options)
+        } else {
+            ::mpatch::apply_patches_to_dir(&patches, &target_dir, options)
+        };
+        Ok(if atomic {
+            result.all_applied_cleanly()
+        } else {
+            result.all_succeeded()
+        })
     })?;
 
     Ok(success)
@@ -1157,7 +1176,7 @@ fn apply_patch_to_content(
 }
 
 #[pyfunction]
-#[pyo3(signature = (patch, target_dir, *, fuzz_factor=0.7, dry_run=false))]
+#[pyo3(signature = (patch, target_dir, *, fuzz_factor=0.7, dry_run=false, atomic=false))]
 /// Applies a Patch object to a file on disk.
 ///
 /// Args:
@@ -1165,6 +1184,7 @@ fn apply_patch_to_content(
 ///     target_dir (str | os.PathLike): The base directory to apply the patch.
 ///     fuzz_factor (float, optional): Similarity threshold (0.0 to 1.0). Default is 0.7.
 ///     dry_run (bool, optional): If True, previews changes without writing to disk. Default is False.
+///     atomic (bool, optional): If True, only writes to disk if all hunks apply cleanly. Default is False.
 ///
 /// Returns:
 ///     PatchResult: The result of the application.
@@ -1178,13 +1198,19 @@ fn apply_patch_to_file(
     target_dir: PathBuf,
     fuzz_factor: f32,
     dry_run: bool,
+    atomic: bool,
 ) -> PyResult<PyPatchResult> {
     let options = build_apply_options(fuzz_factor, dry_run);
 
     let patch_inner = patch.inner.clone();
 
-    let result =
-        py.detach(move || ::mpatch::apply_patch_to_file(&patch_inner, &target_dir, options));
+    let result = py.detach(move || {
+        if atomic {
+            ::mpatch::apply_patch_to_file_atomic(&patch_inner, &target_dir, options)
+        } else {
+            ::mpatch::apply_patch_to_file(&patch_inner, &target_dir, options)
+        }
+    });
 
     match result {
         Ok(res) => Ok(PyPatchResult { inner: res }),
@@ -1199,7 +1225,7 @@ fn apply_patch_to_file(
 }
 
 #[pyfunction]
-#[pyo3(signature = (patches, target_dir, *, fuzz_factor=0.7, dry_run=false))]
+#[pyo3(signature = (patches, target_dir, *, fuzz_factor=0.7, dry_run=false, atomic=false))]
 /// Applies a list of patches to a directory on disk.
 ///
 /// Args:
@@ -1207,6 +1233,7 @@ fn apply_patch_to_file(
 ///     target_dir (str | os.PathLike): The base directory to apply the patches.
 ///     fuzz_factor (float, optional): Similarity threshold (0.0 to 1.0). Default is 0.7.
 ///     dry_run (bool, optional): If True, previews changes without writing to disk. Default is False.
+///     atomic (bool, optional): If True, only writes to disk if all patches and hunks apply cleanly. Default is False.
 ///
 /// Returns:
 ///     BatchResult: The aggregated results of the applications.
@@ -1216,13 +1243,19 @@ fn apply_patches_to_dir(
     target_dir: PathBuf,
     fuzz_factor: f32,
     dry_run: bool,
+    atomic: bool,
 ) -> PyBatchResult {
     let options = build_apply_options(fuzz_factor, dry_run);
 
     let patches_inner: Vec<::mpatch::Patch> = patches.into_iter().map(|p| p.inner).collect();
 
-    let result =
-        py.detach(move || ::mpatch::apply_patches_to_dir(&patches_inner, &target_dir, options));
+    let result = py.detach(move || {
+        if atomic {
+            ::mpatch::apply_patches_to_dir_atomic(&patches_inner, &target_dir, options)
+        } else {
+            ::mpatch::apply_patches_to_dir(&patches_inner, &target_dir, options)
+        }
+    });
 
     PyBatchResult { inner: result }
 }

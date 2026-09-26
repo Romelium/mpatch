@@ -1,9 +1,11 @@
 use indoc::indoc;
 use mpatch::{
-    apply_hunk_to_lines, apply_patch_to_file, apply_patch_to_lines, apply_patches_to_dir,
-    detect_patch, find_hunk_location, find_hunk_location_in_lines, invert_patches, parse_aider,
+    apply_hunk_to_lines, apply_patch_to_file, apply_patch_to_file_atomic, apply_patch_to_lines,
+    apply_patches_to_dir, apply_patches_to_dir_atomic, detect_patch, find_hunk_location,
+    find_hunk_location_in_lines, invert_patches, parse_aider,
     parse_auto, parse_diffs, parse_patches, parse_patches_from_lines, patch_content_str,
-    try_apply_patch_to_content, try_apply_patch_to_file, try_apply_patch_to_lines, ApplyOptions,
+    try_apply_patch_to_content, try_apply_patch_to_file, try_apply_patch_to_file_atomic,
+    try_apply_patch_to_lines, try_apply_patches_to_dir_atomic, ApplyOptions,
     DefaultHunkFinder, Hunk, HunkApplyError, HunkApplyStatus, HunkFinder, HunkLocation, MatchType,
     ParseError, Patch, PatchError, PatchFormat, StrictApplyError,
 };
@@ -10775,5 +10777,238 @@ mod stdin_cli_tests {
         child.stdin.as_mut().unwrap().write_all(malformed.as_bytes()).unwrap();
         let output = child.wait_with_output().unwrap();
         assert!(!output.status.success());
+    }
+}
+
+mod atomic_apply_tests {
+    use indoc::indoc;
+    use mpatch::{
+        apply_patch_to_file_atomic, apply_patches_to_dir_atomic, parse_auto,
+        try_apply_patch_to_file_atomic, try_apply_patches_to_dir_atomic, ApplyOptions,
+        StrictApplyError, StrictBatchApplyError,
+    };
+    use std::fs;
+    use std::process::{Command, Stdio};
+    use tempfile::tempdir;
+
+    fn mpatch_bin() -> &'static str {
+        env!("CARGO_BIN_EXE_mpatch")
+    }
+
+    #[test]
+    fn test_single_patch_atomic_success() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("atomic_test.txt");
+        fs::write(&file_path, "line 1\nline 2\n").unwrap();
+
+        let diff = indoc! {r#"
+            --- a/atomic_test.txt
+            +++ b/atomic_test.txt
+            @@ -1,2 +1,2 @@
+             line 1
+            -line 2
+            +line two
+        "#};
+        let patch = parse_auto(diff).unwrap().remove(0);
+        let res = apply_patch_to_file_atomic(&patch, dir.path(), ApplyOptions::exact()).unwrap();
+        assert!(res.report.all_applied_cleanly());
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "line 1\nline two\n");
+    }
+
+    #[test]
+    fn test_single_patch_atomic_failure_discards_all_edits() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("partial_target.txt");
+        let original = "line 1\nline 2\nline 3\n\nline 5\nline 6\nline 7\n";
+        fs::write(&file_path, original).unwrap();
+
+        let diff = indoc! {r#"
+            --- a/partial_target.txt
+            +++ b/partial_target.txt
+            @@ -1,3 +1,3 @@
+             line 1
+            -line 2
+            +line two
+             line 3
+            @@ -5,3 +5,3 @@
+             line 5
+            -line WRONG
+            +line six
+             line 7
+        "#};
+        let patch = parse_auto(diff).unwrap().remove(0);
+        let res = apply_patch_to_file_atomic(&patch, dir.path(), ApplyOptions::exact()).unwrap();
+        assert!(!res.report.all_applied_cleanly());
+
+        // The file on disk must be COMPLETELY unmodified (unlike non-atomic apply)
+        let disk_content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(disk_content, original);
+    }
+
+    #[test]
+    fn test_try_apply_patch_to_file_atomic_failure() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("strict_atomic.txt");
+        let original = "line 1\nline 2\n";
+        fs::write(&file_path, original).unwrap();
+
+        let diff = indoc! {r#"
+            --- a/strict_atomic.txt
+            +++ b/strict_atomic.txt
+            @@ -1,2 +1,2 @@
+             line 1
+            -WRONG
+            +line two
+        "#};
+        let patch = parse_auto(diff).unwrap().remove(0);
+        let res = try_apply_patch_to_file_atomic(&patch, dir.path(), ApplyOptions::exact());
+        assert!(matches!(res, Err(StrictApplyError::PartialApply { .. })));
+
+        let disk_content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(disk_content, original);
+    }
+
+    #[test]
+    fn test_batch_atomic_success() {
+        let dir = tempdir().unwrap();
+        let f1 = dir.path().join("f1.txt");
+        let f2 = dir.path().join("f2.txt");
+        fs::write(&f1, "apple\n").unwrap();
+        fs::write(&f2, "banana\n").unwrap();
+
+        let diff = indoc! {r#"
+            --- a/f1.txt
+            +++ b/f1.txt
+            @@ -1 +1 @@
+            -apple
+            +apricot
+            --- a/f2.txt
+            +++ b/f2.txt
+            @@ -1 +1 @@
+            -banana
+            +blueberry
+        "#};
+        let patches = parse_auto(diff).unwrap();
+        let batch = apply_patches_to_dir_atomic(&patches, dir.path(), ApplyOptions::exact());
+        assert!(batch.all_applied_cleanly());
+        assert!(!batch.has_failures());
+
+        assert_eq!(fs::read_to_string(&f1).unwrap(), "apricot\n");
+        assert_eq!(fs::read_to_string(&f2).unwrap(), "blueberry\n");
+    }
+
+    #[test]
+    fn test_batch_atomic_partial_failure_discards_all_files() {
+        let dir = tempdir().unwrap();
+        let f1 = dir.path().join("f1.txt");
+        let f2 = dir.path().join("f2.txt");
+        fs::write(&f1, "foo\n").unwrap();
+        fs::write(&f2, "bar\n").unwrap();
+
+        let diff = indoc! {r#"
+            --- a/f1.txt
+            +++ b/f1.txt
+            @@ -1 +1 @@
+            -foo
+            +foo_updated
+            --- a/f2.txt
+            +++ b/f2.txt
+            @@ -1 +1 @@
+            -WRONG_CONTEXT
+            +bar_updated
+        "#};
+        let patches = parse_auto(diff).unwrap();
+        let batch = apply_patches_to_dir_atomic(&patches, dir.path(), ApplyOptions::exact());
+        assert!(batch.all_succeeded()); // No I/O errors
+        assert!(!batch.all_applied_cleanly()); // One patch had a failing hunk
+        assert!(batch.has_failures());
+
+        // NEITHER file should have been modified on disk!
+        assert_eq!(fs::read_to_string(&f1).unwrap(), "foo\n");
+        assert_eq!(fs::read_to_string(&f2).unwrap(), "bar\n");
+    }
+
+    #[test]
+    fn test_batch_atomic_file_creation_aborted() {
+        let dir = tempdir().unwrap();
+        let existing = dir.path().join("existing.txt");
+        let new_file = dir.path().join("new_file.txt");
+        fs::write(&existing, "line 1\n").unwrap();
+
+        let diff = indoc! {r#"
+            --- /dev/null
+            +++ b/new_file.txt
+            @@ -0,0 +1 @@
+            +created
+            --- a/existing.txt
+            +++ b/existing.txt
+            @@ -1 +1 @@
+            -WRONG
+            +modified
+        "#};
+        let patches = parse_auto(diff).unwrap();
+        let batch = apply_patches_to_dir_atomic(&patches, dir.path(), ApplyOptions::exact());
+        assert!(!batch.all_applied_cleanly());
+
+        // New file must NOT be created, existing file must remain unchanged
+        assert!(!new_file.exists());
+        assert_eq!(fs::read_to_string(&existing).unwrap(), "line 1\n");
+    }
+
+    #[test]
+    fn test_try_apply_patches_to_dir_atomic_err() {
+        let dir = tempdir().unwrap();
+        let f1 = dir.path().join("f1.txt");
+        fs::write(&f1, "alpha\n").unwrap();
+
+        let diff = indoc! {r#"
+            --- a/f1.txt
+            +++ b/f1.txt
+            @@ -1 +1 @@
+            -WRONG
+            +beta
+        "#};
+        let patches = parse_auto(diff).unwrap();
+        let res = try_apply_patches_to_dir_atomic(&patches, dir.path(), ApplyOptions::exact());
+        assert!(matches!(res, Err(StrictBatchApplyError::Failed { .. })));
+        assert_eq!(fs::read_to_string(&f1).unwrap(), "alpha\n");
+    }
+
+    #[test]
+    fn test_cli_atomic_flag_discards_on_failure() {
+        let dir = tempdir().unwrap();
+        let f1 = dir.path().join("f1.txt");
+        let f2 = dir.path().join("f2.txt");
+        fs::write(&f1, "content_1\n").unwrap();
+        fs::write(&f2, "content_2\n").unwrap();
+
+        let diff = indoc! {r#"
+            --- a/f1.txt
+            +++ b/f1.txt
+            @@ -1 +1 @@
+            -content_1
+            +content_1_updated
+            --- a/f2.txt
+            +++ b/f2.txt
+            @@ -1 +1 @@
+            -DOES_NOT_EXIST
+            +content_2_updated
+        "#};
+        let diff_file = dir.path().join("patch.diff");
+        fs::write(&diff_file, diff).unwrap();
+
+        let output = Command::new(mpatch_bin())
+            .arg("-a")
+            .arg(&diff_file)
+            .arg(dir.path())
+            .output()
+            .expect("Failed to execute mpatch binary");
+
+        assert!(!output.status.success());
+        // In atomic mode (-a), f1 must NOT be touched
+        assert_eq!(fs::read_to_string(&f1).unwrap(), "content_1\n");
+        assert_eq!(fs::read_to_string(&f2).unwrap(), "content_2\n");
     }
 }

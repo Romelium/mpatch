@@ -173,6 +173,7 @@ class Patch:
         *,
         fuzz_factor: float = 0.7,
         dry_run: bool = False,
+        atomic: bool = False,
     ) -> PatchResult:
         """
         Applies the patch to a file on disk (OOP alias for `apply_patch_to_file`).
@@ -181,6 +182,7 @@ class Patch:
             target_dir (str | os.PathLike): The base directory to apply the patch.
             fuzz_factor (float, optional): Similarity threshold (0.0 to 1.0). Default is 0.7.
             dry_run (bool, optional): If True, previews changes without writing to disk. Default is False.
+            atomic (bool, optional): If True, only writes changes to disk if all hunks apply cleanly. Default is False.
 
         Returns:
             PatchResult: The result of the application.
@@ -344,6 +346,10 @@ class BatchResult:
     @property
     def all_succeeded(self) -> bool:
         """True if all patches in the batch were applied without hard errors."""
+        ...
+    @property
+    def all_applied_cleanly(self) -> bool:
+        """True if all patches in the batch succeeded and all hunks applied cleanly."""
         ...
     @property
     def hard_failures(self) -> list[tuple[str, str]]:
@@ -525,6 +531,7 @@ def apply_directory(
     *,
     fuzz_factor: float = 0.7,
     dry_run: bool = False,
+    atomic: bool = False,
 ) -> bool:
     """
     Applies a diff containing multiple patches to a target directory.
@@ -534,6 +541,7 @@ def apply_directory(
         target_dir (str | os.PathLike): The base directory to apply the patches.
         fuzz_factor (float, optional): Similarity threshold (0.0 to 1.0). Default is 0.7.
         dry_run (bool, optional): If True, previews changes without writing to disk. Default is False.
+        atomic (bool, optional): If True, only writes to disk if all patches and hunks apply cleanly. Default is False.
 
     Returns:
         bool: True if all patches succeeded, False if any hard errors occurred.
@@ -570,6 +578,7 @@ def apply_patch_to_file(
     *,
     fuzz_factor: float = 0.7,
     dry_run: bool = False,
+    atomic: bool = False,
 ) -> PatchResult:
     """
     Applies a Patch object to a file on disk.
@@ -579,6 +588,7 @@ def apply_patch_to_file(
         target_dir (str | os.PathLike): The base directory to apply the patch.
         fuzz_factor (float, optional): Similarity threshold (0.0 to 1.0). Default is 0.7.
         dry_run (bool, optional): If True, previews changes without writing to disk. Default is False.
+        atomic (bool, optional): If True, only writes to disk if all hunks in the patch apply cleanly. Default is False.
 
     Returns:
         PatchResult: The result of the application.
@@ -595,6 +605,7 @@ def apply_patches_to_dir(
     *,
     fuzz_factor: float = 0.7,
     dry_run: bool = False,
+    atomic: bool = False,
 ) -> BatchResult:
     """
     Applies a list of patches to a directory on disk.
@@ -604,6 +615,7 @@ def apply_patches_to_dir(
         target_dir (str | os.PathLike): The base directory to apply the patches.
         fuzz_factor (float, optional): Similarity threshold (0.0 to 1.0). Default is 0.7.
         dry_run (bool, optional): If True, previews changes without writing to disk. Default is False.
+        atomic (bool, optional): If True, only writes to disk if all patches and hunks apply cleanly. Default is False.
 
     Returns:
         BatchResult: The aggregated results of the applications.

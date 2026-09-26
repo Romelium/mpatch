@@ -723,3 +723,80 @@ def test_python_wildcard_empty_lines_gap_preserved():
     """)
     patched = mpatch.patch_content(diff, original=original)
     assert patched == "def init():\n    setup()\n\n    \n    log_done()\n    finish()\n"
+
+
+# --- Atomic (All-or-Nothing) Application Tests ---
+
+
+def test_python_atomic_single_patch_success(tmp_path: Path):
+    target = tmp_path / "app.txt"
+    target.write_text("line 1\nline 2\n")
+
+    diff = textwrap.dedent("""\
+        --- a/app.txt
+        +++ b/app.txt
+        @@ -1,2 +1,2 @@
+         line 1
+        -line 2
+        +line two
+    """)
+    patch = mpatch.parse_auto(diff)[0]
+    res = patch.apply_to_file(tmp_path, atomic=True)
+    assert res.report.all_applied_cleanly is True
+    assert target.read_text() == "line 1\nline two\n"
+
+
+def test_python_atomic_single_patch_partial_failure_leaves_disk_untouched(tmp_path: Path):
+    target = tmp_path / "partial.txt"
+    original = "line 1\nline 2\nline 3\n"
+    target.write_text(original)
+
+    diff = textwrap.dedent("""\
+        --- a/partial.txt
+        +++ b/partial.txt
+        @@ -1,1 +1,1 @@
+        -line 1
+        +line one
+        @@ -3,1 +3,1 @@
+        -WRONG LINE
+        +line three
+    """)
+    patch = mpatch.parse_auto(diff)[0]
+    res = mpatch.apply_patch_to_file(patch, tmp_path, atomic=True)
+    assert res.report.all_applied_cleanly is False
+    # File on disk must remain 100% untouched
+    assert target.read_text() == original
+
+
+def test_python_atomic_multi_file_failure_discards_all(tmp_path: Path):
+    f1 = tmp_path / "f1.txt"
+    f2 = tmp_path / "f2.txt"
+    f1.write_text("foo\n")
+    f2.write_text("bar\n")
+
+    diff = textwrap.dedent("""\
+        --- a/f1.txt
+        +++ b/f1.txt
+        @@ -1 +1 @@
+        -foo
+        +foo_updated
+        --- a/f2.txt
+        +++ b/f2.txt
+        @@ -1 +1 @@
+        -WRONG
+        +bar_updated
+    """)
+
+    patches = mpatch.parse_auto(diff)
+    batch_res = mpatch.apply_patches_to_dir(patches, tmp_path, atomic=True)
+    assert batch_res.all_applied_cleanly is False
+
+    # Neither file should have been modified
+    assert f1.read_text() == "foo\n"
+    assert f2.read_text() == "bar\n"
+
+    # High-level apply_directory helper with atomic=True
+    success = mpatch.apply_directory(diff, tmp_path, atomic=True)
+    assert success is False
+    assert f1.read_text() == "foo\n"
+    assert f2.read_text() == "bar\n"

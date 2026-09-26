@@ -3,7 +3,7 @@ use clap::Parser;
 use colored::Colorize;
 use env_logger::Builder;
 use log::{error, info, warn, Level, LevelFilter};
-use mpatch::{apply_patches_to_dir, parse_auto, Patch};
+use mpatch::{apply_patches_to_dir, apply_patches_to_dir_atomic, parse_auto, Patch};
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::fs::{self, File};
@@ -172,8 +172,13 @@ fn run(args: Args) -> Result<()> {
     let mut success_count = 0;
     let mut fail_count = 0;
 
-    // Use the new high-level batch application function.
-    let batch_result = apply_patches_to_dir(&all_patches, &actual_target_dir, options);
+    // Apply patches either atomically or progressively
+    let batch_result = if args.atomic {
+        info!("Atomic mode active: changes will only be written to disk if all hunks succeed.");
+        apply_patches_to_dir_atomic(&all_patches, &actual_target_dir, options)
+    } else {
+        apply_patches_to_dir(&all_patches, &actual_target_dir, options)
+    };
     let num_ops = batch_result.results.len();
 
     // Iterate through the results to provide detailed CLI feedback.
@@ -198,6 +203,9 @@ fn run(args: Args) -> Result<()> {
             Err(e) => {
                 // A "hard" error occurred (e.g., I/O error, path traversal).
                 // This is fatal, so we stop and return the error.
+                if args.atomic {
+                    warn!("Atomic mode active: No files on disk were modified due to fatal error.");
+                }
                 finalize_report(Some(&batch_result));
                 // Since `e` is a reference from `.iter()`, we create a new error from its display representation.
                 return Err(anyhow!("{}", e)).with_context(|| {
@@ -216,10 +224,18 @@ fn run(args: Args) -> Result<()> {
     info!("Failed operations:     {}", fail_count);
     if args.dry_run {
         info!("DRY RUN completed. No files were modified.");
+    } else if args.atomic && fail_count > 0 {
+        info!("ATOMIC MODE: All changes were discarded. No files were modified.");
+    } else if args.atomic {
+        info!("Atomic mode: All patches and hunks applied cleanly and were committed to disk.");
     }
 
     if fail_count > 0 {
-        warn!("Review the log for errors. Some files may be in a partially patched state.");
+        if args.atomic {
+            warn!("Atomic mode active: No files on disk were modified because some patches or hunks failed.");
+        } else {
+            warn!("Review the log for errors. Some files may be in a partially patched state.");
+        }
         finalize_report(Some(&batch_result));
 
         // Return an error to set a non-zero exit code.
@@ -390,6 +406,14 @@ struct Args {
         help = "Show what would be done, but don't modify files."
     )]
     dry_run: bool,
+    /// Only apply changes to disk if all patches and hunks succeed.
+    #[arg(
+        short = 'a',
+        long,
+        alias = "all-or-nothing",
+        help = "Only apply changes to disk if all patches and hunks succeed."
+    )]
+    atomic: bool,
     /// The similarity threshold for fuzzy matching (0.0 to 1.0).
     /// Higher is stricter. 0 disables fuzzy matching completely.
     #[arg(short = 'f', long, default_value_t = DEFAULT_FUZZ_THRESHOLD, help = "Similarity threshold for fuzzy matching (0.0 to 1.0). Higher is stricter. 0 disables fuzzy matching.")]
@@ -636,6 +660,11 @@ fn write_report_footer(
                 file,
                 "*Final file state is the same as the original state because `--dry-run` was active.*"
             );
+        } else if args.atomic && batch_result.is_some_and(|b| !b.all_applied_cleanly()) {
+            let _ = writeln!(
+                file,
+                "*Final file state is the same as the original state because `--atomic` prevented disk modifications due to failures.*"
+            );
         } else {
             for patch in all_patches {
                 let target_file_path = args.target_dir.as_ref().unwrap().join(&patch.file_path);
@@ -673,6 +702,14 @@ fn write_report_footer(
             let _ = writeln!(
                 file,
                 "*Discrepancy check was skipped because `--dry-run` was active.*"
+            );
+            return;
+        }
+
+        if args.atomic && batch_result.is_some_and(|b| !b.all_applied_cleanly()) {
+            let _ = writeln!(
+                file,
+                "*Discrepancy check was skipped because `--atomic` prevented disk modifications due to failures.*"
             );
             return;
         }

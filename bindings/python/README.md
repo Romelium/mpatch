@@ -24,6 +24,7 @@ When an AI tries to edit a file that has been modified locally since the AI last
 ## ✨ Features
 
 - **🧠 Fuzzy Matching:** Resilient to stale context, whitespace changes, and minor code drift.
+- **🔒 Atomic (All-or-Nothing) Mode:** Pass `atomic=True` to only write changes to disk if all patches and hunks succeed cleanly.
 - **🤖 Format Independent:** Automatically recognizes Unified Diffs, Markdown code blocks (` ```diff `), Aider Search/Replace blocks (`<<<<<<< ORIGINAL` `=======` `>>>>>>> UPDATED` and variants), and Conflict Markers (`<<<<` `====` `>>>>`).
 - **🔍 Wildcard & Ellipsis Support:** Supports `...` and comment-wrapped ellipsis lines (e.g. `// ... existing code ...`) in search/replace blocks, preserving unchanged code gaps.
 - **✨ Smart Indentation:** Automatically translates tabs/spaces and aligns injected code to match the target file perfectly.
@@ -121,6 +122,9 @@ target_directory = Path("./my_project")
 
 # Apply all patches in a diff directly to the filesystem
 success = mpatch.apply_directory(diff, target_directory)
+
+# Or ensure all-or-nothing atomicity (no disk changes if any hunk fails):
+success = mpatch.apply_directory(diff, target_directory, atomic=True)
 
 if success:
     print("All files updated successfully!")
