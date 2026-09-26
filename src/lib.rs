@@ -3182,6 +3182,10 @@ pub enum PatchFormat {
     Unknown,
 }
 
+/// Counts the number of leading consecutive backticks (```) in a string slice.
+///
+/// Used to determine opening and closing Markdown fence lengths when handling
+/// variable-length code blocks and nested code fences.
 #[inline]
 fn count_leading_backticks(s: &str) -> usize {
     s.as_bytes().iter().take_while(|&&c| c == b'`').count()
@@ -4975,6 +4979,10 @@ pub fn apply_patch_to_lines<T: AsRef<str>>(
     apply_patch_to_lines_internal(patch, original_lines, options, true)
 }
 
+/// Internal helper for applying a patch to a slice of lines while preserving EOF newline behavior.
+///
+/// Drives a [`HunkApplier`] across all hunks, handles per-hunk progress logging,
+/// and constructs the resulting [`InMemoryResult`].
 fn apply_patch_to_lines_internal<T: AsRef<str>>(
     patch: &Patch,
     original_lines: Option<&[T]>,
@@ -5610,6 +5618,21 @@ pub fn apply_hunk_to_lines(
     HunkApplyStatus::Failed(last_error)
 }
 
+/// Attempts to apply a hunk at a specific candidate location within `target_lines`.
+///
+/// For exact matches ([`MatchType::Exact`]), lines are spliced in directly using the hunk's
+/// replacement block.
+///
+/// For fuzzy and whitespace-insensitive matches ([`MatchType::Fuzzy`], [`MatchType::ExactIgnoringWhitespace`]),
+/// a granular reconstruction pass is performed:
+/// - Context lines and local file modifications are preserved.
+/// - Dynamic indentation is established and tracked line by line.
+/// - Multi-line signature and statement re-alignments are resolved via [`find_statement_match_in_block`].
+/// - If additions cannot be anchored safely (e.g., attached context line was deleted or unaligned),
+///   the candidate is rejected with [`HunkApplyError::ContextNotFound`].
+///
+/// Returns [`Ok(HunkApplyStatus::Applied)`] on successful reconstruction and splicing, or
+/// [`Err(HunkApplyError)`] if the candidate location cannot safely accommodate the hunk.
 fn try_apply_hunk_at_location(
     hunk: &Hunk,
     target_lines: &mut Vec<String>,
@@ -6244,6 +6267,10 @@ pub struct DefaultHunkFinder<'a> {
     options: &'a ApplyOptions,
 }
 
+/// Precomputed contiguous buffers, stripped references, and byte offset indices for target lines.
+///
+/// Hoisting these precomputations avoids heap string allocations and redundant iterations
+/// when scoring thousands of candidate sliding windows during fuzzy search.
 struct TargetPrecomputed<'a> {
     target_loose_refs: Vec<&'a str>,
     target_content: String,
@@ -6257,6 +6284,7 @@ struct TargetPrecomputed<'a> {
     no_ws_line_ends: Vec<usize>,
 }
 
+/// Precomputes contiguous target slices, stripped buffers, and character boundary indices.
 fn precompute_target<'a>(target_refs: &[&'a str]) -> TargetPrecomputed<'a> {
     let n = target_refs.len();
     let mut target_loose_refs = Vec::with_capacity(n);
@@ -6330,6 +6358,10 @@ fn precompute_target<'a>(target_refs: &[&'a str]) -> TargetPrecomputed<'a> {
     }
 }
 
+/// Precomputed representation of a hunk's match block used during fuzzy search scoring.
+///
+/// Contains pre-joined strings, stripped slices, non-whitespace representations, and character
+/// metrics for fast evaluation against candidate target windows.
 struct MatchPrecomputed<'a> {
     stripped_lines: Vec<&'a str>,
     loose_lines: Vec<&'a str>,
@@ -6341,6 +6373,7 @@ struct MatchPrecomputed<'a> {
     len: usize,
 }
 
+/// Precomputes match block lines, stripped content strings, and character statistics.
 fn precompute_match<'a>(match_block: &[&'a str]) -> MatchPrecomputed<'a> {
     let stripped_lines: Vec<&str> = match_block.iter().map(|s| s.trim_end()).collect();
     let content = stripped_lines.join("\n");
@@ -6363,6 +6396,9 @@ fn precompute_match<'a>(match_block: &[&'a str]) -> MatchPrecomputed<'a> {
     }
 }
 
+/// Borrowed window view representing a contiguous candidate slice of target lines.
+///
+/// References precomputed slices and string sub-slices directly without heap allocations.
 struct WindowData<'w, 'a> {
     stripped_lines: &'w [&'a str],
     loose_lines: &'w [&'a str],
@@ -6372,6 +6408,7 @@ struct WindowData<'w, 'a> {
 }
 
 impl<'a> TargetPrecomputed<'a> {
+    /// Extracts a borrowed [`WindowData`] view for a candidate window starting at `index` of length `len`.
     fn window_data<'w>(
         &'w self,
         target_refs: &'w [&'a str],
@@ -6390,6 +6427,17 @@ impl<'a> TargetPrecomputed<'a> {
     }
 }
 
+/// Computes multi-level similarity scores between a target window and a hunk match block.
+///
+/// Returns a tuple of `(score, ratio, ratio_lines, ratio_words)` where:
+/// - `score`: Scaled composite similarity score used for candidate ranking.
+/// - `ratio`: Unscaled similarity ratio used for threshold comparison.
+/// - `ratio_lines`: Line-level sequence similarity ratio.
+/// - `ratio_words`: Word-level sequence similarity ratio.
+///
+/// Incorporates upper-bound pruning and short-circuit evaluation to skip expensive
+/// word- and character-level Myers diff calculations when line-level similarity reaches 1.0
+/// or non-whitespace bounds cannot alter the window's score.
 fn score_window(
     window: &WindowData<'_, '_>,
     match_data: &MatchPrecomputed<'_>,
@@ -6472,6 +6520,7 @@ fn score_window(
     (score, ratio, ratio_lines as f64, ratio_words as f64)
 }
 
+/// Scored candidate window within the target file during fuzzy search.
 #[derive(Clone, Copy)]
 struct ScoredWindow {
     score: f64,
@@ -6482,6 +6531,7 @@ struct ScoredWindow {
     window_len: usize,
 }
 
+/// Evaluates and scores candidate sliding windows across the provided search ranges in parallel using Rayon.
 #[cfg(feature = "parallel")]
 fn compute_scored_windows(
     search_ranges: &[(usize, usize)],
@@ -6518,6 +6568,7 @@ fn compute_scored_windows(
         .collect()
 }
 
+/// Evaluates and scores candidate sliding windows across the provided search ranges sequentially.
 #[cfg(not(feature = "parallel"))]
 fn compute_scored_windows(
     search_ranges: &[(usize, usize)],

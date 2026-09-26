@@ -129,6 +129,7 @@ def write_file_lf(path: Path, content: str) -> None:
 
 # --- Version Helpers ---
 def parse_semver(version_str: str) -> tuple[int, int, int, str]:
+    """Parses a semantic version string into (major, minor, patch, prerelease)."""
     pattern = r"^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$"
     match = re.match(pattern, version_str.strip(), re.IGNORECASE)
     if not match:
@@ -138,6 +139,7 @@ def parse_semver(version_str: str) -> tuple[int, int, int, str]:
 
 
 def bump_version(current: str, bump_type: str) -> str:
+    """Calculates the bumped version string based on bump type or explicit version."""
     major, minor, patch, prerelease = parse_semver(current)
     bump_lower = bump_type.strip().lower()
     if bump_lower == "patch":
@@ -163,6 +165,7 @@ def bump_version(current: str, bump_type: str) -> str:
 
 # --- Repository Helpers ---
 def get_repo_root() -> Path:
+    """Determines the absolute root path of the git repository."""
     if not shutil.which("git"):
         abort("Required command 'git' is not installed or not found in PATH.")
     try:
@@ -173,6 +176,7 @@ def get_repo_root() -> Path:
 
 
 def read_current_version(root: Path) -> str:
+    """Reads the current crate version from the root Cargo.toml."""
     cargo_path = root / "Cargo.toml"
     content = cargo_path.read_text(encoding="utf-8")
     match = re.search(r'(?m)^\[package\][\s\S]*?^version\s*=\s*"([^"]+)"', content)
@@ -182,6 +186,7 @@ def read_current_version(root: Path) -> str:
 
 
 def read_package_name(root: Path) -> str:
+    """Reads the package name from the root Cargo.toml."""
     cargo_path = root / "Cargo.toml"
     content = cargo_path.read_text(encoding="utf-8")
     match = re.search(r'(?m)^\[package\][\s\S]*?^name\s*=\s*"([^"]+)"', content)
@@ -191,6 +196,7 @@ def read_package_name(root: Path) -> str:
 
 
 def get_git_remote(root: Path, branch: str) -> str:
+    """Detects the configured git remote for the given branch."""
     try:
         res = subprocess.run(
             ["git", "config", f"branch.{branch}.remote"],
@@ -416,6 +422,7 @@ class ReleaseContext:
 
 # --- File Updating Logic with Strict Validation ---
 def apply_version_bumps(ctx: ReleaseContext, current_ver: str, new_ver: str) -> None:
+    """Applies version updates across Cargo.toml files, pyproject.toml, CHANGELOG, docs, and lockfile."""
     root = ctx.root
     dry_run = ctx.dry_run
     today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
@@ -619,6 +626,7 @@ def run_test_and_lint_suite(
 
 # --- Main Orchestration ---
 def main() -> None:
+    """Executes the interactive release orchestration pipeline."""
     parser = argparse.ArgumentParser(
         description="Sound, production-grade release orchestrator for mpatch.",
         formatter_class=argparse.RawDescriptionHelpFormatter,

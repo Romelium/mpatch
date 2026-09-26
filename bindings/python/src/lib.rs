@@ -9,10 +9,12 @@ pyo3::create_exception!(mpatch, ParseError, MpatchError);
 pyo3::create_exception!(mpatch, ApplyError, MpatchError);
 pyo3::create_exception!(mpatch, PathTraversalError, ApplyError);
 
+/// Maps a core `mpatch::ParseError` into a Python `ParseError`.
 fn map_parse_err(err: ::mpatch::ParseError) -> PyErr {
     ParseError::new_err(err.to_string())
 }
 
+/// Maps a core `mpatch::OneShotError` into the corresponding Python exception.
 fn map_oneshot_err(err: ::mpatch::OneShotError) -> PyErr {
     match err {
         ::mpatch::OneShotError::Parse(e) => ParseError::new_err(e.to_string()),
@@ -23,6 +25,7 @@ fn map_oneshot_err(err: ::mpatch::OneShotError) -> PyErr {
     }
 }
 
+/// Helper to construct an [`ApplyOptions`] instance from Python parameters.
 #[inline]
 fn build_apply_options(fuzz_factor: f32, dry_run: bool) -> ApplyOptions {
     ApplyOptions::builder()
@@ -31,6 +34,7 @@ fn build_apply_options(fuzz_factor: f32, dry_run: bool) -> ApplyOptions {
         .build()
 }
 
+/// Converts an internal `mpatch::HunkApplyStatus` into a Python [`PyHunkApplyStatus`].
 fn convert_hunk_status(s: &::mpatch::HunkApplyStatus) -> PyHunkApplyStatus {
     match s {
         ::mpatch::HunkApplyStatus::Applied {
@@ -322,6 +326,7 @@ impl PyPatch {
     }
 
     #[setter]
+    /// Sets the relative path of the file to be patched.
     fn set_file_path(&mut self, path: PathBuf) {
         self.inner.file_path = path;
     }

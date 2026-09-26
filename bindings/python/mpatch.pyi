@@ -3,12 +3,24 @@ import os
 import pathlib
 from typing import Any, Iterator, overload
 
-class MpatchError(Exception): ...
-class ParseError(MpatchError): ...
-class ApplyError(MpatchError): ...
-class PathTraversalError(ApplyError): ...
+class MpatchError(Exception):
+    """Base exception for all errors raised by mpatch."""
+    ...
+
+class ParseError(MpatchError):
+    """Raised when parsing diff content, headers, or conflict markers fails."""
+    ...
+
+class ApplyError(MpatchError):
+    """Raised when applying a patch fails or applies only partially in strict mode."""
+    ...
+
+class PathTraversalError(ApplyError):
+    """Raised when a patch target path resolves outside the base directory."""
+    ...
 
 VERSION: str
+"""The version of the mpatch package."""
 
 class Hunk:
     """Represents a single hunk of changes within a patch."""
@@ -129,7 +141,9 @@ class Patch:
         """The relative path of the file to be patched."""
         ...
     @file_path.setter
-    def file_path(self, path: str | os.PathLike[Any]) -> None: ...
+    def file_path(self, path: str | os.PathLike[Any]) -> None:
+        """Sets the relative path of the file to be patched."""
+        ...
     @property
     def hunks(self) -> list[Hunk]:
         """A list of hunks to be applied to the file."""

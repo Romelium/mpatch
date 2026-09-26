@@ -12,10 +12,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Default similarity threshold for fuzzy matching (0.0 to 1.0).
 const DEFAULT_FUZZ_THRESHOLD: f32 = 0.7;
 
 // --- Main Application Entry Point ---
 
+/// Main entry point for the `mpatch` command-line application.
 fn main() {
     // 1. Parse command-line arguments using `clap`.
     let args = Args::parse();
@@ -203,12 +205,15 @@ fn run(args: Args) -> Result<()> {
 
 // --- Helper Structs and Functions ---
 
+/// Redacts sensitive paths (such as user home, working directory, and input files) from logs and debug reports.
 #[derive(Clone)]
 struct Anonymizer {
+    /// Ordered list of `(target_path, placeholder)` pairs for string replacement.
     replacements: Vec<(String, String)>,
 }
 
 impl Anonymizer {
+    /// Creates a new `Anonymizer` configured to redact paths related to the current execution.
     fn new(args: &Args) -> Self {
         let mut replacements = Vec::new();
 
@@ -268,6 +273,7 @@ impl Anonymizer {
         }
     }
 
+    /// Anonymizes occurrences of sensitive paths in `text`.
     fn anonymize<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
         if self.replacements.is_empty() {
             return std::borrow::Cow::Borrowed(text);
@@ -351,7 +357,9 @@ struct Args {
 /// This is used in debug report mode (`-vvvv`) to show logs on the console
 /// while also writing them to the report file.
 struct TeeWriter {
+    /// Shared, thread-safe handle to the report file.
     file: Arc<Mutex<File>>,
+    /// Path anonymizer applied to stream content before writing to the report file.
     anonymizer: Anonymizer,
 }
 
