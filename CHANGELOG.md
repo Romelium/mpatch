@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Performance
+- **Patch Application:** Eliminated redundant target slice cloning and heap string allocations in `try_apply_hunk_at_location` by referencing `target_lines` directly and borrowing hunk addition slices.
+- **Diagnostics & Results:** Optimized `ApplyResult::failure_count()`, `success_count()`, and `has_failures()` to count in-place with zero heap allocations or error cloning.
+- **Python Bindings:** Optimized `ApplyResult.__getitem__` to convert individual hunk status items on demand rather than translating the entire status vector per indexed lookup.
 - **Fuzzy Matching:** Precomputed contiguous target slices and character indices in `find_hunk_location_internal` to eliminate four heap allocations per candidate window.
 - **Fuzzy Matching:** Added mathematical upper-bound pruning and lazy metric evaluation in `score_window` to skip expensive character- and word-level Myers diffs when line-level similarity reaches 1.0 or non-whitespace bounds cannot alter the window's score.
 - **Fuzzy Matching:** Short-circuited anchor occurrence search in `find_search_ranges` as soon as the maximum occurrence threshold is exceeded, avoiding full linear scans and unbounded vector allocations on repetitive target files.

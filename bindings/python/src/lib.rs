@@ -23,6 +23,54 @@ fn map_oneshot_err(err: ::mpatch::OneShotError) -> PyErr {
     }
 }
 
+#[inline]
+fn build_apply_options(fuzz_factor: f32, dry_run: bool) -> ApplyOptions {
+    ApplyOptions::builder()
+        .fuzz_factor(fuzz_factor)
+        .dry_run(dry_run)
+        .build()
+}
+
+fn convert_hunk_status(s: &::mpatch::HunkApplyStatus) -> PyHunkApplyStatus {
+    match s {
+        ::mpatch::HunkApplyStatus::Applied {
+            location,
+            match_type,
+            replaced_lines,
+        } => {
+            let match_str = match match_type {
+                ::mpatch::MatchType::Exact => "Exact",
+                ::mpatch::MatchType::ExactIgnoringWhitespace => "ExactIgnoringWhitespace",
+                ::mpatch::MatchType::Fuzzy { .. } => "Fuzzy",
+            };
+            PyHunkApplyStatus {
+                status: "Applied".to_string(),
+                location_start: Some(location.start_index),
+                location_length: Some(location.length),
+                match_type: Some(match_str.to_string()),
+                replaced_lines: Some(replaced_lines.clone()),
+                error_reason: None,
+            }
+        }
+        ::mpatch::HunkApplyStatus::SkippedNoChanges => PyHunkApplyStatus {
+            status: "Skipped".to_string(),
+            location_start: None,
+            location_length: None,
+            match_type: None,
+            replaced_lines: None,
+            error_reason: None,
+        },
+        ::mpatch::HunkApplyStatus::Failed(err) => PyHunkApplyStatus {
+            status: "Failed".to_string(),
+            location_start: None,
+            location_length: None,
+            match_type: None,
+            replaced_lines: None,
+            error_reason: Some(err.to_string()),
+        },
+    }
+}
+
 // --- Class Wrappers ---
 
 /// Represents a single hunk of changes within a patch.
@@ -600,43 +648,7 @@ impl PyApplyResult {
         self.inner
             .hunk_results
             .iter()
-            .map(|s| match s {
-                ::mpatch::HunkApplyStatus::Applied {
-                    location,
-                    match_type,
-                    replaced_lines,
-                } => {
-                    let match_str = match match_type {
-                        ::mpatch::MatchType::Exact => "Exact",
-                        ::mpatch::MatchType::ExactIgnoringWhitespace => "ExactIgnoringWhitespace",
-                        ::mpatch::MatchType::Fuzzy { .. } => "Fuzzy",
-                    };
-                    PyHunkApplyStatus {
-                        status: "Applied".to_string(),
-                        location_start: Some(location.start_index),
-                        location_length: Some(location.length),
-                        match_type: Some(match_str.to_string()),
-                        replaced_lines: Some(replaced_lines.clone()),
-                        error_reason: None,
-                    }
-                }
-                ::mpatch::HunkApplyStatus::SkippedNoChanges => PyHunkApplyStatus {
-                    status: "Skipped".to_string(),
-                    location_start: None,
-                    location_length: None,
-                    match_type: None,
-                    replaced_lines: None,
-                    error_reason: None,
-                },
-                ::mpatch::HunkApplyStatus::Failed(err) => PyHunkApplyStatus {
-                    status: "Failed".to_string(),
-                    location_start: None,
-                    location_length: None,
-                    match_type: None,
-                    replaced_lines: None,
-                    error_reason: Some(err.to_string()),
-                },
-            })
+            .map(convert_hunk_status)
             .collect()
     }
 
@@ -653,15 +665,15 @@ impl PyApplyResult {
         py: Python<'py>,
         idx: pyo3::Bound<'py, pyo3::PyAny>,
     ) -> PyResult<pyo3::Bound<'py, pyo3::PyAny>> {
-        let results = self.hunk_results();
-        let len = results.len() as isize;
+        let hunks = &self.inner.hunk_results;
+        let len = hunks.len() as isize;
 
         if let Ok(slice) = idx.extract::<pyo3::Bound<'py, pyo3::types::PySlice>>() {
             let indices = slice.indices(len)?;
             let mut result = Vec::with_capacity(indices.slicelength);
             let mut current = indices.start;
             for _ in 0..indices.slicelength {
-                result.push(results[current as usize].clone());
+                result.push(convert_hunk_status(&hunks[current as usize]));
                 current += indices.step;
             }
             result.into_bound_py_any(py)
@@ -672,7 +684,7 @@ impl PyApplyResult {
                     "Hunk result index out of range",
                 ));
             }
-            results[index as usize].clone().into_bound_py_any(py)
+            convert_hunk_status(&hunks[index as usize]).into_bound_py_any(py)
         } else {
             Err(pyo3::exceptions::PyTypeError::new_err(
                 "Indices must be integers or slices",
@@ -1022,10 +1034,7 @@ fn patch_content(
     fuzz_factor: f32,
     dry_run: bool,
 ) -> PyResult<String> {
-    let options = ApplyOptions::builder()
-        .fuzz_factor(fuzz_factor)
-        .dry_run(dry_run)
-        .build();
+    let options = build_apply_options(fuzz_factor, dry_run);
 
     let diff_str = diff.to_string();
     let orig_str = original.map(String::from);
@@ -1055,10 +1064,7 @@ fn apply_directory(
     fuzz_factor: f32,
     dry_run: bool,
 ) -> PyResult<bool> {
-    let options = ApplyOptions::builder()
-        .fuzz_factor(fuzz_factor)
-        .dry_run(dry_run)
-        .build();
+    let options = build_apply_options(fuzz_factor, dry_run);
 
     let diff_str = diff.to_string();
 
@@ -1090,10 +1096,7 @@ fn apply_patch_to_content(
     fuzz_factor: f32,
     dry_run: bool,
 ) -> PyInMemoryResult {
-    let options = ApplyOptions::builder()
-        .fuzz_factor(fuzz_factor)
-        .dry_run(dry_run)
-        .build();
+    let options = build_apply_options(fuzz_factor, dry_run);
 
     let patch_inner = patch.inner.clone();
     let original_str = original.map(String::from);
@@ -1124,10 +1127,7 @@ fn apply_patch_to_file(
     fuzz_factor: f32,
     dry_run: bool,
 ) -> PyResult<PyPatchResult> {
-    let options = ApplyOptions::builder()
-        .fuzz_factor(fuzz_factor)
-        .dry_run(dry_run)
-        .build();
+    let options = build_apply_options(fuzz_factor, dry_run);
 
     let patch_inner = patch.inner.clone();
 
@@ -1165,10 +1165,7 @@ fn apply_patches_to_dir(
     fuzz_factor: f32,
     dry_run: bool,
 ) -> PyBatchResult {
-    let options = ApplyOptions::builder()
-        .fuzz_factor(fuzz_factor)
-        .dry_run(dry_run)
-        .build();
+    let options = build_apply_options(fuzz_factor, dry_run);
 
     let patches_inner: Vec<::mpatch::Patch> = patches.into_iter().map(|p| p.inner).collect();
 

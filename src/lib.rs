@@ -415,6 +415,7 @@ use log::{debug, info, trace, warn};
 use rayon::prelude::*;
 use similar::udiff::unified_diff;
 use similar::TextDiff;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -2083,7 +2084,9 @@ impl ApplyResult {
     /// assert!(!successful_result.has_failures());
     /// ```
     pub fn has_failures(&self) -> bool {
-        !self.all_applied_cleanly()
+        self.hunk_results
+            .iter()
+            .any(|r| matches!(r, HunkApplyStatus::Failed(_)))
     }
 
     /// Returns the number of hunks that failed to apply.
@@ -2109,7 +2112,10 @@ impl ApplyResult {
     /// assert_eq!(result.failure_count(), 2);
     /// ```
     pub fn failure_count(&self) -> usize {
-        self.failures().len()
+        self.hunk_results
+            .iter()
+            .filter(|r| matches!(r, HunkApplyStatus::Failed(_)))
+            .count()
     }
 
     /// Returns the number of hunks that were applied successfully or skipped.
@@ -2548,7 +2554,7 @@ impl Hunk {
         }
 
         match (first_match_idx, last_match_idx) {
-            (Some(first), Some(last)) => (last.saturating_sub(first)) + 1,
+            (Some(first), Some(last)) => last.saturating_sub(first) + 1,
             _ => 0,
         }
     }
@@ -2842,6 +2848,16 @@ impl Patch {
         let old_slices = diff.old_slices();
         let new_slices = diff.new_slices();
         let mut hunks = Vec::new();
+        let push_prefixed =
+            |lines: &mut Vec<String>, prefix: char, slices: &[&str], start: usize, len: usize| {
+                for i in 0..len {
+                    let line = slices[start + i].trim_end_matches(['\r', '\n']);
+                    let mut s = String::with_capacity(line.len() + 1);
+                    s.push(prefix);
+                    s.push_str(line);
+                    lines.push(s);
+                }
+            };
 
         for group in diff.grouped_ops(context_len) {
             let mut lines = Vec::new();
@@ -2856,35 +2872,17 @@ impl Patch {
             for op in group {
                 match op {
                     similar::DiffOp::Equal { old_index, len, .. } => {
-                        for i in 0..len {
-                            let line = old_slices[old_index + i].trim_end_matches(['\r', '\n']);
-                            let mut s = String::with_capacity(line.len() + 1);
-                            s.push(' ');
-                            s.push_str(line);
-                            lines.push(s);
-                        }
+                        push_prefixed(&mut lines, ' ', old_slices, old_index, len);
                     }
                     similar::DiffOp::Delete {
                         old_index, old_len, ..
                     } => {
-                        for i in 0..old_len {
-                            let line = old_slices[old_index + i].trim_end_matches(['\r', '\n']);
-                            let mut s = String::with_capacity(line.len() + 1);
-                            s.push('-');
-                            s.push_str(line);
-                            lines.push(s);
-                        }
+                        push_prefixed(&mut lines, '-', old_slices, old_index, old_len);
                     }
                     similar::DiffOp::Insert {
                         new_index, new_len, ..
                     } => {
-                        for i in 0..new_len {
-                            let line = new_slices[new_index + i].trim_end_matches(['\r', '\n']);
-                            let mut s = String::with_capacity(line.len() + 1);
-                            s.push('+');
-                            s.push_str(line);
-                            lines.push(s);
-                        }
+                        push_prefixed(&mut lines, '+', new_slices, new_index, new_len);
                     }
                     similar::DiffOp::Replace {
                         old_index,
@@ -2892,20 +2890,8 @@ impl Patch {
                         new_index,
                         new_len,
                     } => {
-                        for i in 0..old_len {
-                            let line = old_slices[old_index + i].trim_end_matches(['\r', '\n']);
-                            let mut s = String::with_capacity(line.len() + 1);
-                            s.push('-');
-                            s.push_str(line);
-                            lines.push(s);
-                        }
-                        for i in 0..new_len {
-                            let line = new_slices[new_index + i].trim_end_matches(['\r', '\n']);
-                            let mut s = String::with_capacity(line.len() + 1);
-                            s.push('+');
-                            s.push_str(line);
-                            lines.push(s);
-                        }
+                        push_prefixed(&mut lines, '-', old_slices, old_index, old_len);
+                        push_prefixed(&mut lines, '+', new_slices, new_index, new_len);
                     }
                 }
             }
@@ -3196,6 +3182,11 @@ pub enum PatchFormat {
     Unknown,
 }
 
+#[inline]
+fn count_leading_backticks(s: &str) -> usize {
+    s.as_bytes().iter().take_while(|&&c| c == b'`').count()
+}
+
 /// Automatically detects the patch format of the provided content.
 ///
 /// This function scans the content efficiently (without parsing the full structure)
@@ -3240,11 +3231,7 @@ pub fn detect_patch(content: &str) -> PatchFormat {
         // Check for Markdown code blocks
         let trimmed = line.trim_start();
         if trimmed.as_bytes().starts_with(b"```") {
-            let fence_len = trimmed
-                .as_bytes()
-                .iter()
-                .take_while(|&&c| c == b'`')
-                .count();
+            let fence_len = count_leading_backticks(trimmed);
             if fence_len >= 3 {
                 if !in_code_block {
                     in_code_block = true;
@@ -3486,10 +3473,10 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
     // The loop continues searching for more blocks from where the last one ended.
     while let Some((line_index, line_text)) = lines.by_ref().find(|(_, line)| {
         let trimmed = line.trim_start();
-        trimmed.starts_with("```") && trimmed.chars().take_while(|&c| c == '`').count() >= 3
+        trimmed.starts_with("```") && count_leading_backticks(trimmed) >= 3
     }) {
         let trimmed = line_text.trim_start();
-        let fence_len = trimmed.chars().take_while(|&c| c == '`').count();
+        let fence_len = count_leading_backticks(trimmed);
         let opening_indent = line_text.len() - trimmed.len();
 
         trace!(
@@ -3506,7 +3493,7 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
             let inner_trimmed = line.trim_start();
             let current_indent = line.len() - inner_trimmed.len();
             if inner_trimmed.starts_with("```")
-                && inner_trimmed.chars().take_while(|&c| c == '`').count() >= fence_len
+                && count_leading_backticks(inner_trimmed) >= fence_len
                 && current_indent <= opening_indent
             {
                 lines.next(); // Consume the closing fence
@@ -3552,7 +3539,7 @@ fn has_patch_signature_at_level_1<S: AsRef<str>>(lines: &[S]) -> bool {
 
         // Check for nested block boundaries
         if trimmed.starts_with("```") {
-            let fence_len = trimmed.chars().take_while(|&c| c == '`').count();
+            let fence_len = count_leading_backticks(trimmed);
             if fence_len >= 3 {
                 if !in_nested_block {
                     in_nested_block = true;
@@ -4027,17 +4014,20 @@ where
 
 /// Checks if a line is a standard Git diff header that should be ignored when parsing hunks.
 fn is_git_header_line(line: &str) -> bool {
-    line.starts_with("diff --git")
-        || line.starts_with("index ")
-        || line.starts_with("old mode ")
-        || line.starts_with("new mode ")
-        || line.starts_with("new file mode ")
-        || line.starts_with("deleted file mode ")
-        || line.starts_with("similarity index ")
-        || line.starts_with("copy from ")
-        || line.starts_with("copy to ")
-        || line.starts_with("rename from ")
-        || line.starts_with("rename to ")
+    const GIT_PREFIXES: &[&str] = &[
+        "diff --git",
+        "index ",
+        "old mode ",
+        "new mode ",
+        "new file mode ",
+        "deleted file mode ",
+        "similarity index ",
+        "copy from ",
+        "copy to ",
+        "rename from ",
+        "rename to ",
+    ];
+    GIT_PREFIXES.iter().any(|prefix| line.starts_with(prefix))
 }
 
 /// Parses an iterator of lines containing "Conflict Marker" style diffs.
@@ -4077,26 +4067,15 @@ where
             continue;
         }
 
-        match state {
-            State::Context => {
-                let mut s = String::with_capacity(line.len() + 1);
-                s.push(' ');
-                s.push_str(line);
-                hunk_lines.push(s);
-            }
-            State::Old => {
-                let mut s = String::with_capacity(line.len() + 1);
-                s.push('-');
-                s.push_str(line);
-                hunk_lines.push(s);
-            }
-            State::New => {
-                let mut s = String::with_capacity(line.len() + 1);
-                s.push('+');
-                s.push_str(line);
-                hunk_lines.push(s);
-            }
-        }
+        let prefix = match state {
+            State::Context => ' ',
+            State::Old => '-',
+            State::New => '+',
+        };
+        let mut s = String::with_capacity(line.len() + 1);
+        s.push(prefix);
+        s.push_str(line);
+        hunk_lines.push(s);
     }
 
     if !(has_start && has_middle_or_end) {
@@ -4189,10 +4168,7 @@ pub fn ensure_path_is_safe(base_dir: &Path, relative_path: &Path) -> Result<Path
     for component in relative_path.components() {
         match component {
             std::path::Component::ParentDir => {
-                if !virtual_path.pop() {
-                    return Err(PatchError::PathTraversal(relative_path.to_path_buf()));
-                }
-                if !virtual_path.starts_with(&base_path) {
+                if !virtual_path.pop() || !virtual_path.starts_with(&base_path) {
                     return Err(PatchError::PathTraversal(relative_path.to_path_buf()));
                 }
             }
@@ -5525,7 +5501,7 @@ fn find_statement_match_in_block(
         let combined_ratio = ratio.max(ratio_no_ws);
 
         if combined_ratio > best_ratio && combined_ratio >= threshold {
-            best_ratio = ratio;
+            best_ratio = combined_ratio;
             best_match = Some(idx);
         }
     }
@@ -5535,14 +5511,7 @@ fn find_statement_match_in_block(
 /// Checks whether a line is trivial / low-entropy syntax (e.g. closing braces, blank lines).
 fn is_low_entropy_line(line: &str) -> bool {
     let trimmed = line.trim();
-    trimmed.is_empty()
-        || trimmed == "}"
-        || trimmed == "};"
-        || trimmed == "]"
-        || trimmed == "];"
-        || trimmed == ")"
-        || trimmed == ");"
-        || trimmed == "{"
+    matches!(trimmed, "" | "}" | "};" | "]" | "];" | ")" | ");" | "{")
 }
 /// Applies a single hunk to a mutable vector of lines in-place.
 ///
@@ -5676,26 +5645,26 @@ fn try_apply_hunk_at_location(
             location.start_index,
             location.length
         );
-        let file_matched_lines: Vec<_> =
-            target_lines[location.start_index..location.start_index + location.length].to_vec();
+        let file_matched_slice =
+            &target_lines[location.start_index..location.start_index + location.length];
         trace!(
             "      File content in matched range: {:?}",
-            file_matched_lines
+            file_matched_slice
         );
 
         // 1. Parse hunk to separate match lines and additions.
         // We map each line in the match block (Context/Removal) to a list of additions that follow it.
         // match_lines_meta: Vec<(is_removal, additions_after_this_line)>
         // Note: We store raw additions here and adjust them later during reconstruction.
-        let mut match_lines_meta: Vec<(bool, Vec<String>)> = Vec::new();
-        let mut initial_additions: Vec<String> = Vec::new();
+        let mut match_lines_meta: Vec<(bool, Vec<&str>)> = Vec::new();
+        let mut initial_additions: Vec<&str> = Vec::new();
 
         let mut line_iter = hunk.lines.iter().peekable();
 
         // Consume any additions that appear before the first context/removal line
         while let Some(line) = line_iter.peek() {
             if let Some(stripped) = line.strip_prefix('+') {
-                initial_additions.push(stripped.to_string());
+                initial_additions.push(stripped);
                 line_iter.next();
             } else {
                 break;
@@ -5707,10 +5676,10 @@ fn try_apply_hunk_at_location(
             if let Some(stripped) = line.strip_prefix('+') {
                 // Attach this addition to the most recent match line
                 if let Some(last) = match_lines_meta.last_mut() {
-                    last.1.push(stripped.to_string());
+                    last.1.push(stripped);
                 } else {
                     // Should be unreachable if match block is not empty, but safe fallback
-                    initial_additions.push(stripped.to_string());
+                    initial_additions.push(stripped);
                 }
             } else {
                 // It's a Context (' ') or Removal ('-') line
@@ -5722,7 +5691,7 @@ fn try_apply_hunk_at_location(
         // 2. Prepare text for diffing
         // We align the hunk's "old" view (match block) with the file's actual content.
         let match_block_content: Vec<&str> = hunk.get_match_block();
-        let file_block_content: Vec<&str> = file_matched_lines.iter().map(|s| s.as_str()).collect();
+        let file_block_content: Vec<&str> = file_matched_slice.iter().map(|s| s.as_str()).collect();
 
         let match_block_trimmed: Vec<&str> = match_block_content.iter().map(|s| s.trim()).collect();
         let file_block_trimmed: Vec<&str> = file_block_content.iter().map(|s| s.trim()).collect();
@@ -5803,7 +5772,7 @@ fn try_apply_hunk_at_location(
         // Apply initial additions using the seeded indentation
         for line in initial_additions {
             final_lines.push(adjust_indentation(
-                &line,
+                line,
                 current_hunk_indent,
                 current_target_indent,
             ));
@@ -5827,7 +5796,7 @@ fn try_apply_hunk_at_location(
 
                         // Update indentation context dynamically based on this matching line
                         let h_line = match_block_content[old_idx];
-                        let t_line = &file_matched_lines[new_idx];
+                        let t_line = &file_matched_slice[new_idx];
                         let h_ind = get_indent(h_line);
                         let t_ind = get_indent(t_line);
                         if (!h_ind.is_empty() || !t_ind.is_empty())
@@ -5846,7 +5815,7 @@ fn try_apply_hunk_at_location(
 
                         // If it's not a removal, keep the file's version of the line (preserves local edits)
                         if !*is_removal {
-                            final_lines.push(file_matched_lines[new_idx].clone());
+                            final_lines.push(file_matched_slice[new_idx].clone());
                         }
                         // Always insert the additions associated with this line
                         for add in additions {
@@ -5917,7 +5886,7 @@ fn try_apply_hunk_at_location(
                     // We preserve them.
                     for i in 0..*new_len {
                         let new_idx = new_index + i;
-                        final_lines.push(file_matched_lines[new_idx].clone());
+                        final_lines.push(file_matched_slice[new_idx].clone());
                     }
                 }
                 similar::DiffOp::Replace {
@@ -5932,7 +5901,7 @@ fn try_apply_hunk_at_location(
                         let min_len = std::cmp::min(*old_len, *new_len);
                         for i in 0..min_len {
                             let h_line = match_block_content[*old_index + i];
-                            let t_line = &file_matched_lines[*new_index + i];
+                            let t_line = &file_matched_slice[*new_index + i];
                             let h_ind = get_indent(h_line);
                             let t_ind = get_indent(t_line);
                             if (!h_ind.is_empty() || !t_ind.is_empty())
@@ -5974,7 +5943,7 @@ fn try_apply_hunk_at_location(
                                     warn!(
                                                 "    Fuzzy match rejected: Context line {:?} differs completely from target line {:?}, cannot anchor {} addition(s).",
                                                 match_block_content[old_idx],
-                                                file_matched_lines[new_idx],
+                                                file_matched_slice[new_idx],
                                                 additions.len()
                                             );
                                     return Err(HunkApplyError::ContextNotFound);
@@ -5982,7 +5951,7 @@ fn try_apply_hunk_at_location(
                             }
 
                             let h_line = match_block_content[old_idx];
-                            let t_line = &file_matched_lines[new_idx];
+                            let t_line = &file_matched_slice[new_idx];
                             let h_ind = get_indent(h_line);
                             let t_ind = get_indent(t_line);
                             if (!h_ind.is_empty() || !t_ind.is_empty())
@@ -5996,7 +5965,7 @@ fn try_apply_hunk_at_location(
                             }
 
                             if !*is_removal {
-                                final_lines.push(file_matched_lines[new_idx].clone());
+                                final_lines.push(file_matched_slice[new_idx].clone());
                             }
                             for add in additions {
                                 final_lines.push(adjust_indentation(
@@ -6017,17 +5986,17 @@ fn try_apply_hunk_at_location(
 
                         let match_in_new = find_statement_match_in_block(
                             &match_block_content[*old_index..*old_index + *old_len],
-                            &file_matched_lines[*new_index..*new_index + *new_len],
+                            &file_matched_slice[*new_index..*new_index + *new_len],
                             has_context,
                         );
 
                         if let Some(matching_sub_idx) = match_in_new {
                             let absolute_target_match = *new_index + matching_sub_idx;
-                            for line in &file_matched_lines[*new_index..absolute_target_match] {
+                            for line in &file_matched_slice[*new_index..absolute_target_match] {
                                 final_lines.push(line.clone());
                             }
 
-                            let t_line = &file_matched_lines[absolute_target_match];
+                            let t_line = &file_matched_slice[absolute_target_match];
                             let t_ind = get_indent(t_line);
                             if !t_ind.is_empty() && !t_line.trim().is_empty() {
                                 current_target_indent = t_ind;
@@ -6053,7 +6022,7 @@ fn try_apply_hunk_at_location(
                                 }
                             }
 
-                            for line in &file_matched_lines
+                            for line in &file_matched_slice
                                 [(absolute_target_match + 1)..(*new_index + *new_len)]
                             {
                                 final_lines.push(line.clone());
@@ -6066,7 +6035,7 @@ fn try_apply_hunk_at_location(
 
                             if has_context {
                                 for i in 0..*new_len {
-                                    final_lines.push(file_matched_lines[new_index + i].clone());
+                                    final_lines.push(file_matched_slice[new_index + i].clone());
                                 }
                             }
 
@@ -6503,6 +6472,87 @@ fn score_window(
     (score, ratio, ratio_lines as f64, ratio_words as f64)
 }
 
+#[derive(Clone, Copy)]
+struct ScoredWindow {
+    score: f64,
+    ratio: f64,
+    ratio_lines: f64,
+    ratio_words: f64,
+    start_index: usize,
+    window_len: usize,
+}
+
+#[cfg(feature = "parallel")]
+fn compute_scored_windows(
+    search_ranges: &[(usize, usize)],
+    pre: &TargetPrecomputed<'_>,
+    target_refs: &[&str],
+    match_pre: &MatchPrecomputed<'_>,
+    min_len: usize,
+    max_len: usize,
+) -> Vec<ScoredWindow> {
+    search_ranges
+        .par_iter()
+        .flat_map(|&(range_start, range_end)| {
+            let target_len = range_end.saturating_sub(range_start);
+            (min_len..=max_len)
+                .into_par_iter()
+                .filter(move |&window_len| window_len <= target_len)
+                .flat_map(move |window_len| {
+                    (0..=target_len - window_len).into_par_iter().map(move |i| {
+                        let start_index = range_start + i;
+                        let window = pre.window_data(target_refs, start_index, window_len);
+                        let (score, ratio, ratio_lines, ratio_words) =
+                            score_window(&window, match_pre);
+                        ScoredWindow {
+                            score,
+                            ratio,
+                            ratio_lines,
+                            ratio_words,
+                            start_index,
+                            window_len,
+                        }
+                    })
+                })
+        })
+        .collect()
+}
+
+#[cfg(not(feature = "parallel"))]
+fn compute_scored_windows(
+    search_ranges: &[(usize, usize)],
+    pre: &TargetPrecomputed<'_>,
+    target_refs: &[&str],
+    match_pre: &MatchPrecomputed<'_>,
+    min_len: usize,
+    max_len: usize,
+) -> Vec<ScoredWindow> {
+    search_ranges
+        .iter()
+        .flat_map(|&(range_start, range_end)| {
+            let target_len = range_end.saturating_sub(range_start);
+            (min_len..=max_len)
+                .filter(move |&window_len| window_len <= target_len)
+                .flat_map(move |window_len| {
+                    (0..=target_len - window_len).map(move |i| {
+                        let start_index = range_start + i;
+                        let window = pre.window_data(target_refs, start_index, window_len);
+                        let (score, ratio, ratio_lines, ratio_words) =
+                            score_window(&window, match_pre);
+                        ScoredWindow {
+                            score,
+                            ratio,
+                            ratio_lines,
+                            ratio_words,
+                            start_index,
+                            window_len,
+                        }
+                    })
+                })
+        })
+        .collect()
+}
+
 impl<'a> DefaultHunkFinder<'a> {
     /// Creates a new finder with the given options.
     ///
@@ -6652,7 +6702,7 @@ impl<'a> DefaultHunkFinder<'a> {
                             occurrences.len(),
                         );
                         trace!("        Anchor text: '{}'", anchor_line);
-                        let mut ranges = Vec::new();
+                        let mut ranges = Vec::with_capacity(occurrences.len());
                         let search_radius = (hunk_size * SEARCH_RADIUS_FACTOR)
                             .clamp(MIN_SEARCH_RADIUS, MAX_SEARCH_RADIUS);
 
@@ -6872,144 +6922,82 @@ impl<'a> DefaultHunkFinder<'a> {
 
             let pre = precompute_target(&target_refs);
 
-            // When the anchor heuristic fails, the search can be slow. We parallelize the
-            // scoring of all possible windows using Rayon if the `parallel` feature is enabled.
-            #[cfg(feature = "parallel")]
-            let all_scored_windows: Vec<(f64, f64, f64, f64, usize, usize)> = search_ranges
-                .par_iter()
-                .flat_map(|&(range_start, range_end)| {
-                    let pre = &pre;
-                    let target_refs = &target_refs;
-                    let match_pre = &match_pre;
-                    let target_len = range_end.saturating_sub(range_start);
-
-                    (min_len..=max_len)
-                        .into_par_iter()
-                        .filter(move |&window_len| window_len <= target_len)
-                        .filter(move |&window_len| {
-                            len == 0 || window_len >= len.saturating_sub(min_reduction)
-                        })
-                        .flat_map(move |window_len| {
-                            (0..=target_len - window_len).into_par_iter().map(move |i| {
-                                let absolute_index = range_start + i;
-                                let window =
-                                    pre.window_data(target_refs, absolute_index, window_len);
-                                let (score, ratio, ratio_lines, ratio_words) =
-                                    score_window(&window, match_pre);
-
-                                (
-                                    score,
-                                    ratio,
-                                    ratio_lines,
-                                    ratio_words,
-                                    absolute_index,
-                                    window_len,
-                                )
-                            })
-                        })
-                })
-                .collect();
-
-            #[cfg(not(feature = "parallel"))]
-            let all_scored_windows: Vec<(f64, f64, f64, f64, usize, usize)> = search_ranges
-                .iter()
-                .flat_map(|&(range_start, range_end)| {
-                    let pre = &pre;
-                    let target_refs = &target_refs;
-                    let match_pre = &match_pre;
-                    let target_len = range_end.saturating_sub(range_start);
-
-                    (min_len..=max_len)
-                        .filter(move |&window_len| window_len <= target_len)
-                        .filter(move |&window_len| {
-                            len == 0 || window_len >= len.saturating_sub(min_reduction)
-                        })
-                        .flat_map(move |window_len| {
-                            (0..=target_len - window_len).map(move |i| {
-                                let absolute_index = range_start + i;
-                                let window =
-                                    pre.window_data(target_refs, absolute_index, window_len);
-                                let (score, ratio, ratio_lines, ratio_words) =
-                                    score_window(&window, match_pre);
-
-                                (
-                                    score,
-                                    ratio,
-                                    ratio_lines,
-                                    ratio_words,
-                                    absolute_index,
-                                    window_len,
-                                )
-                            })
-                        })
-                })
-                .collect();
+            let all_scored_windows = compute_scored_windows(
+                &search_ranges,
+                &pre,
+                &target_refs,
+                &match_pre,
+                min_len,
+                max_len,
+            );
 
             if log::log_enabled!(log::Level::Trace) {
                 let mut sorted_windows = all_scored_windows.clone();
-                sorted_windows
-                    .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                sorted_windows.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
                 trace!("      Top fuzzy match candidates:");
-                for (score, ratio, _, _, idx, len) in sorted_windows.iter().take(5) {
-                    let window_content: Vec<_> = target_refs[*idx..*idx + *len].to_vec();
+                for w in sorted_windows.iter().take(5) {
+                    let window_content: Vec<_> =
+                        target_refs[w.start_index..w.start_index + w.window_len].to_vec();
                     trace!(
                         "        - Index {}, Len {}: Score {:.3} (Ratio {:.3}) | Content: {:?}",
-                        idx,
-                        len,
-                        score,
-                        ratio,
+                        w.start_index,
+                        w.window_len,
+                        w.score,
+                        w.ratio,
                         window_content
                     );
                 }
             }
 
             // Process the collected results sequentially to find the best match and handle tie-breaking.
-            for &(score, ratio, ratio_lines, ratio_words, absolute_index, window_len) in
-                &all_scored_windows
-            {
-                // This is the same logic as in the original sequential loop.
-                if score > best_score {
+            for w in &all_scored_windows {
+                if w.score > best_score {
                     trace!(
                         "        New best score: {:.3} (ratio {:.3} [l:{:.3},w:{:.3}]) at index {} (window len {})",
-                        score,
-                        ratio,
-                        ratio_lines,
-                        ratio_words,
-                        absolute_index, window_len
+                        w.score,
+                        w.ratio,
+                        w.ratio_lines,
+                        w.ratio_words,
+                        w.start_index,
+                        w.window_len
                     );
-                    best_score = score;
-                    best_ratio_at_best_score = ratio;
+                    best_score = w.score;
+                    best_ratio_at_best_score = w.ratio;
                     potential_matches.clear();
-                    potential_matches.push((absolute_index, window_len));
-                } else if f64::abs(score - best_score) < 1e-9 {
+                    potential_matches.push((w.start_index, w.window_len));
+                } else if f64::abs(w.score - best_score) < 1e-9 {
                     // Tie in score. Prefer the one with the higher raw similarity ratio,
                     // as it indicates a better content match before size penalties.
                     if potential_matches.is_empty() {
-                        potential_matches.push((absolute_index, window_len));
+                        potential_matches.push((w.start_index, w.window_len));
                         continue;
                     }
 
-                    if ratio > best_ratio_at_best_score {
+                    if w.ratio > best_ratio_at_best_score {
                         // This is a better match despite the same score (e.g., less penalty, more similarity)
                         trace!(
                             "        Tie in score ({:.3}), but new ratio {:.3} is better than old {:.3}. New best.",
-                            score,
-                            ratio,
+                            w.score,
+                            w.ratio,
                             best_ratio_at_best_score
                         );
-                        best_ratio_at_best_score = ratio;
+                        best_ratio_at_best_score = w.ratio;
                         potential_matches.clear();
-                        potential_matches.push((absolute_index, window_len));
-                    } else if f64::abs(ratio - best_ratio_at_best_score) < 1e-9 {
+                        potential_matches.push((w.start_index, w.window_len));
+                    } else if f64::abs(w.ratio - best_ratio_at_best_score) < 1e-9 {
                         // Also a tie in ratio, so it's a true ambiguity
                         trace!(
                             "        Tie in score ({:.3}) and ratio ({:.3}). Adding candidate: index {}, len {}",
-                            score,
-                            ratio,
-                            absolute_index,
-                            window_len
+                            w.score,
+                            w.ratio,
+                            w.start_index,
+                            w.window_len
                         );
-                        potential_matches.push((absolute_index, window_len));
+                        potential_matches.push((w.start_index, w.window_len));
                     }
                 }
             }
@@ -7017,8 +7005,8 @@ impl<'a> DefaultHunkFinder<'a> {
             let threshold = f64::from(self.options.fuzz_factor);
             let mut passing: Vec<(f64, usize, usize)> = all_scored_windows
                 .iter()
-                .filter(|(s, r, _, _, _, _)| *s >= threshold || *r >= threshold)
-                .map(|(s, _, _, _, idx, len)| (*s, *idx, *len))
+                .filter(|w| w.score >= threshold || w.ratio >= threshold)
+                .map(|w| (w.score, w.start_index, w.window_len))
                 .collect();
             passing.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -7077,7 +7065,7 @@ impl<'a> DefaultHunkFinder<'a> {
                     ));
                 }
 
-                let mut counts_per_start = std::collections::HashMap::new();
+                let mut counts_per_start = HashMap::new();
                 for (loc, _) in &candidates {
                     *counts_per_start.entry(loc.start_index).or_insert(0) += 1;
                 }

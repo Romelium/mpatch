@@ -4,12 +4,13 @@ use colored::Colorize;
 use env_logger::Builder;
 use log::{error, info, warn, Level, LevelFilter};
 use mpatch::{apply_patches_to_dir, parse_auto, Patch};
+use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::{collections::HashMap, time::SystemTime, time::UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_FUZZ_THRESHOLD: f32 = 0.7;
 
@@ -55,12 +56,11 @@ fn run(args: Args) -> Result<()> {
                 .get_text()
                 .context("Failed to read text from clipboard")?;
 
-            let target = match (&args.input_file, &args.target_dir) {
-                (Some(dir), None) => dir.clone(),
-                (None, None) => PathBuf::from("."),
-                (Some(_), Some(dir)) => dir.clone(),
-                _ => PathBuf::from("."),
-            };
+            let target = args
+                .target_dir
+                .clone()
+                .or_else(|| args.input_file.clone())
+                .unwrap_or_else(|| PathBuf::from("."));
             args.target_dir = Some(target);
             args.input_file = None; // clear this so report generator marks it cleanly
             content
@@ -79,7 +79,11 @@ fn run(args: Args) -> Result<()> {
         content
     };
 
-    let actual_target_dir = args.target_dir.as_ref().unwrap().clone();
+    let actual_target_dir = args
+        .target_dir
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| PathBuf::from("."));
 
     // --- Argument Validation ---
     if !actual_target_dir.is_dir() {
@@ -103,24 +107,11 @@ fn run(args: Args) -> Result<()> {
     }
 
     // --- Setup Logging and Reporting ---
-    // This sets up the logger and, if needed, creates a report file.
-    // The `_finalizer` is a "drop guard". When it goes out of scope at the end of
-    // this function (no matter how it exits), its `drop` method is called,
-    // which guarantees the report file is correctly finalized.
     let report_arc = setup_logging_and_reporting(&args, &content, &all_patches)?;
-    let (report_file_arc, original_contents, anonymizer) =
-        if let Some((arc, contents, anon)) = report_arc {
-            (Some(arc), Some(contents), Some(anon))
-        } else {
-            (None, None, None)
-        };
 
     // This closure will be called at the end of the function to finalize the report.
-    // This is done manually instead of with a Drop guard to allow access to `batch_result`.
     let finalize_report = |batch_result: Option<&mpatch::BatchResult>| {
-        if let (Some(arc), Some(contents), Some(anon)) =
-            (&report_file_arc, &original_contents, &anonymizer)
-        {
+        if let Some((arc, contents, anon)) = &report_arc {
             write_report_footer(arc, &args, &all_patches, batch_result, contents, anon);
         }
     };
