@@ -1472,7 +1472,9 @@ impl ApplyOptions {
 /// ```
 #[derive(Debug, Clone, Copy)]
 pub struct ApplyOptionsBuilder {
+    /// Configured dry-run flag, or `None` to fall back to the default setting.
     dry_run: Option<bool>,
+    /// Configured fuzzy matching threshold, or `None` to fall back to the default setting.
     fuzz_factor: Option<f32>,
 }
 
@@ -3186,6 +3188,14 @@ pub enum PatchFormat {
 ///
 /// Used to determine opening and closing Markdown fence lengths when handling
 /// variable-length code blocks and nested code fences.
+///
+/// # Arguments
+///
+/// * `s` - The string slice whose leading backticks to count.
+///
+/// # Returns
+///
+/// The number of consecutive backtick characters at the start of `s`.
 #[inline]
 fn count_leading_backticks(s: &str) -> usize {
     s.as_bytes().iter().take_while(|&&c| c == b'`').count()
@@ -3533,6 +3543,14 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
 ///
 /// This ensures that we don't parse diffs that are inside nested code blocks (e.g.,
 /// a diff example inside a markdown block).
+///
+/// # Arguments
+///
+/// * `lines` - A slice of lines from within a code block.
+///
+/// # Returns
+///
+/// `true` if un-nested patch headers (`--- `, `diff --git`, or conflict markers) are found.
 fn has_patch_signature_at_level_1<S: AsRef<str>>(lines: &[S]) -> bool {
     let mut in_nested_block = false;
     let mut current_fence_len = 0;
@@ -3571,7 +3589,23 @@ fn has_patch_signature_at_level_1<S: AsRef<str>>(lines: &[S]) -> bool {
 }
 
 /// Helper function to parse a block of lines that could be Unified or Conflict.
-/// This consolidates the fallback logic previously inside `parse_diffs`.
+///
+/// This consolidates the fallback logic previously inside [`parse_diffs`]. It first
+/// attempts standard unified diff parsing; if no patches or headers are found,
+/// it falls back to parsing conflict markers.
+///
+/// # Arguments
+///
+/// * `lines` - A slice of line string slices forming the block body.
+/// * `start_line` - 1-based line number where the code block began, for reporting errors.
+///
+/// # Returns
+///
+/// A vector of parsed [`Patch`] objects on success.
+///
+/// # Errors
+///
+/// Returns [`ParseError`] if the block contains patch signatures but is syntactically invalid.
 fn parse_generic_block_lines(lines: &[&str], start_line: usize) -> Result<Vec<Patch>, ParseError> {
     trace!(
         "  Attempting to parse generic block starting at line {} as standard unified diff.",
@@ -4017,6 +4051,19 @@ where
 }
 
 /// Checks if a line is a standard Git diff header that should be ignored when parsing hunks.
+///
+/// Git extended diff output frequently includes metadata headers (such as `index`,
+/// `old mode`, `new file mode`, etc.) between file diffs. This function checks whether
+/// `line` matches any known Git header prefix so it is not incorrectly absorbed as
+/// hunk context.
+///
+/// # Arguments
+///
+/// * `line` - The line to inspect.
+///
+/// # Returns
+///
+/// `true` if the line starts with a recognized Git header prefix, `false` otherwise.
 fn is_git_header_line(line: &str) -> bool {
     const GIT_PREFIXES: &[&str] = &[
         "diff --git",
@@ -4036,7 +4083,20 @@ fn is_git_header_line(line: &str) -> bool {
 
 /// Parses an iterator of lines containing "Conflict Marker" style diffs.
 ///
+/// Scans through lines looking for `<<<<`, `====`, and `>>>>` delimiters.
+/// Content before `====` becomes deletions (`-`), and content after `====`
+/// becomes additions (`+`). Lines outside the markers become context (` `).
+///
 /// See [`parse_conflict_markers`] for details.
+///
+/// # Arguments
+///
+/// * `lines` - An iterator yielding string slices for each line.
+///
+/// # Returns
+///
+/// A vector containing a single [`Patch`] targeting `patch_target` if valid conflict
+/// markers were found, or an empty vector otherwise.
 fn parse_conflict_markers_from_lines<'a, I>(lines: I) -> Vec<Patch>
 where
     I: Iterator<Item = &'a str>,
@@ -4103,7 +4163,19 @@ where
     }]
 }
 
-/// Converts a `std::io::Error` into a more specific `PatchError`.
+/// Converts a [`std::io::Error`] into a more specific [`PatchError`].
+///
+/// Distinguishes between permission errors, directory target errors, and general I/O errors,
+/// attaching the relevant file path to the error variant.
+///
+/// # Arguments
+///
+/// * `path` - The path that was being accessed when the error occurred.
+/// * `e` - The underlying standard I/O error.
+///
+/// # Returns
+///
+/// The mapped [`PatchError`] instance.
 fn map_io_error(path: PathBuf, e: std::io::Error) -> PatchError {
     match e.kind() {
         std::io::ErrorKind::PermissionDenied => PatchError::PermissionDenied { path },
@@ -4645,11 +4717,17 @@ pub fn try_apply_patch_to_file(
 /// ````
 #[derive(Debug)]
 pub struct HunkApplier<'a> {
+    /// An iterator over remaining hunks in the patch.
     hunks: std::slice::Iter<'a, Hunk>,
+    /// Accumulated lines of the file content as hunks are applied.
     current_lines: Vec<String>,
+    /// Patch application options governing fuzzy thresholds and behavior.
     options: &'a ApplyOptions,
+    /// Whether the patch specifies that the file should end with a newline.
     patch_ends_with_newline: bool,
+    /// Whether the original target content ended with a newline.
     original_ends_with_newline: bool,
+    /// Tracks whether any applied hunk touched or modified the end of the file.
     touched_eof: bool,
 }
 
@@ -4983,6 +5061,17 @@ pub fn apply_patch_to_lines<T: AsRef<str>>(
 ///
 /// Drives a [`HunkApplier`] across all hunks, handles per-hunk progress logging,
 /// and constructs the resulting [`InMemoryResult`].
+///
+/// # Arguments
+///
+/// * `patch` - The [`Patch`] to apply.
+/// * `original_lines` - Optional slice of lines representing the original file content.
+/// * `options` - Configuration options controlling fuzziness and dry-run mode.
+/// * `original_ends_with_newline` - Whether the original file content had a trailing newline.
+///
+/// # Returns
+///
+/// An [`InMemoryResult`] containing the new patched content string and per-hunk reports.
 fn apply_patch_to_lines_internal<T: AsRef<str>>(
     patch: &Patch,
     original_lines: Option<&[T]>,
@@ -5363,7 +5452,18 @@ pub fn patch_content_str(
 /// Helper to adjust the indentation of a line based on a detected offset.
 ///
 /// If `target_indent` is shorter than `hunk_indent`, we strip the difference from `line`.
-/// If `target_indent` is longer, we prepend the difference.
+/// If `target_indent` is longer, we prepend the difference. It also intelligently translates
+/// indentation between spaces and tabs when appropriate.
+///
+/// # Arguments
+///
+/// * `line` - The line whose leading indentation should be adjusted.
+/// * `hunk_indent` - The indentation style/level detected in the patch hunk.
+/// * `target_indent` - The indentation style/level detected in the target file.
+///
+/// # Returns
+///
+/// A `String` with the adjusted leading indentation prefix.
 fn adjust_indentation(line: &str, hunk_indent: &str, target_indent: &str) -> String {
     if line.trim().is_empty() {
         return String::new();
@@ -5469,12 +5569,33 @@ fn adjust_indentation(line: &str, hunk_indent: &str, target_indent: &str) -> Str
 }
 
 /// Helper to extract the whitespace prefix from a line.
+///
+/// # Arguments
+///
+/// * `line` - The input line.
+///
+/// # Returns
+///
+/// A string slice representing all leading whitespace characters in `line`.
 fn get_indent(line: &str) -> &str {
     &line[..line.len() - line.trim_start().len()]
 }
 
 /// Searches for a target line in `new_slice` that represents the same semantic statement
 /// as `old_slice` across line-break or formatting variations.
+///
+/// Computes word-level and non-whitespace character similarity between the joined text of
+/// `old_slice` and individual candidate lines in `new_slice`.
+///
+/// # Arguments
+///
+/// * `old_slice` - The sequence of hunk match lines representing the statement.
+/// * `new_slice` - Candidate target lines in the target file window.
+/// * `has_context` - Whether `old_slice` contains context lines, requiring higher similarity.
+///
+/// # Returns
+///
+/// `Some(index)` of the best matching line in `new_slice`, or `None` if no line meets the similarity threshold.
 fn find_statement_match_in_block(
     old_slice: &[&str],
     new_slice: &[String],
@@ -5517,6 +5638,17 @@ fn find_statement_match_in_block(
 }
 
 /// Checks whether a line is trivial / low-entropy syntax (e.g. closing braces, blank lines).
+///
+/// Low-entropy lines (such as alone `}`, `];`, or empty lines) should not be used as the
+/// sole criterion for resolving ambiguous match locations using line number hints.
+///
+/// # Arguments
+///
+/// * `line` - The line to test.
+///
+/// # Returns
+///
+/// `true` if the line consists solely of low-entropy syntax tokens, `false` otherwise.
 fn is_low_entropy_line(line: &str) -> bool {
     let trimmed = line.trim();
     matches!(trimmed, "" | "}" | "};" | "]" | "];" | ")" | ");" | "{")
@@ -5631,8 +5763,21 @@ pub fn apply_hunk_to_lines(
 /// - If additions cannot be anchored safely (e.g., attached context line was deleted or unaligned),
 ///   the candidate is rejected with [`HunkApplyError::ContextNotFound`].
 ///
+/// # Arguments
+///
+/// * `hunk` - The [`Hunk`] being applied.
+/// * `target_lines` - The mutable vector of target file lines, modified in-place on success.
+/// * `location` - The candidate [`HunkLocation`] where changes should be spliced.
+/// * `match_type` - The method by which this location was matched.
+///
+/// # Returns
+///
 /// Returns [`Ok(HunkApplyStatus::Applied)`] on successful reconstruction and splicing, or
 /// [`Err(HunkApplyError)`] if the candidate location cannot safely accommodate the hunk.
+///
+/// # Errors
+///
+/// Returns [`Err(HunkApplyError)`] if the candidate location cannot safely accommodate the hunk.
 fn try_apply_hunk_at_location(
     hunk: &Hunk,
     target_lines: &mut Vec<String>,
@@ -6264,6 +6409,7 @@ pub trait HunkFinder {
 /// ````
 #[derive(Debug)]
 pub struct DefaultHunkFinder<'a> {
+    /// Active configuration options governing fuzzy thresholds and matching strictness.
     options: &'a ApplyOptions,
 }
 
@@ -6272,19 +6418,40 @@ pub struct DefaultHunkFinder<'a> {
 /// Hoisting these precomputations avoids heap string allocations and redundant iterations
 /// when scoring thousands of candidate sliding windows during fuzzy search.
 struct TargetPrecomputed<'a> {
+    /// Target lines with leading whitespace trimmed for loose comparisons.
     target_loose_refs: Vec<&'a str>,
+    /// Contiguous buffer of target lines joined by newline characters.
     target_content: String,
+    /// Byte start offset of each line within `target_content`.
     line_starts: Vec<usize>,
+    /// Byte end offset of each line within `target_content`.
     line_ends: Vec<usize>,
+    /// Contiguous buffer of loose target lines joined by newline characters.
     target_loose_content: String,
+    /// Byte start offset of each loose line within `target_loose_content`.
     loose_line_starts: Vec<usize>,
+    /// Byte end offset of each loose line within `target_loose_content`.
     loose_line_ends: Vec<usize>,
+    /// Contiguous buffer of all non-whitespace characters in target lines.
     target_no_ws_content: String,
+    /// Offset of each line's non-whitespace content in `target_no_ws_content`.
     no_ws_line_starts: Vec<usize>,
+    /// End offset of each line's non-whitespace content in `target_no_ws_content`.
     no_ws_line_ends: Vec<usize>,
 }
 
 /// Precomputes contiguous target slices, stripped buffers, and character boundary indices.
+///
+/// Builds single-allocation strings for exact and whitespace-trimmed lines, and records
+/// slice offsets to allow zero-copy subslice creation for candidate windows.
+///
+/// # Arguments
+///
+/// * `target_refs` - Slice of trimmed string references for each line in the target file.
+///
+/// # Returns
+///
+/// A [`TargetPrecomputed`] instance containing pre-allocated buffers and indexing tables.
 fn precompute_target<'a>(target_refs: &[&'a str]) -> TargetPrecomputed<'a> {
     let n = target_refs.len();
     let mut target_loose_refs = Vec::with_capacity(n);
@@ -6363,17 +6530,36 @@ fn precompute_target<'a>(target_refs: &[&'a str]) -> TargetPrecomputed<'a> {
 /// Contains pre-joined strings, stripped slices, non-whitespace representations, and character
 /// metrics for fast evaluation against candidate target windows.
 struct MatchPrecomputed<'a> {
+    /// Match block lines with trailing whitespace removed.
     stripped_lines: Vec<&'a str>,
+    /// Match block lines with both leading and trailing whitespace trimmed.
     loose_lines: Vec<&'a str>,
+    /// Contiguous string of stripped lines joined by newline characters.
     content: String,
+    /// Contiguous string of loose lines joined by newline characters.
     loose_content: String,
+    /// All non-whitespace characters from `content` concatenated.
     no_ws: String,
+    /// Total count of non-whitespace characters in `no_ws`.
     no_ws_chars: usize,
+    /// Indicates whether `no_ws` contains exclusively ASCII characters.
     is_ascii: bool,
+    /// Number of lines in the match block.
     len: usize,
 }
 
 /// Precomputes match block lines, stripped content strings, and character statistics.
+///
+/// Strips whitespace from match block lines, concatenates them into contiguous buffers,
+/// and computes non-whitespace character metrics for fast bounding during fuzzy scoring.
+///
+/// # Arguments
+///
+/// * `match_block` - The slice of lines to be matched in the target file.
+///
+/// # Returns
+///
+/// A [`MatchPrecomputed`] instance containing the pre-calculated metrics.
 fn precompute_match<'a>(match_block: &[&'a str]) -> MatchPrecomputed<'a> {
     let stripped_lines: Vec<&str> = match_block.iter().map(|s| s.trim_end()).collect();
     let content = stripped_lines.join("\n");
@@ -6400,15 +6586,30 @@ fn precompute_match<'a>(match_block: &[&'a str]) -> MatchPrecomputed<'a> {
 ///
 /// References precomputed slices and string sub-slices directly without heap allocations.
 struct WindowData<'w, 'a> {
+    /// Slice of stripped target lines within the window.
     stripped_lines: &'w [&'a str],
+    /// Slice of loose (trimmed) target lines within the window.
     loose_lines: &'w [&'a str],
+    /// Contiguous subslice of target content spanning this window.
     content: &'w str,
+    /// Contiguous subslice of loose target content spanning this window.
     loose_content: &'w str,
+    /// Contiguous subslice of non-whitespace target content spanning this window.
     no_ws: &'w str,
 }
 
 impl<'a> TargetPrecomputed<'a> {
     /// Extracts a borrowed [`WindowData`] view for a candidate window starting at `index` of length `len`.
+    ///
+    /// # Arguments
+    ///
+    /// * `target_refs` - The original slice of trimmed line references.
+    /// * `index` - 0-based starting line index of the candidate window.
+    /// * `len` - Number of lines in the candidate window.
+    ///
+    /// # Returns
+    ///
+    /// A [`WindowData`] view referencing sub-slices of the precomputed buffers without heap allocations.
     fn window_data<'w>(
         &'w self,
         target_refs: &'w [&'a str],
@@ -6429,15 +6630,22 @@ impl<'a> TargetPrecomputed<'a> {
 
 /// Computes multi-level similarity scores between a target window and a hunk match block.
 ///
-/// Returns a tuple of `(score, ratio, ratio_lines, ratio_words)` where:
+/// Incorporates upper-bound pruning and short-circuit evaluation to skip expensive
+/// word- and character-level Myers diff calculations when line-level similarity reaches 1.0
+/// or non-whitespace bounds cannot alter the window's score.
+///
+/// # Arguments
+///
+/// * `window` - The candidate target window view.
+/// * `match_data` - Precomputed data for the hunk's match block.
+///
+/// # Returns
+///
+/// A tuple `(score, ratio, ratio_lines, ratio_words)` where:
 /// - `score`: Scaled composite similarity score used for candidate ranking.
 /// - `ratio`: Unscaled similarity ratio used for threshold comparison.
 /// - `ratio_lines`: Line-level sequence similarity ratio.
 /// - `ratio_words`: Word-level sequence similarity ratio.
-///
-/// Incorporates upper-bound pruning and short-circuit evaluation to skip expensive
-/// word- and character-level Myers diff calculations when line-level similarity reaches 1.0
-/// or non-whitespace bounds cannot alter the window's score.
 fn score_window(
     window: &WindowData<'_, '_>,
     match_data: &MatchPrecomputed<'_>,
@@ -6523,15 +6731,34 @@ fn score_window(
 /// Scored candidate window within the target file during fuzzy search.
 #[derive(Clone, Copy)]
 struct ScoredWindow {
+    /// Scaled composite similarity score used for candidate ranking.
     score: f64,
+    /// Unscaled similarity ratio used for threshold comparison.
     ratio: f64,
+    /// Line-level sequence similarity ratio.
     ratio_lines: f64,
+    /// Word-level sequence similarity ratio.
     ratio_words: f64,
+    /// 0-based starting line index of the window in the target file.
     start_index: usize,
+    /// Line count (height) of the candidate window.
     window_len: usize,
 }
 
 /// Evaluates and scores candidate sliding windows across the provided search ranges in parallel using Rayon.
+///
+/// # Arguments
+///
+/// * `search_ranges` - Slice of `(start, end)` line intervals to search within.
+/// * `pre` - Precomputed buffers and line boundary indices for the target file.
+/// * `target_refs` - Slice of trimmed target line string references.
+/// * `match_pre` - Precomputed representation of the hunk's match block.
+/// * `min_len` - Minimum candidate window line count.
+/// * `max_len` - Maximum candidate window line count.
+///
+/// # Returns
+///
+/// A vector of [`ScoredWindow`] objects representing all evaluated windows.
 #[cfg(feature = "parallel")]
 fn compute_scored_windows(
     search_ranges: &[(usize, usize)],
@@ -6569,6 +6796,19 @@ fn compute_scored_windows(
 }
 
 /// Evaluates and scores candidate sliding windows across the provided search ranges sequentially.
+///
+/// # Arguments
+///
+/// * `search_ranges` - Slice of `(start, end)` line intervals to search within.
+/// * `pre` - Precomputed buffers and line boundary indices for the target file.
+/// * `target_refs` - Slice of trimmed target line string references.
+/// * `match_pre` - Precomputed representation of the hunk's match block.
+/// * `min_len` - Minimum candidate window line count.
+/// * `max_len` - Maximum candidate window line count.
+///
+/// # Returns
+///
+/// A vector of [`ScoredWindow`] objects representing all evaluated windows.
 #[cfg(not(feature = "parallel"))]
 fn compute_scored_windows(
     search_ranges: &[(usize, usize)],
@@ -6700,6 +6940,16 @@ impl<'a> DefaultHunkFinder<'a> {
     /// hunk that is relatively uncommon in the target file. If successful, it returns
     /// small search windows around the occurrences of that anchor. If no good anchor
     /// is found, it returns a single range covering the entire file.
+    ///
+    /// # Arguments
+    ///
+    /// * `match_block` - The lines that need to be matched in the target file.
+    /// * `target_lines` - Slice of lines in the target file.
+    /// * `hunk_size` - Number of lines in the match block.
+    ///
+    /// # Returns
+    ///
+    /// A vector of disjoint `(start_line, end_line)` tuples to scan.
     fn find_search_ranges<T: AsRef<str>>(
         match_block: &[&str],
         target_lines: &[T],
@@ -6778,6 +7028,16 @@ impl<'a> DefaultHunkFinder<'a> {
     }
 
     /// Merges a list of overlapping or adjacent ranges into a minimal set of disjoint ranges.
+    ///
+    /// Sorts ranges by starting line and consolidates intervals that intersect or touch.
+    ///
+    /// # Arguments
+    ///
+    /// * `ranges` - Vector of `(start, end)` line intervals.
+    ///
+    /// # Returns
+    ///
+    /// A merged vector of non-overlapping, sorted `(start, end)` line intervals.
     fn merge_ranges(mut ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
         if ranges.is_empty() {
             return vec![];
@@ -6801,7 +7061,26 @@ impl<'a> DefaultHunkFinder<'a> {
     }
 
     /// Finds the starting index of the hunk's match block in the target lines.
-    /// This function implements the core hierarchical search strategy.
+    ///
+    /// Implements the hierarchical search strategy:
+    /// 1. Exact character-for-character match.
+    /// 2. Exact match ignoring trailing whitespace.
+    /// 3. Flexible sliding-window fuzzy matching using word and character diff ratios.
+    /// 4. End-of-file truncation prefix match.
+    ///
+    /// # Arguments
+    ///
+    /// * `match_block` - The context and deletion lines to match.
+    /// * `target_lines` - The lines of the file being patched.
+    /// * `old_start_line` - Optional line number hint from the hunk header for tie-breaking.
+    ///
+    /// # Returns
+    ///
+    /// A list of candidate `(HunkLocation, MatchType)` matches ordered by score/preference.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HunkApplyError`] if no location satisfies the required thresholds or if ambiguity cannot be resolved.
     fn find_hunk_location_internal<T: AsRef<str> + Sync>(
         &self,
         match_block: &[&str],
@@ -7218,6 +7497,21 @@ impl<'a> DefaultHunkFinder<'a> {
     /// hunk's original line number as a hint. Returns the index of the best match,
     /// or `None` if the ambiguity cannot be resolved.
     /// This function avoids collecting matches into a vector if there are 0 or 1 matches.
+    ///
+    /// # Arguments
+    ///
+    /// * `matches` - Iterator yielding 0-based starting line indices of candidate matches.
+    /// * `start_line` - Optional 1-based line number hint from the hunk header.
+    /// * `match_type` - Descriptive name of the match strategy for diagnostic logging.
+    /// * `has_sufficient_entropy` - Whether the match block contains non-trivial syntax tokens.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Some(index))` if a unique best match was determined, or `Ok(None)` if no matches were provided.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(all_matches)` containing the conflicting match indices if ambiguity cannot be broken.
     fn tie_break_with_line_number(
         mut matches: impl Iterator<Item = usize>,
         start_line: Option<usize>,
@@ -7496,7 +7790,19 @@ pub fn find_hunk_location_in_lines<T: AsRef<str> + Sync>(
     finder.find_location(hunk, target_lines)
 }
 
-/// Parses a hunk header line (e.g., "@@ -1,3 +1,3 @@") to extract the starting line number.
+/// Parses a hunk header line (e.g., `@@ -1,3 +1,3 @@`) to extract starting line numbers.
+///
+/// Extracts the 1-based old file start line and new file start line numbers from standard
+/// unified diff headers.
+///
+/// # Arguments
+///
+/// * `line` - The raw hunk header string slice.
+///
+/// # Returns
+///
+/// A tuple `(old_start_line, new_start_line)` where each element is `Some(line_number)` if parsed,
+/// or `None` if the line was malformed or omitted the number.
 fn parse_hunk_header(line: &str) -> (Option<usize>, Option<usize>) {
     // We are interested in the original file's line number, which is the first number after '-'.
     // Example: @@ -21,8 +21,8 @@
