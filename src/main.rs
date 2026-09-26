@@ -322,7 +322,7 @@ fn log_failed_hunks(apply_result: &mpatch::ApplyResult, patch: &Patch) {
     long_about = "A high-resilience patching tool designed for LLM-generated code. It applies changes by searching for code context rather than relying on fragile line numbers. It automatically detects Unified Diffs, Markdown blocks, Aider search/replace blocks, and Conflict Markers."
 )]
 struct Args {
-    /// Path to the input file containing the patch (Markdown, Unified Diff, or Conflict Markers).
+    /// Path to the input file containing the patch (Markdown, Unified Diff, Aider blocks, or Conflict Markers).
     /// If --clipboard is used, the first positional argument becomes the target directory.
     #[cfg_attr(feature = "clipboard", arg(required_unless_present = "clipboard"))]
     #[cfg_attr(not(feature = "clipboard"), arg(required = true))]

@@ -26,14 +26,24 @@
 //! - **Statement Re-alignment**: Recognizing statements across line-break or
 //!   formatting differences to prevent multi-line refactoring mismatches.
 //! - **Wildcard & Ellipsis Matching**: Recognizing code omissions (`...`, `// ... existing code ...`)
-//!   formatting differences to prevent multi-line refactoring mismatches.
+//!   across single and multi-segment hunks, reconstructing multi-line code gaps while preserving untouched code.
 //!
-//! ## Format Support & Limitations
+//! ## Supported Formats
 //!
-//! `mpatch` handles Unified Diffs, Markdown blocks, and Aider Search/Replace Blocks
-//! natively. It also supports Conflict Markers (`<<<<`, `====`, `>>>>`), with the caveat
-//! that conflict markers without file paths default to a placeholder path (`patch_target`).
-//! Aider blocks cleanly encode file paths directly or via surrounding context.
+//! `mpatch` automatically recognizes and parses four diff and patch formats:
+//!
+//! 1. **Markdown Blocks:** Standard chat/assistant output fenced in code blocks
+//!    (```` ```diff ````, ``` `patch ````, or language-tagged blocks with diff headers).
+//! 2. **Unified Diffs:** Standard `git diff` or `diff -u` patches with `--- a/file` and `+++ b/file` headers.
+//! 3. **Aider Search/Replace Blocks:** Search and replace blocks with `<<<<<<< SEARCH` (or `ORIGINAL`),
+//!    `=======`, and `>>>>>>> REPLACE` (or `UPDATED`). Target file paths are inferred automatically
+//!    from preceding markdown text, code comments, or block headers.
+//! 4. **Conflict Markers:** Standard 3-way merge conflict markers (`<<<<`, `====`, `>>>>`).
+//!    Because conflict markers lack file path headers, they default to `patch_target` when applied to files.
+//!
+//! In both Unified Diffs and Aider Search/Replace blocks, **wildcard ellipsis lines** (such as `...` or
+//! `// ... existing code ...`) are supported. `mpatch` reconstructs the multi-line code gaps between anchors,
+//! preserving untouched code while strictly preventing runaway gaps across function boundaries.
 //!
 //! ## Getting Started
 //!
@@ -121,6 +131,28 @@
 //! let new_content = fs::read_to_string(&file_path)?;
 //! let expected_content = "fn main() {\n    println!(\"Hello, mpatch!\");\n}\n";
 //! assert_eq!(new_content, expected_content);
+//! # Ok(())
+//! # }
+//! ````
+//!
+//! ## Applying Aider Search/Replace Blocks with Wildcards
+//!
+//! For AI agent workflows using Aider search/replace blocks, [`patch_content_str()`] or
+//! [`parse_auto()`] handles file path detection and wildcard ellipsis matching automatically:
+//!
+//! ````rust
+//! use mpatch::{patch_content_str, ApplyOptions};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let original_code = "def compute(x):\n    setup()\n    res = x * 2\n    teardown()\n    return res\n";
+//! let aider_diff = "math.py\n<<<<<<< SEARCH\ndef compute(x):\n    ...\n    res = x * 2\n=======\ndef compute(x):\n    ...\n    res = x * 4\n>>>>>>> REPLACE\n";
+//!
+//! let options = ApplyOptions::new();
+//! let new_code = patch_content_str(aider_diff, Some(original_code), &options)?;
+//!
+//! assert!(new_code.contains("res = x * 4"));
+//! assert!(new_code.contains("setup()"));
+//! assert!(new_code.contains("teardown()"));
 //! # Ok(())
 //! # }
 //! ````
@@ -532,7 +564,7 @@ pub enum SingleParseError {
     Parse(#[from] ParseError),
 
     /// The provided diff content did not contain any valid patches (Markdown blocks,
-    /// Unified Diffs, or Conflict Markers).
+    /// Unified Diffs, Aider search/replace blocks, or Conflict Markers).
     ///
     /// # Examples
     ///
@@ -860,7 +892,7 @@ pub enum OneShotError {
     Apply(#[from] StrictApplyError),
 
     /// The provided diff content did not contain any valid patches (Markdown blocks,
-    /// Unified Diffs, or Conflict Markers).
+    /// Unified Diffs, Aider search/replace blocks, or Conflict Markers).
     ///
     /// # Examples
     ///
@@ -2215,7 +2247,7 @@ pub struct Hunk {
     ///
     /// ```
     /// # use mpatch::{parse_single_patch, Hunk};
-    /// # let diff = "```diff\n--- a/f\n+++ b/f\n@@ -1,2 +1,2\n-a\n+b\n```";
+    /// # let diff = "```diff\n--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n-a\n+b\n```";
     /// # let patch = parse_single_patch(diff).unwrap();
     /// let hunk = &patch.hunks[0];
     ///
@@ -2785,7 +2817,7 @@ pub struct Patch {
     ///
     /// ```
     /// # use mpatch::parse_single_patch;
-    /// # let diff = "```diff\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,1 +1,1\n-a\n+b\n```";
+    /// # let diff = "```diff\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,1 +1,1 @@\n-a\n+b\n```";
     /// let patch = parse_single_patch(diff).unwrap();
     ///
     /// assert_eq!(patch.file_path.to_str(), Some("src/main.rs"));
@@ -4166,7 +4198,7 @@ pub fn detect_patch(content: &str) -> PatchFormat {
 /// 2.  **Unified Diff:** Standard diffs containing `--- a/path` and `+++ b/path` headers.
 /// 3.  **Aider Search/Replace:** Blocks delimited by `<<<<<<< SEARCH` (or `ORIGINAL`), `=======`,
 ///     and `>>>>>>> REPLACE` (or `UPDATED`). File paths are detected automatically.
-/// 3.  **Conflict Markers:** Blocks delimited by `<<<<`, `====`, and `>>>>`. These are
+/// 4.  **Conflict Markers:** Blocks delimited by `<<<<`, `====`, and `>>>>`. These are
 ///     parsed into patches where the "old" content is removed and the "new" content is added.
 ///
 /// ## Behavior
@@ -4502,10 +4534,6 @@ fn has_patch_signature_at_level_1<S: AsRef<str>>(lines: &[S]) -> bool {
 /// This consolidates the fallback logic inside [`parse_diffs`]. It first
 /// attempts standard unified diff parsing; if no patches or headers are found,
 /// it attempts Aider search/replace parsing, and finally falls back to parsing conflict markers.
-///
-/// This consolidates the fallback logic previously inside [`parse_diffs`]. It first
-/// attempts standard unified diff parsing; if no patches or headers are found,
-/// it falls back to parsing conflict markers.
 ///
 /// # Arguments
 ///
@@ -6335,7 +6363,7 @@ impl<'a> HunkApplier<'a> {
     /// # use mpatch::{parse_single_patch, HunkApplier, ApplyOptions};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let original_lines = vec!["line 1", "line 2"];
-    /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -2,1 +2,1\n-line 2\n+line two\n```";
+    /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -2,1 +2,1 @@\n-line 2\n+line two\n```";
     /// let patch = parse_single_patch(diff)?;
     /// let options = ApplyOptions::new();
     ///
@@ -6391,7 +6419,7 @@ impl<'a> HunkApplier<'a> {
     /// # use mpatch::{parse_single_patch, HunkApplier, ApplyOptions};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let original_lines = vec!["line 1", "line 2"];
-    /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -2,1 +2,1\n-line 2\n+line two\n```";
+    /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -2,1 +2,1 @@\n-line 2\n+line two\n```";
     /// let patch = parse_single_patch(diff)?;
     /// let options = ApplyOptions::new();
     ///
@@ -6478,7 +6506,7 @@ impl<'a> HunkApplier<'a> {
     /// # use mpatch::{parse_single_patch, HunkApplier, ApplyOptions};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let original_lines = vec!["line 1", "line 2"];
-    /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -2,1 +2,1\n-line 2\n+line two\n```";
+    /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -2,1 +2,1 @@\n-line 2\n+line two\n```";
     /// let patch = parse_single_patch(diff)?;
     /// let options = ApplyOptions::new();
     ///
@@ -6511,7 +6539,7 @@ impl<'a> HunkApplier<'a> {
     /// # use mpatch::{parse_single_patch, HunkApplier, ApplyOptions};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let original_lines = vec!["line 1"];
-    /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -1,1 +1,1\n-line 1\n+line one\n```";
+    /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -1,1 +1,1 @@\n-line 1\n+line one\n```";
     /// let patch = parse_single_patch(diff)?;
     /// let options = ApplyOptions::new();
     ///
@@ -6558,7 +6586,7 @@ impl<'a> Iterator for HunkApplier<'a> {
     /// # use mpatch::{parse_single_patch, HunkApplier, ApplyOptions, HunkApplyStatus};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let original_lines = vec!["line 1", "line 2"];
-    /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -2,1 +2,1\n-line 2\n+line two\n```";
+    /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -2,1 +2,1 @@\n-line 2\n+line two\n```";
     /// let patch = parse_single_patch(diff)?;
     /// let options = ApplyOptions::new();
     ///
@@ -6841,6 +6869,10 @@ pub fn try_apply_patch_to_lines<T: AsRef<str>>(
 /// interact with the filesystem. This is useful for testing, in-memory operations,
 /// or integrating `mpatch`'s logic into other tools.
 ///
+/// For file creation patches (where [`Patch::is_creation`] returns `true`), pass `None`
+/// for `original_content`. For file modification patches, pass `Some(content)`.
+/// If the patch removes all lines, the resulting `new_content` string will be empty.
+///
 /// # Arguments
 ///
 /// **Note:** For improved performance when content is already available as a slice
@@ -6912,6 +6944,10 @@ pub fn apply_patch_to_content(
 ///
 /// This function provides a simpler error handling model for workflows where any
 /// failed hunk should be considered a failure for the entire operation.
+///
+/// For file creation patches (where [`Patch::is_creation`] returns `true`), pass `None`
+/// for `original_content`. For file modification patches, pass `Some(content)`.
+/// If the patch removes all lines, the resulting `new_content` string will be empty.
 ///
 /// # Arguments
 ///
@@ -6998,7 +7034,7 @@ pub fn try_apply_patch_to_content(
 ///
 /// It performs the following steps:
 /// 1.  Parses the `diff_content` using [`parse_auto()`] (supporting Markdown,
-///     Unified Diffs, and Conflict Markers).
+///     Unified Diffs, Aider search/replace blocks, and Conflict Markers).
 /// 2.  Ensures that exactly one `Patch` is found. If zero or more than one are
 ///     found, it returns an error.
 /// 3.  Applies the single patch to `original_content` using the strict logic of
@@ -7007,7 +7043,7 @@ pub fn try_apply_patch_to_content(
 /// # Arguments
 ///
 /// * `diff_content` - A string slice containing the diff. This can be a Markdown
-///   code block, a raw Unified Diff, or Conflict Markers.
+///   code block, a raw Unified Diff, Aider search/replace blocks, or Conflict Markers.
 /// * `original_content` - An `Option<&str>` representing the content to be patched.
 ///   Use `Some(content)` for an existing file, or `None` for a file creation patch.
 /// * `options` - Configuration for the patch operation, such as `fuzz_factor`.
@@ -7024,6 +7060,7 @@ pub fn try_apply_patch_to_content(
 ///
 /// # Examples
 ///
+/// **Unified Diff Example:**
 /// ````rust
 /// # use mpatch::{patch_content_str, ApplyOptions, OneShotError};
 /// # fn main() -> Result<(), OneShotError> {
@@ -7048,6 +7085,20 @@ pub fn try_apply_patch_to_content(
 /// // 3. Verify the new content.
 /// let expected_content = "fn main() {\n    println!(\"Hello, mpatch!\");\n}\n";
 /// assert_eq!(new_content, expected_content);
+///
+/// Ok(())
+/// # }
+/// ````
+///
+/// **Aider Search/Replace Example:**
+/// ````rust
+/// # use mpatch::{patch_content_str, ApplyOptions, OneShotError};
+/// # fn main() -> Result<(), OneShotError> {
+/// let original = "def greet():\n    print('hello')\n";
+/// let aider_diff = "app.py\n<<<<<<< SEARCH\n    print('hello')\n=======\n    print('hello, world!')\n>>>>>>> REPLACE\n";
+/// let options = ApplyOptions::new();
+/// let patched = patch_content_str(aider_diff, Some(original), &options)?;
+/// assert_eq!(patched, "def greet():\n    print('hello, world!')\n");
 ///
 /// Ok(())
 /// # }
@@ -7299,6 +7350,9 @@ fn is_low_entropy_line(line: &str) -> bool {
 /// added lines cannot be cleanly anchored without context corruption), the function
 /// automatically backtracks to evaluate alternative candidate locations before reporting
 /// failure.
+///
+/// If application fails, `target_lines` is guaranteed to remain in its original, unmodified
+/// state.
 ///
 /// # Arguments
 ///
@@ -8111,7 +8165,7 @@ pub trait HunkFinder {
     /// # use mpatch::{parse_single_patch, DefaultHunkFinder, HunkFinder, ApplyOptions, HunkLocation, MatchType};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// // 1. Create a hunk to search for.
-    /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -1,2 +1,2\n line 1\n-line 2\n+line two\n```";
+    /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n line 1\n-line 2\n+line two\n```";
     /// let hunk = parse_single_patch(diff)?.hunks.remove(0);
     ///
     /// // 2. Define the content to search within.
@@ -9640,7 +9694,7 @@ impl<'a> HunkFinder for DefaultHunkFinder<'a> {
     /// ```
     /// # use mpatch::{parse_single_patch, DefaultHunkFinder, HunkFinder, ApplyOptions, HunkLocation, MatchType};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -1,2 +1,2\n line 1\n-line 2\n+line two\n```";
+    /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n line 1\n-line 2\n+line two\n```";
     /// let hunk = parse_single_patch(diff)?.hunks.remove(0);
     /// let target_lines = vec!["line 1", "line 2"];
     /// let options = ApplyOptions::new();

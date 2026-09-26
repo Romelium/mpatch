@@ -184,6 +184,10 @@ class Patch:
 
         Returns:
             PatchResult: The result of the application.
+
+        Raises:
+            PathTraversalError: If the patch targets a file outside target_dir.
+            ApplyError: If reading or writing the file fails due to an I/O or permission issue.
         """
         ...
     def apply_to_content(
@@ -256,7 +260,7 @@ class HunkApplyStatus:
         ...
     @property
     def location_start(self) -> int | None:
-        """The starting line index in the target file where the hunk was applied."""
+        """The 0-based starting line index in the target file where the hunk was applied, or None if skipped/failed."""
         ...
     @property
     def location_length(self) -> int | None:
@@ -376,6 +380,9 @@ def parse_auto(diff: str) -> list[Patch]:
 
     Returns:
         list[Patch]: A list of parsed patches.
+
+    Raises:
+        ParseError: If parsing diff headers or hunk syntax fails.
     """
     ...
 
@@ -388,6 +395,9 @@ def parse_diffs(diff: str) -> list[Patch]:
 
     Returns:
         list[Patch]: A list of parsed patches.
+
+    Raises:
+        ParseError: If parsing diff headers or hunk syntax fails.
     """
     ...
 
@@ -400,6 +410,9 @@ def parse_patches(diff: str) -> list[Patch]:
 
     Returns:
         list[Patch]: A list of parsed patches.
+
+    Raises:
+        ParseError: If diff headers are missing or hunk syntax is malformed.
     """
     ...
 
@@ -464,6 +477,9 @@ def create_unified_diff(
     Returns:
         str: The generated unified diff string.
 
+    Raises:
+        ParseError: If diff generation or parsing fails.
+
     Example:
         >>> import mpatch
         >>> diff = mpatch.create_unified_diff(
@@ -496,6 +512,10 @@ def patch_content(
 
     Returns:
         str: The new patched content.
+
+    Raises:
+        ParseError: If parsing the diff fails or multiple patches are found.
+        ApplyError: If any hunk in the patch fails to apply cleanly.
     """
     ...
 
@@ -517,6 +537,9 @@ def apply_directory(
 
     Returns:
         bool: True if all patches succeeded, False if any hard errors occurred.
+
+    Raises:
+        ParseError: If parsing diff headers or hunk syntax fails.
     """
     ...
 
@@ -559,6 +582,10 @@ def apply_patch_to_file(
 
     Returns:
         PatchResult: The result of the application.
+
+    Raises:
+        PathTraversalError: If the patch targets a file outside target_dir.
+        ApplyError: If reading or writing the file fails due to an I/O or permission issue.
     """
     ...
 

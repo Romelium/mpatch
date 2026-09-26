@@ -375,6 +375,10 @@ impl PyPatch {
     ///
     /// Returns:
     ///     PatchResult: The result of the application.
+    ///
+    /// Raises:
+    ///     PathTraversalError: If the target file path resolves outside the target directory.
+    ///     ApplyError: If an I/O error or permission issue occurs while accessing the file.
     #[pyo3(signature = (target_dir, *, fuzz_factor=0.7, dry_run=false))]
     fn apply_to_file(
         &self,
@@ -902,6 +906,9 @@ fn detect_patch(diff: &str) -> String {
 ///
 /// Returns:
 ///     list[Patch]: A list of parsed patches.
+///
+/// Raises:
+///     ParseError: If parsing diff headers or hunk syntax fails.
 fn parse_auto(py: Python<'_>, diff: &str) -> PyResult<Vec<PyPatch>> {
     let diff_str = diff.to_string();
     py.detach(move || {
@@ -920,6 +927,9 @@ fn parse_auto(py: Python<'_>, diff: &str) -> PyResult<Vec<PyPatch>> {
 ///
 /// Returns:
 ///     list[Patch]: A list of parsed patches.
+///
+/// Raises:
+///     ParseError: If parsing diff headers or hunk syntax fails.
 fn parse_diffs(py: Python<'_>, diff: &str) -> PyResult<Vec<PyPatch>> {
     let diff_str = diff.to_string();
     py.detach(move || {
@@ -938,6 +948,9 @@ fn parse_diffs(py: Python<'_>, diff: &str) -> PyResult<Vec<PyPatch>> {
 ///
 /// Returns:
 ///     list[Patch]: A list of parsed patches.
+///
+/// Raises:
+///     ParseError: If diff headers are missing or hunk syntax is malformed.
 fn parse_patches(py: Python<'_>, diff: &str) -> PyResult<Vec<PyPatch>> {
     let diff_str = diff.to_string();
     py.detach(move || {
@@ -1015,6 +1028,9 @@ fn invert_patches(patches: Vec<PyPatch>) -> Vec<PyPatch> {
 /// Returns:
 ///     str: The generated unified diff string.
 ///
+/// Raises:
+///     ParseError: If diff generation or parsing fails.
+///
 /// Example:
 ///     >>> import mpatch
 ///     >>> diff = mpatch.create_unified_diff("main.py", "print('old')\n", "print('new')\n")
@@ -1052,6 +1068,10 @@ fn create_unified_diff(
 ///
 /// Returns:
 ///     str: The new patched content.
+///
+/// Raises:
+///     ParseError: If parsing the diff fails or multiple patches are found.
+///     ApplyError: If any hunk in the patch fails to apply cleanly.
 fn patch_content(
     py: Python<'_>,
     diff: &str,
@@ -1082,6 +1102,9 @@ fn patch_content(
 ///
 /// Returns:
 ///     bool: True if all patches succeeded, False if any hard errors occurred.
+///
+/// Raises:
+///     ParseError: If parsing diff headers or hunk syntax fails.
 fn apply_directory(
     py: Python<'_>,
     diff: &str,
@@ -1145,6 +1168,10 @@ fn apply_patch_to_content(
 ///
 /// Returns:
 ///     PatchResult: The result of the application.
+///
+/// Raises:
+///     PathTraversalError: If the target path resolves outside target_dir.
+///     ApplyError: If reading or writing the file fails due to an I/O error or permission issue.
 fn apply_patch_to_file(
     py: Python<'_>,
     patch: &PyPatch,
