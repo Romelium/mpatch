@@ -9627,7 +9627,7 @@ mod false_positive_and_negative_tests {
     use indoc::indoc;
     use mpatch::{
         apply_patch_to_file, detect_patch, extract_file_path_from_line, is_ellipsis_line,
-        is_plausible_file_path, parse_auto, parse_patches, patch_content_str, ApplyOptions,
+        is_plausible_file_path, parse_auto, patch_content_str, ApplyOptions,
         PatchFormat,
     };
     use std::fs;
@@ -10030,4 +10030,107 @@ mod false_positive_and_negative_tests {
             "def start_job():\n    setup()\n\n    \n\t\n    record_completion()\n    finish()\n"
         );
     }
+}
+
+#[test]
+fn test_pure_addition_eof_append_with_zero_context() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let original = "line 1\nline 2\n";
+    let diff = indoc! {r#"
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -2,0 +3,2 @@
+        +line 3
+        +line 4
+    "#};
+
+    let result = patch_content_str(diff, Some(original), &ApplyOptions::exact()).unwrap();
+    assert_eq!(result, "line 1\nline 2\nline 3\nline 4\n");
+}
+
+#[test]
+fn test_pure_addition_mid_file_insertion_with_zero_context() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let original = "line 1\nline 2\nline 3\n";
+    let diff = indoc! {r#"
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1,0 +2,1 @@
+        +inserted after line 1
+    "#};
+
+    let result = patch_content_str(diff, Some(original), &ApplyOptions::exact()).unwrap();
+    assert_eq!(result, "line 1\ninserted after line 1\nline 2\nline 3\n");
+}
+
+#[test]
+fn test_aider_multi_hunk_identical_context_resolved_by_anchors() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let original = indoc! {r#"
+        pub fn op_one() {
+            let x = 1;
+            run();
+        }
+
+        pub fn op_two() {
+            let x = 1;
+            run();
+        }
+
+        pub fn op_three() {
+            let x = 1;
+            run();
+        }
+    "#};
+
+    let diff = indoc! {r#"
+        file.rs
+        <<<<<<< SEARCH
+        pub fn op_one() {
+        =======
+        pub fn op_one_v2() {
+        >>>>>>> REPLACE
+        <<<<<<< SEARCH
+            let x = 1;
+        =======
+            let x = 10;
+        >>>>>>> REPLACE
+        <<<<<<< SEARCH
+        pub fn op_three() {
+        =======
+        pub fn op_three_v2() {
+        >>>>>>> REPLACE
+    "#};
+
+    let result = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+    assert!(result.contains("pub fn op_one_v2()"));
+    assert!(result.contains("pub fn op_three_v2()"));
+    assert!(result.contains("pub fn op_one_v2() {\n    let x = 10;\n    run();\n}"));
+    assert!(result.contains("pub fn op_two() {\n    let x = 1;\n    run();\n}"));
+}
+
+#[test]
+fn test_aider_multi_hunk_unanchored_duplicate_remains_ambiguous() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let original = indoc! {r#"
+        pub fn op_alpha() {
+            let common = 1;
+        }
+
+        pub fn op_beta() {
+            let common = 1;
+        }
+    "#};
+
+    let diff = indoc! {r#"
+        file.rs
+        <<<<<<< SEARCH
+            let common = 1;
+        =======
+            let common = 2;
+        >>>>>>> REPLACE
+    "#};
+
+    let res = patch_content_str(diff, Some(original), &ApplyOptions::new());
+    assert!(res.is_err(), "Unanchored duplicate Aider block without surrounding bounds must remain strictly ambiguous");
 }

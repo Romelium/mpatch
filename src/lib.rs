@@ -3000,7 +3000,7 @@ impl Patch {
     pub fn is_creation(&self) -> bool {
         self.hunks
             .first()
-            .is_some_and(|h| h.old_start_line == Some(0) || h.get_match_block().is_empty())
+            .is_some_and(|h| h.old_start_line == Some(0) || (h.old_start_line.is_none() && h.get_match_block().is_empty()))
     }
 
     /// Checks if the patch represents a full file deletion.
@@ -6044,6 +6044,8 @@ pub struct HunkApplier<'a> {
     original_ends_with_newline: bool,
     /// Tracks whether any applied hunk touched or modified the end of the file.
     touched_eof: bool,
+    /// 1-based line number in current_lines where the last hunk finished applying.
+    last_applied_line: Option<usize>,
 }
 
 impl<'a> HunkApplier<'a> {
@@ -6097,6 +6099,7 @@ impl<'a> HunkApplier<'a> {
             patch_ends_with_newline: patch.ends_with_newline,
             original_ends_with_newline: true,
             touched_eof: false,
+            last_applied_line: None,
         }
     }
 
@@ -6301,7 +6304,16 @@ impl<'a> Iterator for HunkApplier<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         let hunk = self.hunks.next()?;
         let old_len = self.current_lines.len();
-        let status = apply_hunk_to_lines(hunk, &mut self.current_lines, self.options);
+
+        let mut hunk_with_hint;
+        let hunk_to_apply = if hunk.old_start_line.is_none() && self.last_applied_line.is_some() {
+            hunk_with_hint = hunk.clone();
+            hunk_with_hint.old_start_line = self.last_applied_line;
+            &hunk_with_hint
+        } else {
+            hunk
+        };
+        let status = apply_hunk_to_lines(hunk_to_apply, &mut self.current_lines, self.options);
 
         if let HunkApplyStatus::Applied { location, .. } = &status {
             let new_len = self.current_lines.len();
@@ -6310,6 +6322,7 @@ impl<'a> Iterator for HunkApplier<'a> {
             if location.start_index + inserted_len >= new_len {
                 self.touched_eof = true;
             }
+            self.last_applied_line = Some(location.start_index + inserted_len + 1);
         }
         Some(status)
     }
@@ -8391,7 +8404,7 @@ impl<'a> DefaultHunkFinder<'a> {
         let match_block = hunk.get_match_block();
         let min_span = hunk.required_match_span();
         let mut candidates =
-            self.find_hunk_location_internal(&match_block, target_lines, hunk.old_start_line)?;
+            self.find_hunk_location_internal(&match_block, target_lines, hunk.old_start_line, hunk.new_start_line)?;
         if min_span > 0 {
             candidates.retain(|(loc, _)| loc.length >= min_span);
             if candidates.is_empty() {
@@ -8553,6 +8566,7 @@ impl<'a> DefaultHunkFinder<'a> {
         match_block: &[&str],
         target_lines: &[T],
         old_start_line: Option<usize>,
+        new_start_line: Option<usize>,
     ) -> Result<Vec<(HunkLocation, MatchType)>, HunkApplyError> {
         let has_ellipsis = match_block.iter().any(|l| is_ellipsis_line(l));
 
@@ -8595,7 +8609,7 @@ impl<'a> DefaultHunkFinder<'a> {
             if current_start < match_block.len() {
                 segments.push(&match_block[current_start..]);
             }
-            return self.find_wildcard_segments_location(&segments, target_lines, old_start_line);
+            return self.find_wildcard_segments_location(&segments, target_lines, old_start_line, new_start_line);
         }
 
         let match_has_entropy = match_block.iter().any(|l| !is_low_entropy_line(l));
@@ -8607,21 +8621,64 @@ impl<'a> DefaultHunkFinder<'a> {
         );
 
         if match_block.is_empty() {
-            // An empty match block (file creation) can only be applied to an empty file.
-            trace!("    Match block is empty (file creation).");
-            return if target_lines.is_empty() {
+            trace!("    Match block is empty (pure addition).");
+            if target_lines.is_empty() {
                 trace!("    Target is empty, match successful at (0, 0).");
-                Ok(vec![(
+                return Ok(vec![(
                     HunkLocation {
                         start_index: 0,
                         length: 0,
                     },
                     MatchType::Exact,
-                )])
-            } else {
-                trace!("    Target is not empty, match failed.");
-                Err(HunkApplyError::ContextNotFound)
-            };
+                )]);
+            }
+
+            // Target file is non-empty. Use line number intent.
+            match old_start_line {
+                // Line 0 on an existing non-empty file is a file creation conflict.
+                Some(0) => {
+                    trace!("    Target is not empty for file creation (line 0). Match failed.");
+                    return Err(HunkApplyError::ContextNotFound);
+                }
+                // Line number at or beyond EOF indicates an append to the end of the file.
+                Some(line) if line >= target_lines.len() => {
+                    debug!(
+                        "    Pure addition targeting line {} >= EOF ({}). Appending to EOF.",
+                        line,
+                        target_lines.len()
+                    );
+                    return Ok(vec![(
+                        HunkLocation {
+                            start_index: target_lines.len(),
+                            length: 0,
+                        },
+                        MatchType::Exact,
+                    )]);
+                }
+                // Line number inside the file.
+                Some(line) => {
+                    let target_idx = match new_start_line {
+                        Some(new) if new <= line => line.saturating_sub(1).min(target_lines.len()),
+                        _ => line.min(target_lines.len()),
+                    };
+                    debug!(
+                        "    Pure addition targeting line {}. Inserting at index {}.",
+                        line, target_idx
+                    );
+                    return Ok(vec![(
+                        HunkLocation {
+                            start_index: target_idx,
+                            length: 0,
+                        },
+                        MatchType::Exact,
+                    )]);
+                }
+                // No line number provided (e.g. unanchored conflict marker with 0 context).
+                None => {
+                    trace!("    Pure addition has no line number hint and target is not empty. Match failed.");
+                    return Err(HunkApplyError::ContextNotFound);
+                }
+            }
         }
 
         // --- STRATEGY 1: Exact Match ---
@@ -9151,6 +9208,7 @@ impl<'a> DefaultHunkFinder<'a> {
         segments: &[&[&str]],
         target_lines: &[T],
         old_start_line: Option<usize>,
+        new_start_line: Option<usize>,
     ) -> Result<Vec<(HunkLocation, MatchType)>, HunkApplyError> {
         if segments.is_empty() {
             return Err(HunkApplyError::ContextNotFound);
@@ -9159,7 +9217,7 @@ impl<'a> DefaultHunkFinder<'a> {
             return Err(HunkApplyError::ContextNotFound);
         }
         if segments.len() == 1 {
-            return self.find_hunk_location_internal(segments[0], target_lines, old_start_line);
+            return self.find_hunk_location_internal(segments[0], target_lines, old_start_line, new_start_line);
         }
 
         let target_refs: Vec<&str> = target_lines.iter().map(|s| s.as_ref().trim_end()).collect();
