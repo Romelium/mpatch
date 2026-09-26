@@ -5986,6 +5986,267 @@ pub fn try_apply_patch_to_file(
     }
 }
 
+/// Recursively searches for all strictly non-overlapping, monotonically increasing
+/// assignment chains of candidate match indices across a sequence of unanchored hunks.
+fn find_valid_chains(
+    j: usize,
+    min_pos: usize,
+    hunk_lens: &[usize],
+    cand_lists: &[Vec<usize>],
+    current: &mut Vec<usize>,
+    chains: &mut Vec<Vec<usize>>,
+) {
+    if chains.len() > 100 {
+        return;
+    }
+    if j == cand_lists.len() {
+        chains.push(current.clone());
+        return;
+    }
+    for &cand in &cand_lists[j] {
+        if cand >= min_pos {
+            current.push(cand);
+            find_valid_chains(
+                j + 1,
+                cand + hunk_lens[j],
+                hunk_lens,
+                cand_lists,
+                current,
+                chains,
+            );
+            current.pop();
+        }
+    }
+}
+
+/// Soundly resolves line hints for hunks in a patch that lack `old_start_line` (such as Aider
+/// search/replace blocks or conflict markers) using topological anchor interval bounding.
+///
+/// When multiple hunks target the same file, unambiguous hunks act as spatial anchors. An
+/// intermediate hunk with identical/repetitive code is soundly resolved if and only if exactly
+/// one match exists within the interval between its bounding anchors.
+fn resolve_hunk_line_hints<T: AsRef<str>>(
+    hunks: &[Hunk],
+    lines: &[T],
+) -> Vec<Hunk> {
+    let mut resolved = hunks.to_vec();
+    if resolved.is_empty() || lines.is_empty() {
+        return resolved;
+    }
+
+    let n = resolved.len();
+    let mut matches_per_hunk: Vec<Vec<usize>> = Vec::with_capacity(n);
+    let mut anchors: Vec<Option<usize>> = vec![None; n];
+    let match_lens: Vec<usize> = resolved
+        .iter()
+        .map(|h| h.lines.iter().filter(|l| !l.starts_with('+')).count())
+        .collect();
+
+    for (i, hunk) in resolved.iter_mut().enumerate() {
+        let match_block = hunk.get_match_block();
+        if match_block.is_empty() || is_low_entropy_segment(&match_block) {
+            matches_per_hunk.push(Vec::new());
+            continue;
+        }
+
+        if let Some(explicit_line) = hunk.old_start_line {
+            matches_per_hunk.push(vec![explicit_line.saturating_sub(1)]);
+            anchors[i] = Some(explicit_line.saturating_sub(1));
+            continue;
+        }
+
+        let mut exact_matches = Vec::new();
+        if match_block.len() <= lines.len() {
+            for (idx, window) in lines.windows(match_block.len()).enumerate() {
+                if window.iter().map(|s| s.as_ref()).eq(match_block.iter().copied()) {
+                    exact_matches.push(idx);
+                }
+            }
+            if exact_matches.is_empty() {
+                let match_trimmed: Vec<&str> = match_block.iter().map(|s| s.trim_end()).collect();
+                for (idx, window) in lines.windows(match_block.len()).enumerate() {
+                    if window.iter().map(|s| s.as_ref().trim_end()).eq(match_trimmed.iter().copied()) {
+                        exact_matches.push(idx);
+                    }
+                }
+            }
+        }
+
+        if exact_matches.len() == 1 {
+            anchors[i] = Some(exact_matches[0]);
+            hunk.old_start_line = Some(exact_matches[0] + 1);
+        }
+        matches_per_hunk.push(exact_matches);
+    }
+
+    // Relaxation: Soundly bound intermediate ambiguous hunks between established anchors
+    let mut changed = true;
+    while changed {
+        changed = false;
+
+        // Pass 1: Single unique bounded matches and contiguous anchor attachments
+        for i in 0..n {
+            if anchors[i].is_some() {
+                continue;
+            }
+            let candidates = &matches_per_hunk[i];
+            if candidates.is_empty() {
+                continue;
+            }
+
+            let prev_anchor = (0..i).rev().find_map(|p| anchors[p].map(|pos| (p, pos)));
+            let next_anchor = ((i + 1)..n).find_map(|s| anchors[s].map(|pos| (s, pos)));
+
+            let (min_bound, max_bound) = match (prev_anchor, next_anchor) {
+                (Some((p, p_pos)), Some((_s, s_pos))) => {
+                    let p_len = match_lens[p];
+                    (p_pos + p_len, s_pos)
+                }
+                (Some((p, p_pos)), None) => {
+                    let p_len = match_lens[p];
+                    (p_pos + p_len, lines.len())
+                }
+                (None, Some((_s, s_pos))) => (0, s_pos),
+                (None, None) => (0, lines.len()),
+            };
+
+            if min_bound <= max_bound {
+                let hunk_len = match_lens[i];
+                let bounded_matches: Vec<usize> = candidates
+                    .iter()
+                    .copied()
+                    .filter(|&m| m >= min_bound && m + hunk_len <= max_bound)
+                    .collect();
+
+                if bounded_matches.len() == 1 {
+                    let unique_match = bounded_matches[0];
+                    anchors[i] = Some(unique_match);
+                    resolved[i].old_start_line = Some(unique_match + 1);
+                    changed = true;
+                    continue;
+                }
+
+                // Contiguity check: If hunk `i` is immediately adjacent to prev_anchor in the patch (`i == p + 1`),
+                // and a bounded candidate starts right where prev_anchor ended (`m == min_bound`), anchor it.
+                if let Some((p, _)) = prev_anchor {
+                    if i == p + 1 && bounded_matches.contains(&min_bound) {
+                        anchors[i] = Some(min_bound);
+                        resolved[i].old_start_line = Some(min_bound + 1);
+                        changed = true;
+                        continue;
+                    }
+                }
+
+                // Similarly, if hunk `i` immediately precedes next_anchor in the patch (`i + 1 == s`),
+                // and a bounded candidate ends right where next_anchor begins (`m + hunk_len == max_bound`), anchor it.
+                if let Some((s, _)) = next_anchor {
+                    if i + 1 == s
+                        && max_bound >= hunk_len
+                        && bounded_matches.contains(&(max_bound - hunk_len))
+                    {
+                        let m = max_bound - hunk_len;
+                        anchors[i] = Some(m);
+                        resolved[i].old_start_line = Some(m + 1);
+                        changed = true;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        if changed {
+            continue;
+        }
+
+        // Pass 2: Topological chain resolution across contiguous sequences of unanchored hunks
+        let mut idx = 0;
+        while idx < n {
+            if anchors[idx].is_some() {
+                idx += 1;
+                continue;
+            }
+            let start = idx;
+            while idx < n && anchors[idx].is_none() {
+                idx += 1;
+            }
+            let end = idx;
+            let unanchored_indices: Vec<usize> = (start..end).collect();
+            if unanchored_indices.len() >= 2 {
+                let prev_anchor = if start > 0 {
+                    anchors[start - 1].map(|pos| (start - 1, pos))
+                } else {
+                    None
+                };
+                let next_anchor = if end < n {
+                    anchors[end].map(|pos| (end, pos))
+                } else {
+                    None
+                };
+
+                let (min_bound, max_bound) = match (prev_anchor, next_anchor) {
+                    (Some((p, p_pos)), Some((_s, s_pos))) => {
+                        let p_len = match_lens[p];
+                        (p_pos + p_len, s_pos)
+                    }
+                    (Some((p, p_pos)), None) => {
+                        let p_len = match_lens[p];
+                        (p_pos + p_len, lines.len())
+                    }
+                    (None, Some((_s, s_pos))) => (0, s_pos),
+                    (None, None) => (0, lines.len()),
+                };
+
+                if min_bound <= max_bound {
+                    let mut hunk_lens = Vec::with_capacity(unanchored_indices.len());
+                    let mut cand_lists = Vec::with_capacity(unanchored_indices.len());
+                    let mut all_have_candidates = true;
+
+                    for &h in &unanchored_indices {
+                        let h_len = match_lens[h];
+                        let cands: Vec<usize> = matches_per_hunk[h]
+                            .iter()
+                            .copied()
+                            .filter(|&m| m >= min_bound && m + h_len <= max_bound)
+                            .collect();
+                        if cands.is_empty() {
+                            all_have_candidates = false;
+                            break;
+                        }
+                        hunk_lens.push(h_len);
+                        cand_lists.push(cands);
+                    }
+
+                    if all_have_candidates {
+                        let mut chains = Vec::new();
+                        let mut cur = Vec::with_capacity(unanchored_indices.len());
+                        find_valid_chains(
+                            0,
+                            min_bound,
+                            &hunk_lens,
+                            &cand_lists,
+                            &mut cur,
+                            &mut chains,
+                        );
+
+                        if !chains.is_empty() {
+                            for (j, &h) in unanchored_indices.iter().enumerate() {
+                                let pos0 = chains[0][j];
+                                if chains.iter().all(|c| c[j] == pos0) {
+                                    anchors[h] = Some(pos0);
+                                    resolved[h].old_start_line = Some(pos0 + 1);
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    resolved
+}
+
 /// An iterator that applies hunks from a patch one by one.
 ///
 /// This struct provides fine-grained control over the patch application process.
@@ -6033,7 +6294,8 @@ pub fn try_apply_patch_to_file(
 #[derive(Debug)]
 pub struct HunkApplier<'a> {
     /// An iterator over remaining hunks in the patch.
-    hunks: std::slice::Iter<'a, Hunk>,
+    hunks: Vec<Hunk>,
+    current_idx: usize,
     /// Accumulated lines of the file content as hunks are applied.
     current_lines: Vec<String>,
     /// Patch application options governing fuzzy thresholds and behavior.
@@ -6044,6 +6306,7 @@ pub struct HunkApplier<'a> {
     original_ends_with_newline: bool,
     /// Tracks whether any applied hunk touched or modified the end of the file.
     touched_eof: bool,
+    completed_edits: Vec<(usize, isize)>,
     /// 1-based line number in current_lines where the last hunk finished applying.
     last_applied_line: Option<usize>,
 }
@@ -6092,13 +6355,22 @@ impl<'a> HunkApplier<'a> {
         let current_lines: Vec<String> = original_lines
             .map(|lines| lines.iter().map(|s| s.as_ref().to_string()).collect())
             .unwrap_or_default();
+
+        let hunks = if let Some(lines) = original_lines {
+            resolve_hunk_line_hints(&patch.hunks, lines)
+        } else {
+            patch.hunks.clone()
+        };
+
         Self {
-            hunks: patch.hunks.iter(),
+            hunks,
+            current_idx: 0,
             current_lines,
             options,
             patch_ends_with_newline: patch.ends_with_newline,
             original_ends_with_newline: true,
             touched_eof: false,
+            completed_edits: Vec::new(),
             last_applied_line: None,
         }
     }
@@ -6302,22 +6574,42 @@ impl<'a> Iterator for HunkApplier<'a> {
     /// # }
     /// ```
     fn next(&mut self) -> Option<Self::Item> {
-        let hunk = self.hunks.next()?;
+        if self.current_idx >= self.hunks.len() {
+            return None;
+        }
+        let hunk = &self.hunks[self.current_idx];
+        self.current_idx += 1;
+
         let old_len = self.current_lines.len();
 
-        let mut hunk_with_hint;
-        let hunk_to_apply = if hunk.old_start_line.is_none() && self.last_applied_line.is_some() {
-            hunk_with_hint = hunk.clone();
-            hunk_with_hint.old_start_line = self.last_applied_line;
-            &hunk_with_hint
+        let mut adjusted_hunk;
+        let hunk_to_apply = if let Some(old_start) = hunk.old_start_line {
+            let applicable_delta: isize = self
+                .completed_edits
+                .iter()
+                .filter(|(orig_pos, _)| *orig_pos <= old_start)
+                .map(|(_, d)| *d)
+                .sum();
+
+            if applicable_delta != 0 {
+                adjusted_hunk = hunk.clone();
+                let shifted = (old_start as isize + applicable_delta).max(1) as usize;
+                adjusted_hunk.old_start_line = Some(shifted);
+                &adjusted_hunk
+            } else {
+                hunk
+            }
         } else {
             hunk
         };
+
         let status = apply_hunk_to_lines(hunk_to_apply, &mut self.current_lines, self.options);
 
         if let HunkApplyStatus::Applied { location, .. } = &status {
             let new_len = self.current_lines.len();
             let delta = (new_len as isize) - (old_len as isize);
+            let orig_pos = hunk.old_start_line.unwrap_or(location.start_index + 1);
+            self.completed_edits.push((orig_pos, delta));
             let inserted_len = (location.length as isize + delta) as usize;
             if location.start_index + inserted_len >= new_len {
                 self.touched_eof = true;

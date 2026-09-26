@@ -10134,3 +10134,385 @@ fn test_aider_multi_hunk_unanchored_duplicate_remains_ambiguous() {
     let res = patch_content_str(diff, Some(original), &ApplyOptions::new());
     assert!(res.is_err(), "Unanchored duplicate Aider block without surrounding bounds must remain strictly ambiguous");
 }
+
+#[test]
+fn test_aider_hunk_applier_five_method_doc_test_reproduction() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    // Faithful reproduction of the 5 methods from src/lib.rs that caused the AmbiguousExactMatch failure
+    let original = indoc! {r#"
+        pub fn new<T: AsRef<str>>() {
+            /// let original_lines = vec!["line 1", "line 2"];
+            /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -2,1 +2,1\n-line 2\n+line two\n```";
+            /// let patch = parse_single_patch(diff)?;
+            /// let options = ApplyOptions::new();
+            ///
+            /// let mut applier = HunkApplier::new(&patch, Some(&original_lines), &options);
+            /// let status = applier.next().unwrap();
+            println!("in new");
+        }
+
+        pub fn current_lines(&self) {
+            /// let original_lines = vec!["line 1", "line 2"];
+            /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -2,1 +2,1\n-line 2\n+line two\n```";
+            /// let patch = parse_single_patch(diff)?;
+            /// let options = ApplyOptions::new();
+            ///
+            /// let mut applier = HunkApplier::new(&patch, Some(&original_lines), &options);
+            /// assert_eq!(applier.current_lines(), &["line 1", "line 2"]);
+            println!("in current_lines");
+        }
+
+        pub fn into_lines(self) {
+            /// let original_lines = vec!["line 1", "line 2"];
+            /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -2,1 +2,1\n-line 2\n+line two\n```";
+            /// let patch = parse_single_patch(diff)?;
+            /// let options = ApplyOptions::new();
+            ///
+            /// let mut applier = HunkApplier::new(&patch, Some(&original_lines), &options);
+            /// applier.next(); // Apply all hunks
+            /// let final_lines = applier.into_lines();
+            println!("in into_lines");
+        }
+
+        pub fn into_content(self) {
+            /// let original_lines = vec!["line 1"];
+            /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -1,1 +1,1\n-line 1\n+line one\n```";
+            /// let patch = parse_single_patch(diff)?;
+            /// let options = ApplyOptions::new();
+            ///
+            /// let mut applier = HunkApplier::new(&patch, Some(&original_lines), &options);
+            println!("in into_content");
+        }
+
+        pub fn next(&mut self) {
+            /// let original_lines = vec!["line 1", "line 2"];
+            /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -2,1 +2,1\n-line 2\n+line two\n```";
+            /// let patch = parse_single_patch(diff)?;
+            /// let options = ApplyOptions::new();
+            ///
+            /// let mut applier = HunkApplier::new(&patch, Some(&original_lines), &options);
+            /// let status = applier.next();
+            println!("in next");
+        }
+    "#};
+
+    // Five Aider blocks mirroring Hunks 12, 13, 14, 15, and 16 from the report:
+    // Hunks 13 and 16 contain only the 6 shared lines with no unique method identifier.
+    let diff = indoc! {r#"
+        app.rs
+        <<<<<<< SEARCH
+            /// let original_lines = vec!["line 1", "line 2"];
+            /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -2,1 +2,1\n-line 2\n+line two\n```";
+            /// let patch = parse_single_patch(diff)?;
+            /// let options = ApplyOptions::new();
+            ///
+            /// let mut applier = HunkApplier::new(&patch, Some(&original_lines), &options);
+            /// let status = applier.next().unwrap();
+        =======
+            /// let original_lines = vec!["line 1", "line 2"];
+            /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -2,1 +2,1 @@\n-line 2\n+line two\n```";
+            /// let patch = parse_single_patch(diff)?;
+            /// let options = ApplyOptions::new();
+            ///
+            /// let mut applier = HunkApplier::new(&patch, Some(&original_lines), &options);
+            /// let status = applier.next().unwrap();
+        >>>>>>> REPLACE
+        <<<<<<< SEARCH
+            /// let original_lines = vec!["line 1", "line 2"];
+            /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -2,1 +2,1\n-line 2\n+line two\n```";
+            /// let patch = parse_single_patch(diff)?;
+            /// let options = ApplyOptions::new();
+            ///
+            /// let mut applier = HunkApplier::new(&patch, Some(&original_lines), &options);
+        =======
+            /// let original_lines = vec!["line 1", "line 2"];
+            /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -2,1 +2,1 @@\n-line 2\n+line two\n```";
+            /// let patch = parse_single_patch(diff)?;
+            /// let options = ApplyOptions::new();
+            ///
+            /// let mut applier = HunkApplier::new(&patch, Some(&original_lines), &options);
+        >>>>>>> REPLACE
+        <<<<<<< SEARCH
+            /// let original_lines = vec!["line 1", "line 2"];
+            /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -2,1 +2,1\n-line 2\n+line two\n```";
+            /// let patch = parse_single_patch(diff)?;
+            /// let options = ApplyOptions::new();
+            ///
+            /// let mut applier = HunkApplier::new(&patch, Some(&original_lines), &options);
+            /// applier.next(); // Apply all hunks
+            /// let final_lines = applier.into_lines();
+        =======
+            /// let original_lines = vec!["line 1", "line 2"];
+            /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -2,1 +2,1 @@\n-line 2\n+line two\n```";
+            /// let patch = parse_single_patch(diff)?;
+            /// let options = ApplyOptions::new();
+            ///
+            /// let mut applier = HunkApplier::new(&patch, Some(&original_lines), &options);
+            /// applier.next(); // Apply all hunks
+            /// let final_lines = applier.into_lines();
+        >>>>>>> REPLACE
+        <<<<<<< SEARCH
+            /// let original_lines = vec!["line 1"];
+            /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -1,1 +1,1\n-line 1\n+line one\n```";
+            /// let patch = parse_single_patch(diff)?;
+            /// let options = ApplyOptions::new();
+            ///
+            /// let mut applier = HunkApplier::new(&patch, Some(&original_lines), &options);
+        =======
+            /// let original_lines = vec!["line 1"];
+            /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -1,1 +1,1 @@\n-line 1\n+line one\n```";
+            /// let patch = parse_single_patch(diff)?;
+            /// let options = ApplyOptions::new();
+            ///
+            /// let mut applier = HunkApplier::new(&patch, Some(&original_lines), &options);
+        >>>>>>> REPLACE
+        <<<<<<< SEARCH
+            /// let original_lines = vec!["line 1", "line 2"];
+            /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -2,1 +2,1\n-line 2\n+line two\n```";
+            /// let patch = parse_single_patch(diff)?;
+            /// let options = ApplyOptions::new();
+            ///
+            /// let mut applier = HunkApplier::new(&patch, Some(&original_lines), &options);
+        =======
+            /// let original_lines = vec!["line 1", "line 2"];
+            /// let diff = "```diff\n--- a/f\n+++ b/f\n@@ -2,1 +2,1 @@\n-line 2\n+line two\n```";
+            /// let patch = parse_single_patch(diff)?;
+            /// let options = ApplyOptions::new();
+            ///
+            /// let mut applier = HunkApplier::new(&patch, Some(&original_lines), &options);
+        >>>>>>> REPLACE
+    "#};
+
+    let result = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+
+    // Assert all 5 locations were successfully patched to include @@ ... @@
+    assert_eq!(result.matches("@@ -2,1 +2,1 @@").count(), 4);
+    assert_eq!(result.matches("@@ -1,1 +1,1 @@").count(), 1);
+    assert_eq!(result.matches("@@ -2,1 +2,1\\n").count(), 0);
+
+    // Assert that each method's distinct code was preserved and not clobbered
+    assert!(result.contains("assert_eq!(applier.current_lines(), &[\"line 1\", \"line 2\"]);"));
+    assert!(result.contains("let final_lines = applier.into_lines();"));
+    assert!(result.contains("let status = applier.next();"));
+    assert!(result.contains("let status = applier.next().unwrap();"));
+}
+
+#[test]
+fn test_cascading_relaxation_anchor_resolution() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    // Test multi-step relaxation:
+    // Hunk 0: unique anchor at start
+    // Hunk 1: ambiguous across whole file, bounded between Hunk 0 and Hunk 3
+    // Hunk 2: ambiguous across whole file, but once Hunk 1 is resolved, bounded between Hunk 1 and Hunk 3
+    // Hunk 3: unique anchor at end
+    let original = indoc! {r#"
+        fn anchor_start() {
+            init();
+        }
+
+        fn step_alpha() {
+            shared_step();
+        }
+
+        fn step_beta() {
+            shared_step();
+        }
+
+        fn anchor_end() {
+            shutdown();
+        }
+    "#};
+
+    let diff = indoc! {r#"
+        flow.rs
+        <<<<<<< SEARCH
+        fn anchor_start() {
+        =======
+        fn anchor_start_v2() {
+        >>>>>>> REPLACE
+        <<<<<<< SEARCH
+            shared_step();
+        =======
+            shared_step_alpha();
+        >>>>>>> REPLACE
+        <<<<<<< SEARCH
+            shared_step();
+        =======
+            shared_step_beta();
+        >>>>>>> REPLACE
+        <<<<<<< SEARCH
+        fn anchor_end() {
+        =======
+        fn anchor_end_v2() {
+        >>>>>>> REPLACE
+    "#};
+
+    let result = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+    assert!(result.contains("fn anchor_start_v2()"));
+    assert!(result.contains("shared_step_alpha()"));
+    assert!(result.contains("shared_step_beta()"));
+    assert!(result.contains("fn anchor_end_v2()"));
+}
+
+#[test]
+fn test_anchor_bounded_at_file_start_and_end() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let original = indoc! {r#"
+        fn header() {
+            log_event();
+        }
+
+        fn middle_anchor() {
+            anchor_point();
+        }
+
+        fn footer() {
+            log_event();
+        }
+    "#};
+
+    // Hunk 1 is ambiguous (matches header and footer), but sits between line 0 and middle_anchor
+    // Hunk 3 is ambiguous (matches header and footer), but sits between middle_anchor and EOF
+    let diff = indoc! {r#"
+        log.rs
+        <<<<<<< SEARCH
+            log_event();
+        =======
+            log_header_event();
+        >>>>>>> REPLACE
+        <<<<<<< SEARCH
+        fn middle_anchor() {
+        =======
+        fn middle_anchor_v2() {
+        >>>>>>> REPLACE
+        <<<<<<< SEARCH
+            log_event();
+        =======
+            log_footer_event();
+        >>>>>>> REPLACE
+    "#};
+
+    let result = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+    assert!(result.contains("fn header() {\n    log_header_event();\n}"));
+    assert!(result.contains("fn middle_anchor_v2()"));
+    assert!(result.contains("fn footer() {\n    log_footer_event();\n}"));
+}
+
+#[test]
+fn test_genuine_ambiguity_multiple_matches_in_interval_must_fail() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    // Inside the interval bounded by anchor_one and anchor_two,
+    // there are TWO identical matches. The engine must NOT guess!
+    let original = indoc! {r#"
+        fn anchor_one() {}
+
+        fn duplicate_one() {
+            do_action();
+        }
+
+        fn duplicate_two() {
+            do_action();
+        }
+
+        fn anchor_two() {}
+    "#};
+
+    let diff = indoc! {r#"
+        fail.rs
+        <<<<<<< SEARCH
+        fn anchor_one() {}
+        =======
+        fn anchor_one_v2() {}
+        >>>>>>> REPLACE
+        <<<<<<< SEARCH
+            do_action();
+        =======
+            do_action_new();
+        >>>>>>> REPLACE
+        <<<<<<< SEARCH
+        fn anchor_two() {}
+        =======
+        fn anchor_two_v2() {}
+        >>>>>>> REPLACE
+    "#};
+
+    let res = patch_content_str(diff, Some(original), &ApplyOptions::new());
+    assert!(res.is_err(), "Must reject with AmbiguousExactMatch when >1 matches exist within the anchor interval");
+}
+
+#[test]
+fn test_position_aware_delta_tracking_out_of_order_non_monotonic() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    // Hunk 1 edits line 100 (adds 10 lines)
+    // Hunk 2 edits line 10 (earlier in the file; must NOT be shifted by Hunk 1's delta)
+    // Hunk 3 edits line 150 (after both; must inherit Hunk 1's and Hunk 2's deltas)
+    let mut lines = Vec::new();
+    for i in 1..=200 {
+        lines.push(format!("line_{}", i));
+    }
+    let original = lines.join("\n") + "\n";
+
+    let diff = indoc! {r#"
+        ```diff
+        --- a/test.txt
+        +++ b/test.txt
+        @@ -100,1 +100,3 @@
+        -line_100
+        +line_100_modified
+        +line_100_extra_1
+        +line_100_extra_2
+        @@ -10,1 +10,2 @@
+        -line_10
+        +line_10_modified
+        +line_10_extra
+        @@ -150,1 +150,2 @@
+        -line_150
+        +line_150_modified
+        +line_150_extra
+        ```
+    "#};
+
+    let result = patch_content_str(diff, Some(&original), &ApplyOptions::exact()).unwrap();
+    assert!(result.contains("line_10_modified\nline_10_extra\nline_11"));
+    assert!(result.contains("line_100_modified\nline_100_extra_1\nline_100_extra_2\nline_101"));
+    assert!(result.contains("line_150_modified\nline_150_extra\nline_151"));
+}
+
+#[test]
+fn test_low_entropy_blocks_in_interval_never_anchored() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    // Even if only one closing brace '}' exists between anchor_start and anchor_end,
+    // low entropy syntax must never be anchored or tie-broken without entropy!
+    let original = indoc! {r#"
+        fn anchor_start() {
+            init();
+        }
+
+        fn worker() {
+            let val = 1;
+        }
+
+        fn anchor_end() {
+            finish();
+        }
+    "#};
+
+    let diff = indoc! {r#"
+        test.rs
+        <<<<<<< SEARCH
+        }
+        =======
+        }
+        // injected comment
+        >>>>>>> REPLACE
+    "#};
+
+    let res = patch_content_str(diff, Some(original), &ApplyOptions::exact());
+    assert!(res.is_err(), "Single closing brace must not be anchored or tie-broken without sufficient entropy");
+}
