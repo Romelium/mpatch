@@ -7,8 +7,8 @@ use mpatch::{apply_patches_to_dir, parse_auto, Patch};
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::fs::{self, File};
-use std::io::{self, Write};
-use std::path::PathBuf;
+use std::io::{self, IsTerminal, Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -43,13 +43,16 @@ fn run(args: Args) -> Result<()> {
     #[allow(unused_mut)]
     let mut args = args;
 
-    // --- File Parsing & Clipboard ---
+    // --- File Parsing & Clipboard & Stdin ---
     #[cfg(feature = "clipboard")]
     let use_clipboard = args.clipboard;
     #[cfg(not(feature = "clipboard"))]
     let use_clipboard = false;
 
-    let content = if use_clipboard {
+    let is_stdin_dash = args.input_file.as_deref() == Some(Path::new("-"));
+
+    // Determine input mode and target directory
+    let (content, is_stdin, actual_target_dir) = if use_clipboard {
         #[cfg(feature = "clipboard")]
         {
             let mut clipboard =
@@ -63,29 +66,56 @@ fn run(args: Args) -> Result<()> {
                 .clone()
                 .or_else(|| args.input_file.clone())
                 .unwrap_or_else(|| PathBuf::from("."));
-            args.target_dir = Some(target);
-            args.input_file = None; // clear this so report generator marks it cleanly
-            content
+            args.target_dir = Some(target.clone());
+            args.input_file = None;
+            (content, false, target)
         }
         #[cfg(not(feature = "clipboard"))]
         {
             unreachable!()
         }
+    } else if is_stdin_dash {
+        let target = args
+            .target_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("."));
+        args.target_dir = Some(target.clone());
+        let content = read_stdin_content(true)?;
+        (content, true, target)
+    } else if let Some(ref path) = args.input_file {
+        if path.is_dir() && args.target_dir.is_none() && !io::stdin().is_terminal() {
+            // Piped stdin with target dir passed as first positional arg (e.g. `cat patch.diff | mpatch ./src`)
+            let target = path.clone();
+            args.target_dir = Some(target.clone());
+            args.input_file = Some(PathBuf::from("-"));
+            let content = read_stdin_content(false)?;
+            (content, true, target)
+        } else {
+            let target = args
+                .target_dir
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("."));
+            args.target_dir = Some(target.clone());
+            let content = fs::read_to_string(path)
+                .with_context(|| format!("Failed to read input file '{}'", path.display()))?;
+            (content, false, target)
+        }
+    } else if !io::stdin().is_terminal() {
+        // Piped stdin with no arguments provided (e.g. `cat patch.diff | mpatch`)
+        let target = PathBuf::from(".");
+        args.target_dir = Some(target.clone());
+        args.input_file = Some(PathBuf::from("-"));
+        let content = read_stdin_content(false)?;
+        (content, true, target)
     } else {
-        let input_file = args
-            .input_file
-            .as_ref()
-            .expect("input_file is required unless --clipboard is used");
-        let content = fs::read_to_string(input_file)
-            .with_context(|| format!("Failed to read input file '{}'", input_file.display()))?;
-        content
+        return Err(anyhow!(
+            "No input patch provided. Specify a patch file, '-' to read from standard input (stdin), or use -c/--clipboard.\nFor help, try '--help'."
+        ));
     };
 
-    let actual_target_dir = args
-        .target_dir
-        .as_ref()
-        .cloned()
-        .unwrap_or_else(|| PathBuf::from("."));
+    if is_stdin {
+        info!("Reading patch from standard input (stdin)...");
+    }
 
     // --- Argument Validation ---
     if !actual_target_dir.is_dir() {
@@ -119,7 +149,7 @@ fn run(args: Args) -> Result<()> {
     };
     // --- Core Patching Logic ---
     if all_patches.is_empty() {
-        info!("No valid patches found or processed in the input file.");
+        info!("No valid patches found or processed in the input.");
         return Ok(());
     }
 
@@ -203,6 +233,22 @@ fn run(args: Args) -> Result<()> {
     Ok(())
 }
 
+/// Reads complete patch content from standard input (stdin).
+///
+/// # Arguments
+///
+/// * `is_explicit_dash` - Whether the user explicitly passed `-` on the command line.
+fn read_stdin_content(is_explicit_dash: bool) -> Result<String> {
+    if is_explicit_dash && io::stdin().is_terminal() {
+        eprintln!("Reading patch from standard input (Ctrl+D to finish)...");
+    }
+    let mut buffer = String::new();
+    io::stdin()
+        .read_to_string(&mut buffer)
+        .context("Failed to read patch content from standard input (stdin)")?;
+    Ok(buffer)
+}
+
 // --- Helper Structs and Functions ---
 
 /// Redacts sensitive paths (such as user home, working directory, and input files) from logs and debug reports.
@@ -218,16 +264,18 @@ impl Anonymizer {
         let mut replacements = Vec::new();
 
         if let Some(input) = &args.input_file {
-            let canon = fs::canonicalize(input).unwrap_or_else(|_| input.clone());
-            replacements.push((
-                canon.to_string_lossy().into_owned(),
-                "<INPUT_FILE>".to_string(),
-            ));
-            if let Some(parent) = canon.parent() {
+            if input.as_path() != Path::new("-") {
+                let canon = fs::canonicalize(input).unwrap_or_else(|_| input.clone());
                 replacements.push((
-                    parent.to_string_lossy().into_owned(),
-                    "<INPUT_DIR>".to_string(),
+                    canon.to_string_lossy().into_owned(),
+                    "<INPUT_FILE>".to_string(),
                 ));
+                if let Some(parent) = canon.parent() {
+                    replacements.push((
+                        parent.to_string_lossy().into_owned(),
+                        "<INPUT_DIR>".to_string(),
+                    ));
+                }
             }
         }
 
@@ -318,19 +366,17 @@ fn log_failed_hunks(apply_result: &mpatch::ApplyResult, patch: &Patch) {
 #[command(
     author,
     version,
-    about = "Apply diff hunks from a file to a target directory based on context, ignoring line numbers.",
-    long_about = "A high-resilience patching tool designed for LLM-generated code. It applies changes by searching for code context rather than relying on fragile line numbers. It automatically detects Unified Diffs, Markdown blocks, Aider search/replace blocks, and Conflict Markers."
+    about = "Apply diff hunks from a file or stdin to a target directory based on context, ignoring line numbers.",
+    long_about = "A high-resilience patching tool designed for LLM-generated code. It applies changes by searching for code context rather than relying on fragile line numbers. It automatically detects Unified Diffs, Markdown blocks, Aider search/replace blocks, and Conflict Markers.\n\nSupports reading patches from a file, from standard input (using '-' or piping), or directly from the clipboard (-c)."
 )]
 struct Args {
     /// Path to the input file containing the patch (Markdown, Unified Diff, Aider blocks, or Conflict Markers).
-    /// If --clipboard is used, the first positional argument becomes the target directory.
-    #[cfg_attr(feature = "clipboard", arg(required_unless_present = "clipboard"))]
-    #[cfg_attr(not(feature = "clipboard"), arg(required = true))]
+    /// Use '-' to read from standard input (stdin). Can be omitted when piping into stdin or using --clipboard.
+    #[arg(value_name = "INPUT_FILE")]
     input_file: Option<PathBuf>,
 
-    /// Path to the target directory to apply patches.
-    #[cfg_attr(feature = "clipboard", arg(required_unless_present = "clipboard"))]
-    #[cfg_attr(not(feature = "clipboard"), arg(required = true))]
+    /// Path to the target directory to apply patches (defaults to current directory '.' if omitted).
+    #[arg(value_name = "TARGET_DIR")]
     target_dir: Option<PathBuf>,
 
     /// Input from clipboard instead of a file.
@@ -500,8 +546,13 @@ fn create_report_file(
     writeln!(file, "{}", anonymizer.anonymize(&cmd))?;
     writeln!(file, "```")?;
 
-    // --- Write Input Patch File ---
-    writeln!(file, "\n## Input Patch File\n")?;
+    // --- Write Input Patch Content ---
+    let is_stdin = args.input_file.as_deref() == Some(Path::new("-"));
+    if is_stdin {
+        writeln!(file, "\n## Input Patch Content (Standard Input)\n")?;
+    } else {
+        writeln!(file, "\n## Input Patch File\n")?;
+    }
     writeln!(file, "````markdown")?;
     writeln!(file, "{}", anonymizer.anonymize(patch_content))?;
     writeln!(file, "````")?;
@@ -816,9 +867,11 @@ fn anonymize_command_args(args: &Args) -> String {
         let canonical_arg = fs::canonicalize(&arg_path).unwrap_or(arg_path);
 
         // Check if the argument matches one of the sensitive paths.
-        if canonical_input
+        if arg == "-" {
+            anonymized_args.push("-".to_string());
+        } else if canonical_input
             .as_ref()
-            .is_some_and(|p| p == &canonical_arg)
+            .is_some_and(|p| p.as_os_str() != "-" && p == &canonical_arg)
         {
             anonymized_args.push("<INPUT_FILE>".to_string());
         } else if canonical_target

@@ -10516,3 +10516,264 @@ fn test_low_entropy_blocks_in_interval_never_anchored() {
     let res = patch_content_str(diff, Some(original), &ApplyOptions::exact());
     assert!(res.is_err(), "Single closing brace must not be anchored or tie-broken without sufficient entropy");
 }
+
+mod stdin_cli_tests {
+    use indoc::indoc;
+    use std::fs;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    use tempfile::tempdir;
+
+    fn mpatch_bin() -> &'static str {
+        env!("CARGO_BIN_EXE_mpatch")
+    }
+
+    #[test]
+    fn test_cli_stdin_dash_unified_diff() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("main.rs");
+        fs::write(&file_path, "fn main() {\n    println!(\"old\");\n}\n").unwrap();
+
+        let diff = indoc! {r#"
+            --- a/main.rs
+            +++ b/main.rs
+            @@ -1,3 +1,3 @@
+             fn main() {
+            -    println!("old");
+            +    println!("new from stdin");
+             }
+        "#};
+
+        let mut child = Command::new(mpatch_bin())
+            .arg("-")
+            .arg(dir.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Failed to spawn mpatch binary");
+
+        child.stdin.as_mut().unwrap().write_all(diff.as_bytes()).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "mpatch - failed: {}", String::from_utf8_lossy(&output.stderr));
+
+        let patched = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(patched, "fn main() {\n    println!(\"new from stdin\");\n}\n");
+    }
+
+    #[test]
+    fn test_cli_stdin_dash_reverse() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("main.rs");
+        fs::write(&file_path, "fn main() {\n    println!(\"new\");\n}\n").unwrap();
+
+        let diff = indoc! {r#"
+            --- a/main.rs
+            +++ b/main.rs
+            @@ -1,3 +1,3 @@
+             fn main() {
+            -    println!("old");
+            +    println!("new");
+             }
+        "#};
+
+        let mut child = Command::new(mpatch_bin())
+            .arg("-R")
+            .arg("-")
+            .arg(dir.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Failed to spawn mpatch binary");
+
+        child.stdin.as_mut().unwrap().write_all(diff.as_bytes()).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+
+        let restored = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(restored, "fn main() {\n    println!(\"old\");\n}\n");
+    }
+
+    #[test]
+    fn test_cli_stdin_dash_dry_run() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("main.rs");
+        let original = "fn main() {\n    println!(\"keep_me\");\n}\n";
+        fs::write(&file_path, original).unwrap();
+
+        let diff = indoc! {r#"
+            --- a/main.rs
+            +++ b/main.rs
+            @@ -1,3 +1,3 @@
+             fn main() {
+            -    println!("keep_me");
+            +    println!("changed_dry_run");
+             }
+        "#};
+
+        let mut child = Command::new(mpatch_bin())
+            .arg("-n")
+            .arg("-")
+            .arg(dir.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Failed to spawn mpatch binary");
+
+        child.stdin.as_mut().unwrap().write_all(diff.as_bytes()).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("+    println!(\"changed_dry_run\");"));
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), original);
+    }
+
+    #[test]
+    fn test_cli_stdin_aider_blocks() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("calc.py");
+        fs::write(&file_path, "def add(a, b):\n    return a - b\n").unwrap();
+
+        let aider_diff = indoc! {r#"
+            calc.py
+            <<<<<<< SEARCH
+                return a - b
+            =======
+                return a + b
+            >>>>>>> REPLACE
+        "#};
+
+        let mut child = Command::new(mpatch_bin())
+            .arg("-")
+            .arg(dir.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Failed to spawn mpatch binary");
+
+        child.stdin.as_mut().unwrap().write_all(aider_diff.as_bytes()).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+
+        let patched = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(patched, "def add(a, b):\n    return a + b\n");
+    }
+
+    #[test]
+    fn test_cli_stdin_markdown_blocks() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("server.js");
+        fs::write(&file_path, "const port = 3000;\n").unwrap();
+
+        let md_diff = indoc! {r#"
+            Here is the requested fix:
+            ```diff
+            --- a/server.js
+            +++ b/server.js
+            @@ -1 +1 @@
+            -const port = 3000;
+            +const port = 8080;
+            ```
+        "#};
+
+        let mut child = Command::new(mpatch_bin())
+            .arg("-")
+            .arg(dir.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Failed to spawn mpatch binary");
+
+        child.stdin.as_mut().unwrap().write_all(md_diff.as_bytes()).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+
+        let patched = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(patched, "const port = 8080;\n");
+    }
+
+    #[test]
+    fn test_cli_stdin_default_target_dir_when_omitted() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("local.txt");
+        fs::write(&file_path, "line A\n").unwrap();
+
+        let diff = indoc! {r#"
+            --- a/local.txt
+            +++ b/local.txt
+            @@ -1 +1 @@
+            -line A
+            +line B
+        "#};
+
+        let mut child = Command::new(mpatch_bin())
+            .current_dir(dir.path())
+            .arg("-")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Failed to spawn mpatch binary");
+
+        child.stdin.as_mut().unwrap().write_all(diff.as_bytes()).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+
+        let patched = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(patched, "line B\n");
+    }
+
+    #[test]
+    fn test_cli_stdin_implicit_piping_with_target_dir_only() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("implicit.txt");
+        fs::write(&file_path, "alpha\n").unwrap();
+
+        let diff = indoc! {r#"
+            --- a/implicit.txt
+            +++ b/implicit.txt
+            @@ -1 +1 @@
+            -alpha
+            +beta
+        "#};
+
+        let mut child = Command::new(mpatch_bin())
+            .arg(dir.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Failed to spawn mpatch binary");
+
+        child.stdin.as_mut().unwrap().write_all(diff.as_bytes()).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+
+        let patched = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(patched, "beta\n");
+    }
+
+    #[test]
+    fn test_cli_stdin_syntax_error_exits_with_error() {
+        let dir = tempdir().unwrap();
+        let malformed = "@@ -1 +1 @@\n-missing header\n+bad\n";
+
+        let mut child = Command::new(mpatch_bin())
+            .arg("-")
+            .arg(dir.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Failed to spawn mpatch binary");
+
+        child.stdin.as_mut().unwrap().write_all(malformed.as_bytes()).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(!output.status.success());
+    }
+}

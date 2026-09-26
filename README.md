@@ -46,6 +46,7 @@ You ask an AI to modify some code. You get the diff. Except, the comment inside 
     *   **Aider Search/Replace** blocks (popularized by Aider and LLM coding assistants).
     *   **Wildcard / Ellipsis Matching:** Supports `...` and comment-wrapped ellipsis lines (`// ... existing code ...`) in search/replace blocks, preserving unchanged gaps.
     *   **Unified Diff** (output from `git diff` command).
+*   **📥 Standard Input (Stdin):** Pipe diffs directly from `git diff`, `cat`, or `curl` using `-` (e.g., `git diff | mpatch - ./src`).
 *   **📋 Clipboard Support:** Input directly from your clipboard with `-c` or `--clipboard`.
 *   **✨ Smarter Indentation:** Automatically indents added lines to be consistent with the target file. It perfectly applies the patch files that were initially indented in Markdown lists or use another tab/space indentation style.
 *   **🗑️ File Deletion:** Automatically removes the target file if the output becomes empty after patching.
@@ -115,6 +116,24 @@ Apply a patch file (Markdown, Diff, or Conflict markers) to a target directory.
 
 ```bash
 mpatch changes.md ./src
+```
+
+### From Standard Input (Stdin)
+Pipe diffs directly from `git diff`, `cat`, or `curl` using `-`:
+
+```bash
+# Pipe from git diff
+git diff | mpatch - ./src
+
+# Reverse a piped patch
+git diff | mpatch -R - ./src
+
+# Pipe from a file or network stream
+cat patch.diff | mpatch - ./src
+curl -s https://example.com/fix.patch | mpatch - ./src
+
+# Target directory defaults to current directory ('.') if omitted
+cat patch.diff | mpatch -
 ```
 
 ### From Clipboard
