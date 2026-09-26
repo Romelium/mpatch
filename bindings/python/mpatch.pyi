@@ -5,18 +5,22 @@ from typing import Any, Iterator, overload
 
 class MpatchError(Exception):
     """Base exception for all errors raised by mpatch."""
+
     ...
 
 class ParseError(MpatchError):
     """Raised when parsing diff content, headers, or conflict markers fails."""
+
     ...
 
 class ApplyError(MpatchError):
     """Raised when applying a patch fails or applies only partially in strict mode."""
+
     ...
 
 class PathTraversalError(ApplyError):
     """Raised when a patch target path resolves outside the base directory."""
+
     ...
 
 VERSION: str
@@ -358,7 +362,7 @@ def detect_patch(diff: str) -> str:
         diff (str): The patch content.
 
     Returns:
-        str: 'Markdown', 'Unified', 'Conflict', or 'Unknown'.
+        str: 'Markdown', 'Unified', 'Aider', 'Conflict', or 'Unknown'.
     """
     ...
 
@@ -368,7 +372,7 @@ def parse_auto(diff: str) -> list[Patch]:
     of patches.
 
     Args:
-        diff (str): The patch content (Markdown, Unified, or Conflict Markers).
+        diff (str): The patch content (Markdown, Unified, Aider, or Conflict Markers).
 
     Returns:
         list[Patch]: A list of parsed patches.
@@ -405,6 +409,18 @@ def parse_conflict_markers(diff: str) -> list[Patch]:
 
     Args:
         diff (str): The conflict marker content.
+
+    Returns:
+        list[Patch]: A list of parsed patches.
+    """
+    ...
+
+def parse_aider(diff: str) -> list[Patch]:
+    """
+    Parses a string containing "Aider" style search/replace blocks (<<<<<<< SEARCH, =======, >>>>>>> REPLACE).
+
+    Args:
+        diff (str): The Aider search/replace block content.
 
     Returns:
         list[Patch]: A list of parsed patches.
@@ -473,7 +489,7 @@ def patch_content(
     Applies a diff to a string in memory.
 
     Args:
-        diff (str): The patch content (Markdown, Unified, or Conflict Markers).
+        diff (str): The patch content (Markdown, Unified, Aider, or Conflict Markers).
         original (str | None, optional): The original content. None for file creation. Defaults to None.
         fuzz_factor (float, optional): Similarity threshold (0.0 to 1.0). Default is 0.7.
         dry_run (bool, optional): If True, returns what would happen without making changes. Default is False.

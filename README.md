@@ -33,7 +33,8 @@ You ask an AI to modify some code. You get the diff. Except, the comment inside 
 
 1.  **Code Blocks in Markdown:** The default output format for language models. Uses either ` ```diff `, ` ```rust `, or other code blocks if they have diff headers.
 2.  **Unified Diff:** Default `git diff` or `diff -u` format.
-3.  **Conflict Marker:** Git-like conflict markers with `<<<<`, `====`, and `>>>>`. **Reminder:** They lack file paths and are suitable for patching strings in memory.
+3.  **Aider Search/Replace Blocks:** Search and replace blocks with `<<<<<<< ORIGINAL`, `=======`, and `>>>>>>> UPDATED` (including `SEARCH`/`REPLACE` variants). File paths are extracted automatically from the block header or preceding text.
+4.  **Conflict Marker:** Git-like conflict markers with `<<<<`, `====`, and `>>>>`. **Reminder:** They lack file paths and are suitable for patching strings in memory.
 
 ---
 
@@ -42,6 +43,8 @@ You ask an AI to modify some code. You get the diff. Except, the comment inside 
 *   **🧠 Fuzzy Matching:** Runs a similarity algorithm to find the most suitable place to apply a patch if no exact matching is found. It supports stale context, whitespaces changes, and minor code differences.
 *   **🤖 Format Independent:** Automatically recognizes and processes:
     *   **Markdown** diff code blocks (standard chat output format).
+    *   **Aider Search/Replace** blocks (popularized by Aider and LLM coding assistants).
+    *   **Wildcard / Ellipsis Matching:** Supports `...` and comment-wrapped ellipsis lines (`// ... existing code ...`) in search/replace blocks, preserving unchanged gaps.
     *   **Unified Diff** (output from `git diff` command).
 *   **📋 Clipboard Support:** Input directly from your clipboard with `-c` or `--clipboard`.
 *   **✨ Smarter Indentation:** Automatically indents added lines to be consistent with the target file. It perfectly applies the patch files that were initially indented in Markdown lists or use another tab/space indentation style.

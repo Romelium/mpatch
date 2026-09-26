@@ -36,6 +36,16 @@ CONFLICT_DIFF = textwrap.dedent("""\
     >>>>
 """)
 
+AIDER_DIFF = textwrap.dedent("""\
+    src/app.py
+    <<<<<<< ORIGINAL
+    def run():
+        old_runner()
+    =======
+    def run():
+        new_runner()
+    >>>>>>> UPDATED
+""")
 
 # --- Format Detection Tests ---
 
@@ -44,6 +54,7 @@ def test_detect_patch_format():
     assert mpatch.detect_patch(MD_DIFF) == "Markdown"
     assert mpatch.detect_patch(RAW_DIFF) == "Unified"
     assert mpatch.detect_patch(CONFLICT_DIFF) == "Conflict"
+    assert mpatch.detect_patch(AIDER_DIFF) == "Aider"
     assert mpatch.detect_patch("Just some normal text") == "Unknown"
 
 
@@ -71,6 +82,23 @@ def test_parse_auto():
     assert len(patches) == 1
     # Conflict markers default to 'patch_target' because they lack headers
     assert Path(patches[0].file_path).as_posix() == "patch_target"
+
+    # Aider
+    patches = mpatch.parse_auto(AIDER_DIFF)
+    assert len(patches) == 1
+    assert Path(patches[0].file_path).as_posix() == "src/app.py"
+    assert patches[0].hunks[0].removed_lines == ["    old_runner()"]
+    assert patches[0].hunks[0].added_lines == ["    new_runner()"]
+
+
+def test_parse_aider():
+    patches = mpatch.parse_aider(AIDER_DIFF)
+    assert len(patches) == 1
+    patch = patches[0]
+    assert Path(patch.file_path).as_posix() == "src/app.py"
+    assert len(patch.hunks) == 1
+    assert patch.hunks[0].removed_lines == ["    old_runner()"]
+    assert patch.hunks[0].added_lines == ["    new_runner()"]
 
 
 def test_parse_errors():
@@ -429,3 +457,269 @@ def test_hunk_and_patch_repr():
         str(patch)
         == "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,1 +1,1 @@\n-old\n+new\n"
     )
+
+
+# --- Wildcard and Ellipsis Tests ---
+
+
+def test_python_wildcard_aider_basic():
+    original = textwrap.dedent("""\
+        def compute():
+            setup()
+            prepare_data()
+            run_calculation()
+            cleanup()
+            return 42
+    """)
+    diff = textwrap.dedent("""\
+        calc.py
+        <<<<<<< SEARCH
+        def compute():
+            ...
+            run_calculation()
+            ...
+            return 42
+        =======
+        def compute():
+            ...
+            run_fast_calculation()
+            ...
+            return 100
+        >>>>>>> REPLACE
+    """)
+    patched = mpatch.patch_content(diff, original=original)
+    assert "setup()" in patched
+    assert "prepare_data()" in patched
+    assert "cleanup()" in patched
+    assert "run_fast_calculation()" in patched
+    assert "return 100" in patched
+    assert "run_calculation()" not in patched
+
+
+def test_python_wildcard_multi_segment_preserves_gaps():
+    original = textwrap.dedent("""\
+        class Pipeline:
+            def step_a(self):
+                step_a_internal()
+            def step_b(self):
+                step_b_internal()
+            def step_c(self):
+                step_c_internal()
+    """)
+    diff = textwrap.dedent("""\
+        pipe.py
+        <<<<<<< SEARCH
+        class Pipeline:
+            ...
+            def step_b(self):
+                step_b_internal()
+            ...
+        =======
+        class Pipeline:
+            ...
+            def step_b(self):
+                step_b_v2()
+            ...
+        >>>>>>> REPLACE
+    """)
+    patched = mpatch.patch_content(diff, original=original)
+    assert "def step_a(self):" in patched
+    assert "step_a_internal()" in patched
+    assert "step_b_v2()" in patched
+    assert "def step_c(self):" in patched
+    assert "step_c_internal()" in patched
+
+
+def test_python_wildcard_ellipsis_removal_deletes_gap():
+    original = textwrap.dedent("""\
+        def cleanup():
+            acquire()
+            legacy_item_1()
+            legacy_item_2()
+            release()
+    """)
+    diff = textwrap.dedent("""\
+        clean.py
+        <<<<<<< SEARCH
+        def cleanup():
+            acquire()
+            ...
+            release()
+        =======
+        def cleanup():
+            acquire()
+            release()
+        >>>>>>> REPLACE
+    """)
+    patched = mpatch.patch_content(diff, original=original)
+    assert "acquire()\n    release()" in patched
+    assert "legacy_item_1" not in patched
+    assert "legacy_item_2" not in patched
+
+
+def test_python_wildcard_file_apply(tmp_path: Path):
+    target = tmp_path / "app.py"
+    target.write_text("def main():\n    init()\n    old_logic()\n    exit()\n")
+
+    diff = textwrap.dedent("""\
+        app.py
+        <<<<<<< SEARCH
+        def main():
+            ...
+            old_logic()
+        =======
+        def main():
+            ...
+            new_logic()
+        >>>>>>> REPLACE
+    """)
+    patches = mpatch.parse_auto(diff)
+    res = mpatch.apply_patch_to_file(patches[0], tmp_path)
+    assert res.report.all_applied_cleanly is True
+    assert target.read_text() == "def main():\n    init()\n    new_logic()\n    exit()\n"
+
+
+def test_python_wildcard_runaway_gap_rejected():
+    lines = ["def alpha():\n", "    return 1\n\n"]
+    for i in range(350):
+        lines.append(f"def intermediate_{i}(): pass\n")
+    lines.append("\ndef beta():\n    return 1\n")
+    original = "".join(lines)
+
+    diff = textwrap.dedent("""\
+        test.py
+        <<<<<<< SEARCH
+        def alpha():
+            ...
+            return 1
+        =======
+        def alpha():
+            ...
+            return 2
+        >>>>>>> REPLACE
+    """)
+    with pytest.raises(mpatch.ApplyError):
+        mpatch.patch_content(diff, original=original)
+
+
+# --- False Positive and False Negative Detection Tests ---
+
+
+def test_python_detect_patch_false_positive_rejection():
+    # Markdown table
+    table = textwrap.dedent("""\
+        | Col A | Col B |
+        | --- | --- |
+        | 1 | 2 |
+    """)
+    assert mpatch.detect_patch(table) == "Unknown"
+
+    # Markdown list
+    bullets = textwrap.dedent("""\
+        Summary:
+        + Added feature X
+        - Removed legacy code
+    """)
+    assert mpatch.detect_patch(bullets) == "Unknown"
+
+    # Shift operators
+    code = "let x = 1 << 4;\nlet y = x >> 2;\n"
+    assert mpatch.detect_patch(code) == "Unknown"
+
+    # Plain text
+    assert mpatch.detect_patch("Just some normal conversation.") == "Unknown"
+
+
+def test_python_detect_patch_false_negative_prevention():
+    unified = textwrap.dedent("""\
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1 +1 @@
+        -old
+        +new
+    """)
+    assert mpatch.detect_patch(unified) == "Unified"
+
+    md = textwrap.dedent("""\
+        ```diff
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1 +1 @@
+        -old
+        +new
+        ```
+    """)
+    assert mpatch.detect_patch(md) == "Markdown"
+
+    conflict = textwrap.dedent("""\
+        <<<<
+        old
+        ====
+        new
+        >>>>
+    """)
+    assert mpatch.detect_patch(conflict) == "Conflict"
+
+    aider = textwrap.dedent("""\
+        app.py
+        <<<<<<< SEARCH
+        old()
+        =======
+        new()
+        >>>>>>> REPLACE
+    """)
+    assert mpatch.detect_patch(aider) == "Aider"
+
+
+def test_python_wildcard_similar_functions_no_false_positive():
+    original = textwrap.dedent("""\
+        def handle_user(req):
+            log("request")
+            verify_token(req)
+            return format_response(req)
+
+        def handle_admin(req):
+            log("request")
+            verify_token(req)
+            return format_response(req)
+    """)
+    diff = textwrap.dedent("""\
+        api.py
+        <<<<<<< SEARCH
+        def handle_admin(req):
+            ...
+            return format_response(req)
+        =======
+        def handle_admin(req):
+            ...
+            audit_admin_access(req)
+            return format_response(req)
+        >>>>>>> REPLACE
+    """)
+    patched = mpatch.patch_content(diff, original=original)
+    assert "audit_admin_access(req)" in patched
+    assert (
+        "def handle_user(req):\n    log(\"request\")\n    verify_token(req)\n    return format_response(req)"
+        in patched
+    )
+
+
+def test_python_wildcard_empty_lines_gap_preserved():
+    original = "def init():\n    setup()\n\n    \n    finish()\n"
+    diff = textwrap.dedent("""\
+        init.py
+        <<<<<<< SEARCH
+        def init():
+            setup()
+            ...
+            finish()
+        =======
+        def init():
+            setup()
+            ...
+            log_done()
+            finish()
+        >>>>>>> REPLACE
+    """)
+    patched = mpatch.patch_content(diff, original=original)
+    assert patched == "def init():\n    setup()\n\n    \n    log_done()\n    finish()\n"

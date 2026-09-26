@@ -24,7 +24,8 @@ When an AI tries to edit a file that has been modified locally since the AI last
 ## ✨ Features
 
 - **🧠 Fuzzy Matching:** Resilient to stale context, whitespace changes, and minor code drift.
-- **🤖 Format Independent:** Automatically recognizes Unified Diffs, Markdown code blocks (` ```diff `), and Conflict Markers (`<<<<` `====` `>>>>`).
+- **🤖 Format Independent:** Automatically recognizes Unified Diffs, Markdown code blocks (` ```diff `), Aider Search/Replace blocks (`<<<<<<< ORIGINAL` `=======` `>>>>>>> UPDATED` and variants), and Conflict Markers (`<<<<` `====` `>>>>`).
+- **🔍 Wildcard & Ellipsis Support:** Supports `...` and comment-wrapped ellipsis lines (e.g. `// ... existing code ...`) in search/replace blocks, preserving unchanged code gaps.
 - **✨ Smart Indentation:** Automatically translates tabs/spaces and aligns injected code to match the target file perfectly.
 - **🛡️ Secure:** Built-in protection against directory traversal attacks (e.g., `--- a/../../../etc/passwd`).
 - **⚡ Blazing Fast & Concurrent:** Written in Rust. It heavily optimizes the diffing algorithms and releases the GIL during patching, allowing true multithreading in Python.

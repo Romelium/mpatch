@@ -28,10 +28,10 @@
 //!
 //! ## Format Support & Limitations
 //!
-//! `mpatch` handles Unified Diffs and Markdown blocks natively. It also supports
-//! **Conflict Markers** (`<<<<`, `====`, `>>>>`), but with a significant caveat:
-//! conflict markers do not encode the target file path. When parsed, they default
-//! to a placeholder path (`patch_target`).
+//! `mpatch` handles Unified Diffs, Markdown blocks, and Aider Search/Replace Blocks
+//! natively. It also supports Conflict Markers (`<<<<`, `====`, `>>>>`), with the caveat
+//! that conflict markers without file paths default to a placeholder path (`patch_target`).
+//! Aider blocks cleanly encode file paths directly or via surrounding context.
 //!
 //! ## Getting Started
 //!
@@ -135,12 +135,14 @@
 //! several functions for this, depending on your input format:
 //!
 //! - [`parse_auto()`]: The recommended entry point. It automatically detects the format
-//!   (Markdown, Unified Diff, or Conflict Markers) and parses the content accordingly.
+//!   (Markdown, Unified Diff, Aider Search/Replace Blocks, or Conflict Markers) and parses the content accordingly.
 //! - [`parse_single_patch()`]: A convenient wrapper around `parse_auto()` that ensures
 //!   the input contains exactly one patch, returning a `Result<Patch, _>`.
-//! - [`parse_diffs()`]: Scans a string for markdown code blocks containing diffs.
+//! - [`parse_diffs()`]: Scans a string for markdown code blocks containing diffs or search/replace blocks.
 //! - [`parse_patches()`]: A lower-level parser that processes a raw unified diff string
 //!   directly, without needing markdown fences.
+//! - [`parse_aider()`]: Parses a string containing Aider-style search/replace blocks
+//!   (`<<<<<<< SEARCH`, `=======`, `>>>>>>> REPLACE`) into patches.
 //! - [`parse_conflict_markers()`]: Parses a string containing conflict markers
 //!   (`<<<<`, `====`, `>>>>`) into patches.
 //! - [`parse_patches_from_lines()`]: The lowest-level parser. It operates on an iterator
@@ -3169,6 +3171,22 @@ pub enum PatchFormat {
     /// ```
     Conflict,
 
+    /// An Aider search/replace block format (`<<<<<<< SEARCH` / `ORIGINAL`, `=======`, `>>>>>>> REPLACE` / `UPDATED`).
+    ///
+    /// This format is used by Aider and LLM coding assistants. It specifies the target
+    /// file and pairs an exact search block with a replacement block.
+    ///
+    /// # Examples
+    /// ```text
+    /// path/to/file.rs
+    /// <<<<<<< SEARCH
+    /// fn old() {}
+    /// =======
+    /// fn new() {}
+    /// >>>>>>> REPLACE
+    /// ```
+    Aider,
+
     /// The format could not be determined.
     ///
     /// The content did not contain any recognizable signatures (such as diff headers,
@@ -3199,6 +3217,641 @@ pub enum PatchFormat {
 #[inline]
 fn count_leading_backticks(s: &str) -> usize {
     s.as_bytes().iter().take_while(|&&c| c == b'`').count()
+}
+
+/// Checks whether a line represents an Aider search/original fence (e.g. `<<<<<<< SEARCH`, `<<<<<<< ORIGINAL`).
+#[inline]
+fn is_aider_search_fence(trimmed: &str) -> bool {
+    if trimmed.starts_with("<<<<") {
+        let after = trimmed.trim_start_matches('<').trim_start();
+        let upper = after.to_ascii_uppercase();
+        upper.starts_with("SEARCH")
+            || upper.starts_with("ORIGINAL")
+            || upper.starts_with("BEFORE")
+            || upper.starts_with("OLD")
+            || upper.starts_with("CURRENT")
+            || upper.starts_with("SOURCE")
+    } else {
+        false
+    }
+}
+
+/// Extracts an optional file path from an Aider search fence line (e.g. `<<<<<<< SEARCH path/to/file` or `<<<<<<< ORIGINAL path/to/file`).
+fn extract_file_path_from_search_fence(trimmed: &str) -> Option<PathBuf> {
+    if trimmed.starts_with("<<<<") {
+        let after = trimmed.trim_start_matches('<').trim_start();
+        let upper = after.to_ascii_uppercase();
+        for keyword in &["SEARCH", "ORIGINAL", "BEFORE", "OLD", "CURRENT", "SOURCE"] {
+            if upper.starts_with(keyword) {
+                let rest = after[keyword.len()..].trim();
+                if !rest.is_empty() {
+                    return extract_file_path_from_line(rest);
+                }
+                return None;
+            }
+        }
+    }
+    None
+}
+
+/// Checks whether a line represents an Aider dividing fence (`=======`).
+#[inline]
+fn is_aider_divide_fence(trimmed: &str) -> bool {
+    if trimmed.starts_with("====") {
+        let after = trimmed.trim_start_matches('=').trim();
+        after.is_empty()
+            || after.to_ascii_uppercase().starts_with("DIVIDE")
+            || after.to_ascii_uppercase().starts_with("SPLIT")
+    } else {
+        false
+    }
+}
+
+/// Checks whether a line represents an Aider replace/updated fence (e.g. `>>>>>>> REPLACE`, `>>>>>>> UPDATED`).
+#[inline]
+fn is_aider_replace_fence(trimmed: &str) -> bool {
+    if trimmed.starts_with(">>>>") {
+        let after = trimmed.trim_start_matches('>').trim_start();
+        if after.is_empty() {
+            return true;
+        }
+        let upper = after.to_ascii_uppercase();
+        upper.starts_with("REPLACE")
+            || upper.starts_with("UPDATED")
+            || upper.starts_with("AFTER")
+            || upper.starts_with("NEW")
+            || upper.starts_with("MODIFIED")
+            || upper.starts_with("FINAL")
+            || upper.starts_with("PROPOSED")
+    } else {
+        false
+    }
+}
+
+/// Determines whether a line represents an ellipsis / wildcard indicating omitted code.
+pub fn is_ellipsis_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    // 1. Bare dots or unicode ellipsis
+    if trimmed == "..." || trimmed == "…" || trimmed == "...." || trimmed == "....." {
+        return true;
+    }
+
+    // 2. Pure repetition of dots, unicode ellipses, dashes, or tildes
+    if (trimmed.len() >= 3 || trimmed.chars().count() >= 2)
+        && trimmed.chars().all(|c| c == '.' || c == '…' || c == '-' || c == '~')
+    {
+        return true;
+    }
+
+    // Must contain an ellipsis ('...' or '…') to be considered an ellipsis line.
+    if !trimmed.contains("...") && !trimmed.contains('…') {
+        return false;
+    }
+
+    // 3. Bare bracketed ellipses: [...], [ ... ], (...), ( ... ), {...}, { ... }, <...>, < ... >,
+    // or unicode variations […], (…), {…}, <…>
+    if (trimmed.starts_with('[') && trimmed.ends_with(']'))
+        || (trimmed.starts_with('(') && trimmed.ends_with(')'))
+        || (trimmed.starts_with('{') && trimmed.ends_with('}') && !trimmed.starts_with("{/*"))
+        || (trimmed.starts_with('<') && trimmed.ends_with('>') && !trimmed.starts_with("<!--"))
+    {
+        let inner = trimmed[1..trimmed.len() - 1].trim();
+        if inner == "..." || inner == "…" || inner == "...." || inner == "....." {
+            return true;
+        }
+        if !inner.is_empty() && inner.chars().all(|c| c == '.' || c == '…' || c == '-' || c == '~') {
+            return true;
+        }
+    }
+
+    // 4. Extract comment body and detect comment type
+    let mut candidate = trimmed;
+    let mut is_comment = false;
+
+    if let Some(rest) = candidate.strip_prefix("{/*").and_then(|s| s.strip_suffix("*/}")) {
+        candidate = rest.trim();
+        is_comment = true;
+    } else if let Some(rest) = candidate.strip_prefix("(*").and_then(|s| s.strip_suffix("*)")) {
+        candidate = rest.trim();
+        is_comment = true;
+    } else if let Some(rest) = candidate.strip_prefix("<!--").and_then(|s| s.strip_suffix("-->")) {
+        candidate = rest.trim();
+        is_comment = true;
+    } else if let Some(rest) = candidate.strip_prefix("/*").and_then(|s| s.strip_suffix("*/")) {
+        candidate = rest.trim_matches('*').trim();
+        is_comment = true;
+    } else if let Some(rest) = candidate.strip_prefix("'''").and_then(|s| s.strip_suffix("'''")) {
+        candidate = rest.trim();
+        is_comment = true;
+    } else if let Some(rest) = candidate.strip_prefix("\"\"\"").and_then(|s| s.strip_suffix("\"\"\"")) {
+        candidate = rest.trim();
+        is_comment = true;
+    } else if let Some(rest) = candidate.strip_prefix("//") {
+        candidate = rest.trim_start_matches('/').trim();
+        is_comment = true;
+    } else if let Some(rest) = candidate.strip_prefix('#') {
+        candidate = rest.trim_start_matches('#').trim();
+        is_comment = true;
+    } else if let Some(rest) = candidate.strip_prefix("--") {
+        candidate = rest.trim_start_matches('-').trim();
+        is_comment = true;
+    } else if let Some(rest) = candidate.strip_prefix(';') {
+        candidate = rest.trim_start_matches(';').trim();
+        is_comment = true;
+    } else if let Some(rest) = candidate.strip_prefix('%') {
+        candidate = rest.trim_start_matches('%').trim();
+        is_comment = true;
+    } else if candidate.to_ascii_lowercase().starts_with("rem ") {
+        candidate = candidate[4..].trim();
+        is_comment = true;
+    }
+
+    // 5. Code syntax rejection:
+    // If not a comment, lines containing code syntax operators/delimiters are code, not ellipses.
+    if !is_comment {
+        if trimmed.contains([';', '=', '{', '}', '(', ')', '"', '\'']) {
+            return false;
+        }
+        if trimmed.starts_with('<') {
+            return false;
+        }
+    }
+
+    // 6. Strip decorative banner/box characters from both ends
+    let inner_unbannered = candidate
+        .trim_matches(|c: char| {
+            c == '=' || c == '-' || c == '*' || c == '~' || c == '>' || c == '<' || c == '#' || c == '/'
+        })
+        .trim();
+
+    if inner_unbannered == "..." || inner_unbannered == "…" || inner_unbannered == "...." {
+        return true;
+    }
+    if !inner_unbannered.is_empty()
+        && inner_unbannered.chars().all(|c| c == '.' || c == '…' || c == '-' || c == '~')
+    {
+        return true;
+    }
+
+    // Strip optional surrounding brackets inside comment, e.g. `(unchanged code)`, `[existing logic]`
+    let text_to_check = if (inner_unbannered.starts_with('(') && inner_unbannered.ends_with(')'))
+        || (inner_unbannered.starts_with('[') && inner_unbannered.ends_with(']'))
+        || (inner_unbannered.starts_with('{') && inner_unbannered.ends_with('}'))
+    {
+        inner_unbannered[1..inner_unbannered.len() - 1].trim()
+    } else {
+        inner_unbannered
+    };
+
+    // 7. Check for spread/rest code syntax: e.g. `...args`, `...numbers`, `...rest`
+    if let Some(pos) = text_to_check.find("...") {
+        let after = &text_to_check[pos + 3..];
+        if after.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$') {
+            return false;
+        }
+    }
+
+    // 8. Word-based ellipsis verification
+    let words: Vec<&str> = text_to_check
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+
+    if words.is_empty() {
+        return false;
+    }
+
+    const PRIMARY_INDICATORS: &[&str] = &[
+        "existing",
+        "unchanged",
+        "rest",
+        "remaining",
+        "remainder",
+        "omitted",
+        "snip",
+        "snipped",
+        "truncated",
+        "here",
+        "earlier",
+        "later",
+        "previous",
+        "original",
+        "same",
+        "hidden",
+        "skipped",
+        "more",
+        "etc",
+    ];
+
+    const CONTEXT_WORDS: &[&str] = &[
+        "code",
+        "logic",
+        "implementation",
+        "lines",
+        "line",
+        "of",
+        "the",
+        "function",
+        "method",
+        "class",
+        "file",
+        "script",
+        "batch",
+        "template",
+        "query",
+        "html",
+        "lua",
+        "lisp",
+        "jsx",
+        "component",
+        "content",
+        "contents",
+        "as",
+        "before",
+        "above",
+        "below",
+        "other",
+        "part",
+        "parts",
+        "section",
+        "sections",
+        "detail",
+        "details",
+    ];
+
+    let mut has_primary = false;
+    for &w in &words {
+        let lower_w = w.to_ascii_lowercase();
+        if PRIMARY_INDICATORS.contains(&lower_w.as_str()) {
+            has_primary = true;
+        } else if !CONTEXT_WORDS.contains(&lower_w.as_str()) && !w.chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+    }
+
+    has_primary
+}
+
+/// Normalizes and cleans a candidate relative path string.
+pub fn normalize_candidate_path(s: &str) -> Option<PathBuf> {
+    let mut s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+
+    s = s.trim_matches(|c: char| {
+        c == '`' || c == '"' || c == '\'' || c == '*' || c == '(' || c == ')' || c == '[' || c == ']'
+    });
+
+    if let Some(rest) = s.strip_prefix("./").or_else(|| s.strip_prefix(".\\")) {
+        s = rest.trim();
+    }
+
+    let stripped = if let Some(rest) = s.strip_prefix("a/") {
+        rest
+    } else if let Some(rest) = s.strip_prefix("b/") {
+        rest
+    } else if let Some(rest) = s.strip_prefix("a\\") {
+        rest
+    } else if let Some(rest) = s.strip_prefix("b\\") {
+        rest
+    } else {
+        s
+    };
+
+    let mut final_str = stripped.trim_end_matches(':').trim();
+    while final_str.len() > 2 {
+        let check_str = if final_str.as_bytes()[1] == b':' && final_str.as_bytes()[0].is_ascii_alphabetic() {
+            &final_str[2..]
+        } else {
+            final_str
+        };
+        if let Some(rel_colon) = check_str.rfind(':') {
+            let after = &check_str[rel_colon + 1..];
+            if !after.is_empty() && after.chars().all(|c| c.is_ascii_digit()) {
+                let colon_idx = final_str.len() - check_str.len() + rel_colon;
+                final_str = final_str[..colon_idx].trim();
+                continue;
+            }
+        }
+        break;
+    }
+
+    if final_str.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(final_str))
+    }
+}
+
+/// Determines whether a string looks like a plausible file path rather than conversational prose.
+pub fn is_plausible_file_path(s: &str) -> bool {
+    let mut s = s.trim();
+    while (s.starts_with('"') && s.ends_with('"'))
+        || (s.starts_with('\'') && s.ends_with('\''))
+        || (s.starts_with('`') && s.ends_with('`'))
+        || (s.starts_with('(') && s.ends_with(')'))
+        || (s.starts_with('[') && s.ends_with(']'))
+        || (s.starts_with('*') && s.ends_with('*'))
+    {
+        if s.len() <= 2 {
+            return false;
+        }
+        s = s[1..s.len() - 1].trim();
+    }
+
+    while s.len() > 2 {
+        let check_str = if s.as_bytes()[1] == b':' && s.as_bytes()[0].is_ascii_alphabetic() {
+            &s[2..]
+        } else {
+            s
+        };
+        if let Some(rel_colon) = check_str.rfind(':') {
+            let after = &check_str[rel_colon + 1..];
+            if !after.is_empty() && after.chars().all(|c| c.is_ascii_digit()) {
+                let colon_idx = s.len() - check_str.len() + rel_colon;
+                s = s[..colon_idx].trim();
+                continue;
+            }
+        }
+        break;
+    }
+
+    if let Some(rest) = s.strip_prefix("./").or_else(|| s.strip_prefix(".\\")) {
+        s = rest.trim();
+    }
+
+    if s.is_empty() || s.len() > 260 || s.ends_with('.') {
+        return false;
+    }
+
+    if (s.contains(":\\") || s.contains(":/"))
+        && !(s.len() >= 3 && s.as_bytes()[1] == b':' && s.as_bytes()[0].is_ascii_alphabetic())
+    {
+        return false;
+    }
+
+    if s.contains(['\0', '<', '>', '|', '?', '"', '{', '}', ';', '=', '*']) {
+        return false;
+    }
+
+    if s.contains("://")
+        || s.contains("->")
+        || s.contains("=>")
+        || s.contains("()")
+        || s.contains("!=")
+        || s.contains("==")
+        || s.contains("+=")
+        || s.contains("-=")
+        || s.contains("::")
+    {
+        return false;
+    }
+
+    if s.contains(char::is_whitespace) {
+        if s.chars().filter(|c| c.is_whitespace()).count() > 3 {
+            return false;
+        }
+        let lower = s.to_ascii_lowercase();
+        const STOPWORDS: &[&str] = &[
+            " the ", " is ", " to ", " in ", " for ", " and ", " or ", " we ", " this ",
+            " that ", " with ", " here ", " update ", " change ", " code ", " file ",
+            " replace ", " search ", " below ", " following ", " should ", " would ",
+            " could ", " can ", " please ", " you ", " my ", " your ", " our ", " have ",
+            " has ", " had ", " will ", " make ", " need ", " want ", " like ", " see ",
+            " use ", " using ", " from ", " into ", " about ", " edit ", " modify ",
+            " at ", " error ", " warning ", " modified ", " by ", " on ",
+            " version ", " release ",
+        ];
+        let padded = format!(" {} ", lower);
+        if STOPWORDS.iter().any(|&w| padded.contains(w)) {
+            return false;
+        }
+        if !s.contains('.') && !s.contains('/') && !s.contains('\\') {
+            return false;
+        }
+    }
+
+    let has_slash = s.contains('/') || s.contains('\\');
+    if s.starts_with('.') && !has_slash {
+        let rest = &s[1..];
+        if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-') {
+            return !rest.chars().all(|c| c == '.');
+        }
+    }
+
+    let has_valid_extension = if let Some(dot_pos) = s.rfind('.') {
+        if dot_pos > 0 || has_slash {
+            let ext = &s[dot_pos + 1..];
+            !ext.is_empty()
+                && ext.len() <= 16
+                && ext.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                && ext.chars().any(|c| c.is_ascii_alphabetic())
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    let filename = if let Some(pos) = s.rfind(['/', '\\']) {
+        &s[pos + 1..]
+    } else {
+        s
+    };
+    let lower_filename = filename.to_ascii_lowercase();
+
+    let is_known_filename = matches!(
+        lower_filename.as_str(),
+        "dockerfile"
+            | "containerfile"
+            | "makefile"
+            | "gnumakefile"
+            | "cmakelists.txt"
+            | "gemfile"
+            | "rakefile"
+            | "procfile"
+            | "vagrantfile"
+            | "brewfile"
+            | "justfile"
+            | "tiltfile"
+            | "jenkinsfile"
+            | "pipfile"
+            | "capfile"
+            | "doxyfile"
+            | "snakefile"
+            | "podfile"
+            | "cartfile"
+            | "license"
+            | "licence"
+            | "copying"
+            | "notice"
+            | "readme"
+            | "changelog"
+            | "contributing"
+            | "authors"
+            | ".gitignore"
+            | ".gitattributes"
+            | ".gitmodules"
+            | ".mailmap"
+            | ".env"
+            | ".dockerignore"
+            | ".editorconfig"
+            | ".prettierrc"
+            | ".eslintrc"
+            | ".babelrc"
+            | ".npmrc"
+            | ".nvmrc"
+    ) || lower_filename.starts_with(".env.");
+
+    if s.contains(char::is_whitespace) {
+        has_valid_extension || is_known_filename
+    } else {
+        has_slash || has_valid_extension || is_known_filename
+    }
+}
+
+/// Extracts a plausible file path from a line preceding or introducing an Aider block.
+pub fn extract_file_path_from_line(line: &str) -> Option<PathBuf> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed.starts_with("```")
+        || trimmed.starts_with("<<<<")
+        || trimmed.starts_with("====")
+        || trimmed.starts_with(">>>>")
+    {
+        return None;
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("diff --git ") {
+        let parts: Vec<&str> = rest.split_whitespace().collect();
+        if parts.len() >= 2 {
+            if let Some(path) = normalize_candidate_path(parts[1]) {
+                if is_plausible_file_path(&path.to_string_lossy()) {
+                    return Some(path);
+                }
+            }
+            if let Some(path) = normalize_candidate_path(parts[0]) {
+                if is_plausible_file_path(&path.to_string_lossy()) {
+                    return Some(path);
+                }
+            }
+        }
+    }
+
+    if trimmed.starts_with("--- ") || trimmed.starts_with("+++ ") {
+        let candidate = trimmed[4..].trim();
+        if candidate != "/dev/null" && candidate != "a/dev/null" && candidate != "b/dev/null" {
+            if let Some(path) = normalize_candidate_path(candidate) {
+                if is_plausible_file_path(&path.to_string_lossy()) {
+                    return Some(path);
+                }
+            }
+        }
+        return None;
+    }
+
+    for quote_char in ['`', '"', '\''] {
+        let mut chars = trimmed.char_indices();
+        while let Some((start, ch)) = chars.next() {
+            if ch == quote_char {
+                for (end, end_ch) in chars.by_ref() {
+                    if end_ch == quote_char {
+                        let candidate = trimmed[start + 1..end].trim();
+                        if is_plausible_file_path(candidate) {
+                            return normalize_candidate_path(candidate);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let mut search_from = 0;
+    while let Some(open_rel) = trimmed[search_from..].find('[') {
+        let open = search_from + open_rel;
+        if let Some(close_rel) = trimmed[open + 1..].find(']') {
+            let close = open + 1 + close_rel;
+            let label = trimmed[open + 1..close].trim();
+            let rest = &trimmed[close + 1..];
+            if rest.starts_with('(') {
+                if let Some(paren_close) = rest.find(')') {
+                    let target = rest[1..paren_close].trim();
+                    if is_plausible_file_path(target) {
+                        return normalize_candidate_path(target);
+                    }
+                }
+            }
+            if is_plausible_file_path(label) {
+                return normalize_candidate_path(label);
+            }
+            search_from = close + 1;
+        } else {
+            break;
+        }
+    }
+
+    let mut candidate = trimmed;
+    while candidate.starts_with('#')
+        || candidate.starts_with('*')
+        || candidate.starts_with('-')
+        || candidate.starts_with('>')
+        || candidate.starts_with('/')
+    {
+        candidate = candidate.trim_start_matches(['#', '*', '-', '>', '/']).trim_start();
+    }
+
+    if let Some(dot_pos) = candidate.find(". ") {
+        let num_part = &candidate[..dot_pos];
+        if !num_part.is_empty() && num_part.chars().all(|c| c.is_ascii_digit()) {
+            candidate = candidate[dot_pos + 2..].trim_start();
+        }
+    }
+
+    const PREFIXES: &[&str] = &[
+        "file:", "path:", "filename:", "in file:", "in:", "for file:", "for:",
+        "update file:", "update:", "edit file:", "edit:", "modify file:", "modify:",
+        "changes in:", "changes to:", "patch for:", "filepath:", "file path:",
+    ];
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let lower = candidate.to_ascii_lowercase();
+        for &prefix in PREFIXES {
+            if lower.starts_with(prefix) {
+                candidate = candidate[prefix.len()..].trim_start();
+                changed = true;
+                break;
+            }
+        }
+    }
+
+    let cleaned = candidate.trim_matches(|c: char| {
+        c == '`' || c == '*' || c == '"' || c == '\'' || c == ':' || c == '(' || c == ')' || c == '[' || c == ']' || c == '{' || c == '}' || c.is_whitespace()
+    });
+    if is_plausible_file_path(cleaned) {
+        return normalize_candidate_path(cleaned);
+    }
+
+    for raw_token in candidate.split_whitespace() {
+        let token = raw_token.trim_matches(|c: char| {
+            c == '`' || c == '*' || c == '"' || c == '\'' || c == ':' || c == ',' || c == ';' || c == '(' || c == ')' || c == '[' || c == ']'
+        });
+        if is_plausible_file_path(token) {
+            return normalize_candidate_path(token);
+        }
+    }
+
+    None
 }
 
 /// Automatically detects the patch format of the provided content.
@@ -3240,6 +3893,9 @@ pub fn detect_patch(content: &str) -> PatchFormat {
     let mut has_conflict_start = false;
     let mut has_conflict_middle_or_end = false;
     let mut has_conflict_markers = false;
+    let mut has_aider_start = false;
+    let mut has_aider_middle_or_end = false;
+    let mut has_aider_markers = false;
 
     while let Some(line) = lines.next() {
         // Check for Markdown code blocks
@@ -3275,6 +3931,21 @@ pub fn detect_patch(content: &str) -> PatchFormat {
             has_unified_headers = true;
         }
 
+        // Check for Aider Search/Replace Markers
+        if is_aider_search_fence(trimmed) {
+            has_aider_start = true;
+        } else if (trimmed.starts_with("====") || is_aider_replace_fence(trimmed))
+            && has_aider_start
+        {
+            has_aider_middle_or_end = true;
+        }
+        if has_aider_start && has_aider_middle_or_end {
+            if in_code_block {
+                return PatchFormat::Markdown;
+            }
+            has_aider_markers = true;
+        }
+
         // Check for Conflict Markers
         if trimmed.starts_with("<<<<") {
             has_conflict_start = true;
@@ -3293,6 +3964,8 @@ pub fn detect_patch(content: &str) -> PatchFormat {
 
     if has_unified_headers {
         PatchFormat::Unified
+    } else if has_aider_markers {
+        PatchFormat::Aider
     } else if has_conflict_markers {
         PatchFormat::Conflict
     } else {
@@ -3399,6 +4072,14 @@ pub fn parse_auto(content: &str) -> Result<Vec<Patch>, ParseError> {
     match format {
         PatchFormat::Markdown => parse_diffs(content),
         PatchFormat::Unified => parse_patches(content),
+        PatchFormat::Aider => {
+            let patches = parse_aider(content);
+            debug!(
+                "Parsed {} patches from Aider search/replace blocks.",
+                patches.len()
+            );
+            Ok(patches)
+        }
         PatchFormat::Conflict => {
             let patches = parse_conflict_markers(content);
             debug!("Parsed {} patches from conflict markers.", patches.len());
@@ -3416,6 +4097,17 @@ pub fn parse_auto(content: &str) -> Result<Vec<Patch>, ParseError> {
                 );
                 Ok(patches)
             } else {
+                debug!(
+                    "Fallback unified diff parsing found no patches. Trying Aider search/replace."
+                );
+                let aider_patches = parse_aider(content);
+                if !aider_patches.is_empty() {
+                    debug!(
+                        "Fallback Aider parsing found {} patch(es).",
+                        aider_patches.len()
+                    );
+                    return Ok(aider_patches);
+                }
                 // If that yields nothing, return empty.
                 debug!("Fallback parsing found no patches.");
                 Ok(Vec::new())
@@ -3482,53 +4174,65 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
     debug!("Starting to parse diffs from content (Markdown mode).");
     let mut all_patches = Vec::new();
     let mut lines = content.lines().enumerate().peekable();
+    let mut preceding_lines: Vec<&str> = Vec::new();
 
-    // The `find` call consumes the iterator until it finds the start of a diff block.
-    // The loop continues searching for more blocks from where the last one ended.
-    while let Some((line_index, line_text)) = lines.by_ref().find(|(_, line)| {
-        let trimmed = line.trim_start();
-        trimmed.starts_with("```") && count_leading_backticks(trimmed) >= 3
-    }) {
+    while let Some((line_index, line_text)) = lines.next() {
         let trimmed = line_text.trim_start();
-        let fence_len = count_leading_backticks(trimmed);
-        let opening_indent = line_text.len() - trimmed.len();
+        if trimmed.starts_with("```") && count_leading_backticks(trimmed) >= 3 {
+            let fence_len = count_leading_backticks(trimmed);
+            let opening_indent = line_text.len() - trimmed.len();
 
-        trace!(
-            "Found potential diff block start on line {}: '{}'",
-            line_index,
-            line_text
-        );
-        let diff_block_start_line = line_index + 1;
-
-        let mut block_lines = Vec::new();
-
-        // Consume lines until end of block
-        while let Some((_, line)) = lines.peek() {
-            let inner_trimmed = line.trim_start();
-            let current_indent = line.len() - inner_trimmed.len();
-            if inner_trimmed.starts_with("```")
-                && count_leading_backticks(inner_trimmed) >= fence_len
-                && current_indent <= opening_indent
-            {
-                lines.next(); // Consume the closing fence
-                break;
-            }
-            let (_, line) = lines.next().unwrap();
-            block_lines.push(line);
-        }
-
-        if has_patch_signature_at_level_1(&block_lines) {
-            debug!(
-                "Parsing diff block starting on line {}.",
-                diff_block_start_line
-            );
-            let block_patches = parse_generic_block_lines(&block_lines, diff_block_start_line)?;
-            all_patches.extend(block_patches);
-        } else {
             trace!(
-                "Skipping code block starting on line {} (no patch markers found).",
-                diff_block_start_line
+                "Found potential diff block start on line {}: '{}'",
+                line_index,
+                line_text
             );
+            let diff_block_start_line = line_index + 1;
+
+            let mut block_lines = Vec::new();
+
+            // Consume lines until end of block
+            while let Some((_, line)) = lines.peek() {
+                let inner_trimmed = line.trim_start();
+                let current_indent = line.len() - inner_trimmed.len();
+                if inner_trimmed.starts_with("```")
+                    && count_leading_backticks(inner_trimmed) >= fence_len
+                    && current_indent <= opening_indent
+                {
+                    lines.next(); // Consume the closing fence
+                    break;
+                }
+                let (_, line) = lines.next().unwrap();
+                block_lines.push(line);
+            }
+
+            if has_patch_signature_at_level_1(&block_lines) {
+                debug!(
+                    "Parsing diff block starting on line {}.",
+                    diff_block_start_line
+                );
+                let default_file_path = preceding_lines
+                    .iter()
+                    .rev()
+                    .find_map(|l| extract_file_path_from_line(l));
+                let block_patches = parse_generic_block_lines(
+                    &block_lines,
+                    diff_block_start_line,
+                    default_file_path,
+                )?;
+                all_patches.extend(block_patches);
+            } else {
+                trace!(
+                    "Skipping code block starting on line {} (no patch markers found).",
+                    diff_block_start_line
+                );
+            }
+            preceding_lines.clear();
+        } else {
+            if preceding_lines.len() >= 5 {
+                preceding_lines.remove(0);
+            }
+            preceding_lines.push(line_text);
         }
     }
 
@@ -3578,6 +4282,7 @@ fn has_patch_signature_at_level_1<S: AsRef<str>>(lines: &[S]) -> bool {
         if !in_nested_block
             && (line.starts_with("--- ")
                 || line.starts_with("diff --git")
+                || is_aider_search_fence(trimmed)
                 || trimmed.starts_with("<<<<")
                 || trimmed.starts_with("====")
                 || trimmed.starts_with(">>>>"))
@@ -3606,7 +4311,11 @@ fn has_patch_signature_at_level_1<S: AsRef<str>>(lines: &[S]) -> bool {
 /// # Errors
 ///
 /// Returns [`ParseError`] if the block contains patch signatures but is syntactically invalid.
-fn parse_generic_block_lines(lines: &[&str], start_line: usize) -> Result<Vec<Patch>, ParseError> {
+fn parse_generic_block_lines(
+    lines: &[&str],
+    start_line: usize,
+    default_file_path: Option<PathBuf>,
+) -> Result<Vec<Patch>, ParseError> {
     trace!(
         "  Attempting to parse generic block starting at line {} as standard unified diff.",
         start_line
@@ -3620,15 +4329,25 @@ fn parse_generic_block_lines(lines: &[&str], start_line: usize) -> Result<Vec<Pa
                 trace!("  Successfully parsed block as standard unified diff.");
                 Ok(patches)
             } else {
-                trace!("  Standard parser found no patches. Attempting conflict markers.");
-                // 2. If standard parsing found nothing, try conflict markers
-                let conflict_patches = parse_conflict_markers_from_lines(lines.iter().copied());
-                if !conflict_patches.is_empty() {
-                    trace!("  Successfully parsed block as conflict markers.");
+                trace!(
+                    "  Standard parser found no patches. Attempting Aider search/replace blocks."
+                );
+                let aider_patches =
+                    parse_aider_from_lines(lines.iter().copied(), default_file_path.clone());
+                if !aider_patches.is_empty() {
+                    trace!("  Successfully parsed block as Aider search/replace blocks.");
+                    Ok(aider_patches)
                 } else {
-                    trace!("  No conflict markers found either.");
+                    trace!("  No Aider blocks found. Attempting conflict markers.");
+                    // 3. If standard and Aider parsing found nothing, try conflict markers
+                    let conflict_patches = parse_conflict_markers_from_lines(lines.iter().copied());
+                    if !conflict_patches.is_empty() {
+                        trace!("  Successfully parsed block as conflict markers.");
+                    } else {
+                        trace!("  No conflict markers found either.");
+                    }
+                    Ok(conflict_patches)
                 }
-                Ok(conflict_patches)
             }
         }
         Err(e) => {
@@ -3636,22 +4355,356 @@ fn parse_generic_block_lines(lines: &[&str], start_line: usize) -> Result<Vec<Pa
                 "  Standard parsing failed ({}). Attempting conflict markers.",
                 e
             );
-            // 3. If standard parsing failed (e.g. missing header), check for conflict markers
-            let conflict_patches = parse_conflict_markers_from_lines(lines.iter().copied());
-            if !conflict_patches.is_empty() {
-                trace!("  Successfully parsed block as conflict markers.");
-                Ok(conflict_patches)
+            let aider_patches = parse_aider_from_lines(lines.iter().copied(), default_file_path);
+            if !aider_patches.is_empty() {
+                trace!("  Successfully parsed block as Aider search/replace blocks.");
+                Ok(aider_patches)
             } else {
-                trace!("  Conflict marker parsing also failed. Returning original error.");
-                // 4. Return original error if both failed
-                match e {
-                    ParseError::MissingFileHeader { .. } => {
-                        Err(ParseError::MissingFileHeader { line: start_line })
+                trace!("  Aider parsing found nothing. Attempting conflict markers.");
+                let conflict_patches = parse_conflict_markers_from_lines(lines.iter().copied());
+                if !conflict_patches.is_empty() {
+                    trace!("  Successfully parsed block as conflict markers.");
+                    Ok(conflict_patches)
+                } else {
+                    trace!("  Conflict marker parsing also failed. Returning original error.");
+                    match e {
+                        ParseError::MissingFileHeader { .. } => {
+                            Err(ParseError::MissingFileHeader { line: start_line })
+                        }
                     }
                 }
             }
         }
     }
+}
+
+/// Constructs a structured [`Hunk`] from Aider `SEARCH` and `REPLACE` blocks.
+fn create_hunk_from_search_replace(search_lines: &[String], replace_lines: &[String]) -> Hunk {
+    let mut search_norm = Vec::with_capacity(search_lines.len());
+    for s in search_lines {
+        if is_ellipsis_line(s) {
+            let mut norm = String::with_capacity(s.len() + 3);
+            norm.push_str(get_indent(s));
+            norm.push_str("...");
+            search_norm.push(norm);
+        } else {
+            search_norm.push(s.clone());
+        }
+    }
+    let mut replace_norm = Vec::with_capacity(replace_lines.len());
+    for r in replace_lines {
+        if is_ellipsis_line(r) {
+            let mut norm = String::with_capacity(r.len() + 3);
+            norm.push_str(get_indent(r));
+            norm.push_str("...");
+            replace_norm.push(norm);
+        } else {
+            replace_norm.push(r.clone());
+        }
+    }
+
+    let search_refs: Vec<&str> = search_norm.iter().map(|s| s.as_str()).collect();
+    let replace_refs: Vec<&str> = replace_norm.iter().map(|s| s.as_str()).collect();
+
+    let diff = similar::TextDiff::from_slices(&search_refs, &replace_refs);
+    let mut hunk_lines = Vec::new();
+
+    let push_line = |lines: &mut Vec<String>, prefix: char, s: &str| {
+        if prefix == '+' && is_ellipsis_line(s) {
+            return;
+        }
+        let mut out = String::with_capacity(s.len() + 1);
+        out.push(prefix);
+        out.push_str(s);
+        lines.push(out);
+    };
+
+    for op in diff.ops() {
+        match *op {
+            similar::DiffOp::Equal { old_index, len, .. } => {
+                for i in 0..len {
+                    push_line(&mut hunk_lines, ' ', search_refs[old_index + i]);
+                }
+            }
+            similar::DiffOp::Delete {
+                old_index, old_len, ..
+            } => {
+                for i in 0..old_len {
+                    push_line(&mut hunk_lines, '-', search_refs[old_index + i]);
+                }
+            }
+            similar::DiffOp::Insert {
+                new_index, new_len, ..
+            } => {
+                for i in 0..new_len {
+                    push_line(&mut hunk_lines, '+', replace_refs[new_index + i]);
+                }
+            }
+            similar::DiffOp::Replace {
+                old_index,
+                old_len,
+                new_index,
+                new_len,
+            } => {
+                for i in 0..old_len {
+                    push_line(&mut hunk_lines, '-', search_refs[old_index + i]);
+                }
+                for i in 0..new_len {
+                    push_line(&mut hunk_lines, '+', replace_refs[new_index + i]);
+                }
+            }
+        }
+    }
+
+    Hunk {
+        lines: hunk_lines,
+        old_start_line: None,
+        new_start_line: None,
+    }
+}
+
+/// Parses a string containing Aider search/replace blocks (`<<<<<<< SEARCH`, `=======`, `>>>>>>> REPLACE`).
+///
+/// This format is widely used by [Aider](https://aider.chat) and LLM-based coding agents.
+/// It consists of one or more search/replace blocks targeting specific files:
+///
+/// ```text
+/// path/to/file.ext
+/// <<<<<<< SEARCH
+/// original lines to find
+/// =======
+/// new lines to replace with
+/// >>>>>>> REPLACE
+/// ```
+///
+/// If a file path precedes the search block (e.g. on the previous line, as a header,
+/// or inside backticks), it is associated with that patch. Consecutive blocks without an
+/// intervening file path are merged into the same [`Patch`]. If no file path is found,
+/// it defaults to `patch_target`.
+///
+/// The `SEARCH` and `REPLACE` blocks are converted into structured [`Hunk`] objects
+/// where identical lines are preserved as context lines, enabling `mpatch`'s fuzzy matching,
+/// indentation adjustment, and candidate backtracking to operate with full fidelity.
+///
+/// # Arguments
+///
+/// * `content` - A string slice containing the Aider search/replace content.
+///
+/// # Returns
+///
+/// A vector of [`Patch`] objects.
+///
+/// # Examples
+///
+/// ```rust
+/// use mpatch::parse_aider;
+///
+/// let diff = r#"
+/// src/greeting.py
+/// <<<<<<< SEARCH
+/// def greet():
+///     print("hello")
+/// =======
+/// def greet():
+///     print("hello, world!")
+/// >>>>>>> REPLACE
+/// "#;
+///
+/// let patches = parse_aider(diff);
+/// assert_eq!(patches.len(), 1);
+/// assert_eq!(patches[0].file_path.to_str(), Some("src/greeting.py"));
+/// assert_eq!(patches[0].hunks[0].removed_lines(), vec!["    print(\"hello\")"]);
+/// assert_eq!(patches[0].hunks[0].added_lines(), vec!["    print(\"hello, world!\")"]);
+/// ```
+pub fn parse_aider(content: &str) -> Vec<Patch> {
+    debug!("Starting to parse Aider search/replace content.");
+    let patches = parse_aider_from_lines(content.lines(), None);
+    debug!(
+        "Finished parsing Aider content. Found {} patch(es).",
+        patches.len()
+    );
+    patches
+}
+
+/// Parses an iterator of lines containing "Aider" style search/replace blocks.
+///
+/// See [`parse_aider`] for details.
+pub fn parse_aider_from_lines<'a, I>(lines: I, default_file_path: Option<PathBuf>) -> Vec<Patch>
+where
+    I: Iterator<Item = &'a str>,
+{
+    let mut unmerged_patches: Vec<Patch> = Vec::new();
+    let mut active_file_path: Option<PathBuf> = default_file_path;
+    let mut pending_file_path: Option<PathBuf> = None;
+
+    enum State {
+        Outside,
+        InSearch,
+        InReplace,
+    }
+    let mut state = State::Outside;
+    let mut search_lines: Vec<String> = Vec::new();
+    let mut replace_lines: Vec<String> = Vec::new();
+
+    for line in lines {
+        let trimmed = line.trim_start();
+
+        if is_aider_search_fence(trimmed) {
+            let path_on_fence = extract_file_path_from_search_fence(trimmed);
+            let target_file = path_on_fence
+                .or_else(|| pending_file_path.take())
+                .or_else(|| active_file_path.clone())
+                .unwrap_or_else(|| PathBuf::from("patch_target"));
+
+            active_file_path = Some(target_file.clone());
+
+            search_lines.clear();
+            replace_lines.clear();
+            state = State::InSearch;
+            continue;
+        }
+
+        if is_aider_divide_fence(trimmed) && matches!(state, State::InSearch) {
+            state = State::InReplace;
+            continue;
+        }
+
+        if is_aider_replace_fence(trimmed) && matches!(state, State::InReplace) {
+            state = State::Outside;
+
+            let file_path = active_file_path
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("patch_target"));
+
+            while search_lines.first().is_some_and(|l| is_ellipsis_line(l))
+                && replace_lines.first().is_some_and(|l| is_ellipsis_line(l))
+            {
+                search_lines.remove(0);
+                replace_lines.remove(0);
+            }
+            while search_lines.last().is_some_and(|l| is_ellipsis_line(l))
+                && replace_lines.last().is_some_and(|l| is_ellipsis_line(l))
+            {
+                search_lines.pop();
+                replace_lines.pop();
+            }
+
+            let s_has = search_lines.iter().any(|l| is_ellipsis_line(l));
+            let r_has = replace_lines.iter().any(|l| is_ellipsis_line(l));
+            if s_has && r_has {
+                let s_segs = split_lines_by_ellipsis(&search_lines);
+                let r_segs = split_lines_by_ellipsis(&replace_lines);
+                let changed_indices: Vec<usize> = s_segs
+                    .iter()
+                    .zip(r_segs.iter())
+                    .enumerate()
+                    .filter_map(|(i, (s, r))| if s != r { Some(i) } else { None })
+                    .collect();
+
+                if s_segs.len() == r_segs.len() && changed_indices.len() > 1 {
+                    for &idx in &changed_indices {
+                        let mut s_sub = s_segs[idx].clone();
+                        let mut r_sub = r_segs[idx].clone();
+
+                        if idx > 0 && !changed_indices.contains(&(idx - 1)) && !s_segs[idx - 1].is_empty() {
+                            let mut new_s = s_segs[idx - 1].clone();
+                            new_s.push("...".to_string());
+                            new_s.append(&mut s_sub);
+                            s_sub = new_s;
+
+                            let mut new_r = r_segs[idx - 1].clone();
+                            new_r.push("...".to_string());
+                            new_r.append(&mut r_sub);
+                            r_sub = new_r;
+                        }
+
+                        let hunk = create_hunk_from_search_replace(&s_sub, &r_sub);
+                        if hunk.has_changes() {
+                            unmerged_patches.push(Patch {
+                                file_path: file_path.clone(),
+                                hunks: vec![hunk],
+                                ends_with_newline: true,
+                            });
+                        }
+                    }
+                    search_lines.clear();
+                    replace_lines.clear();
+                    continue;
+                }
+            }
+
+            let hunk = create_hunk_from_search_replace(&search_lines, &replace_lines);
+            if hunk.has_changes() || !search_lines.is_empty() || !replace_lines.is_empty() {
+                unmerged_patches.push(Patch {
+                    file_path,
+                    hunks: vec![hunk],
+                    ends_with_newline: true,
+                });
+            }
+            search_lines.clear();
+            replace_lines.clear();
+            continue;
+        }
+
+        match state {
+            State::Outside => {
+                if let Some(path) = extract_file_path_from_line(line) {
+                    pending_file_path = Some(path);
+                }
+            }
+            State::InSearch => {
+                search_lines.push(line.to_string());
+            }
+            State::InReplace => {
+                replace_lines.push(line.to_string());
+            }
+        }
+    }
+
+    if matches!(state, State::InReplace) && (!search_lines.is_empty() || !replace_lines.is_empty())
+    {
+        let file_path = active_file_path
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("patch_target"));
+        let hunk = create_hunk_from_search_replace(&search_lines, &replace_lines);
+        unmerged_patches.push(Patch {
+            file_path,
+            hunks: vec![hunk],
+            ends_with_newline: true,
+        });
+    }
+
+    if unmerged_patches.is_empty() {
+        return Vec::new();
+    }
+
+    let mut merged_patches: Vec<Patch> = Vec::new();
+    for patch in unmerged_patches {
+        if let Some(existing) = merged_patches
+            .iter_mut()
+            .find(|p| p.file_path == patch.file_path)
+        {
+            existing.hunks.extend(patch.hunks);
+        } else {
+            merged_patches.push(patch);
+        }
+    }
+
+    merged_patches
+}
+
+fn split_lines_by_ellipsis(lines: &[String]) -> Vec<Vec<String>> {
+    let mut segs = Vec::new();
+    let mut current = Vec::new();
+    for line in lines {
+        if is_ellipsis_line(line) {
+            segs.push(std::mem::take(&mut current));
+        } else {
+            current.push(line.clone());
+        }
+    }
+    segs.push(current);
+    segs
 }
 
 /// Parses a string containing a diff and returns a single [`Patch`] object.
@@ -5604,6 +6657,9 @@ fn find_statement_match_in_block(
     if old_slice.is_empty() || new_slice.is_empty() {
         return None;
     }
+    if old_slice.iter().all(|l| is_ellipsis_line(l)) {
+        return None;
+    }
     let old_text = old_slice.join(" ");
     let old_trimmed = old_text.trim();
     if old_trimmed.is_empty() {
@@ -5635,6 +6691,10 @@ fn find_statement_match_in_block(
         }
     }
     best_match
+}
+
+fn is_low_entropy_segment(seg: &[&str]) -> bool {
+    seg.iter().all(|l| is_low_entropy_line(l))
 }
 
 /// Checks whether a line is trivial / low-entropy syntax (e.g. closing braces, blank lines).
@@ -5789,7 +6849,143 @@ fn try_apply_hunk_at_location(
         location, match_type
     );
 
-    let final_replace_block: Vec<String> = if matches!(match_type, MatchType::Exact) {
+    let match_block = hunk.get_match_block();
+    let has_ellipsis = hunk.lines.iter().any(|l| is_ellipsis_line(l.strip_prefix([' ', '+', '-']).unwrap_or(l)));
+    let target_slice = if location.start_index + location.length <= target_lines.len() {
+        &target_lines[location.start_index..location.start_index + location.length]
+    } else {
+        &[]
+    };
+    let is_literal_match = has_ellipsis
+        && location.length == match_block.len()
+        && target_slice.iter().zip(match_block.iter()).all(|(t, m)| t.trim() == m.trim());
+    let is_wildcard_gap_match = has_ellipsis && !is_literal_match;
+
+    let final_replace_block: Vec<String> = if is_wildcard_gap_match {
+        // Sound N-segment wildcard reconstruction:
+        // 1. Separate hunk lines into segments and identify ellipsis removal/context markers
+        struct HunkSegment {
+            lines: Vec<String>,
+            match_lines: Vec<String>,
+        }
+        let mut hunk_segs: Vec<HunkSegment> = Vec::new();
+        let mut ellipsis_is_removal: Vec<bool> = Vec::new();
+        let mut current_lines = Vec::new();
+        let mut current_match = Vec::new();
+
+        for line in &hunk.lines {
+            let raw = line.strip_prefix([' ', '+', '-']).unwrap_or(line);
+            if is_ellipsis_line(raw) {
+                if current_lines.is_empty() && !hunk_segs.is_empty() {
+                    if let Some(last_removal) = ellipsis_is_removal.last_mut() {
+                        *last_removal |= line.starts_with('-');
+                    }
+                    continue;
+                }
+                ellipsis_is_removal.push(line.starts_with('-'));
+                hunk_segs.push(HunkSegment {
+                    lines: std::mem::take(&mut current_lines),
+                    match_lines: std::mem::take(&mut current_match),
+                });
+            } else {
+                current_lines.push(line.clone());
+                if !line.starts_with('+') {
+                    current_match.push(raw.to_string());
+                }
+            }
+        }
+        hunk_segs.push(HunkSegment {
+            lines: current_lines,
+            match_lines: current_match,
+        });
+
+        let file_matched_slice = &target_lines[location.start_index..location.start_index + location.length];
+        let mut seg_offsets = Vec::with_capacity(hunk_segs.len());
+        let mut search_offset = 0;
+
+        for (m, seg) in hunk_segs.iter().enumerate() {
+            if m == 0 {
+                seg_offsets.push(0);
+                search_offset = seg.match_lines.len();
+            } else if m == hunk_segs.len() - 1 {
+                let offset = file_matched_slice.len().saturating_sub(seg.match_lines.len());
+                seg_offsets.push(offset.max(search_offset));
+            } else {
+                let seg_trimmed: Vec<&str> = seg.match_lines.iter().map(|s| s.trim()).collect();
+                let mut found_pos = search_offset;
+                if seg.match_lines.len() <= file_matched_slice.len().saturating_sub(search_offset) {
+                    for i in search_offset..=file_matched_slice.len().saturating_sub(seg.match_lines.len()) {
+                        if file_matched_slice[i..i + seg.match_lines.len()].iter().map(|s| s.trim()).eq(seg_trimmed.iter().copied()) {
+                            found_pos = i;
+                            break;
+                        }
+                    }
+                }
+                seg_offsets.push(found_pos);
+                search_offset = found_pos + seg.match_lines.len();
+            }
+        }
+
+        let mut final_lines = Vec::new();
+        let mut current_hunk_indent = "";
+        let mut current_target_indent = "";
+
+        for m in 0..hunk_segs.len() {
+            let seg = &hunk_segs[m];
+            let seg_offset = seg_offsets[m];
+            let seg_len = seg.match_lines.len();
+            let target_seg = if seg_offset < file_matched_slice.len() {
+                &file_matched_slice[seg_offset..file_matched_slice.len().min(seg_offset + seg_len)]
+            } else {
+                &[]
+            };
+
+            for t_line in target_seg {
+                let ind = get_indent(t_line);
+                if !ind.is_empty() && !t_line.trim().is_empty() {
+                    current_target_indent = ind;
+                    break;
+                }
+            }
+            for line in &seg.lines {
+                if line.starts_with([' ', '-']) {
+                    let raw = line.strip_prefix([' ', '-']).unwrap_or(line);
+                    let ind = get_indent(raw);
+                    if !ind.is_empty() && !raw.trim().is_empty() {
+                        current_hunk_indent = ind;
+                        break;
+                    }
+                }
+            }
+
+            let mut t_idx = 0;
+            for line in &seg.lines {
+                if line.starts_with(' ') {
+                    if t_idx < target_seg.len() {
+                        final_lines.push(target_seg[t_idx].clone());
+                        t_idx += 1;
+                    }
+                } else if line.starts_with('-') {
+                    t_idx += 1;
+                } else if let Some(add) = line.strip_prefix('+') {
+                    if !is_ellipsis_line(add) {
+                        final_lines.push(adjust_indentation(add, current_hunk_indent, current_target_indent));
+                    }
+                }
+            }
+
+            if m < hunk_segs.len() - 1 && m < ellipsis_is_removal.len() {
+                let gap_start = seg_offset + seg_len;
+                let gap_end = seg_offsets[m + 1];
+                if !ellipsis_is_removal[m] && gap_start <= gap_end && gap_end <= file_matched_slice.len() {
+                    for t_line in &file_matched_slice[gap_start..gap_end] {
+                        final_lines.push(t_line.clone());
+                    }
+                }
+            }
+        }
+        final_lines
+    } else if matches!(match_type, MatchType::Exact) {
         // For Exact matches, we assume the patch's indentation is intentional and correct relative to the context.
         // We don't need dynamic adjustment because the context matched byte-for-byte.
         trace!("    Applying hunk via exact logic.");
@@ -7087,6 +8283,50 @@ impl<'a> DefaultHunkFinder<'a> {
         target_lines: &[T],
         old_start_line: Option<usize>,
     ) -> Result<Vec<(HunkLocation, MatchType)>, HunkApplyError> {
+        let has_ellipsis = match_block.iter().any(|l| is_ellipsis_line(l));
+
+        // If the target file literally contains the `...` line (e.g. Python stubs),
+        // prefer matching it directly as exact code.
+        let literal_match = if has_ellipsis && match_block.len() <= target_lines.len() {
+            let exact_iter = target_lines
+                .windows(match_block.len())
+                .enumerate()
+                .filter(|(_, window)| window.iter().map(|s| s.as_ref()).eq(match_block.iter().copied()))
+                .map(|(i, _)| i);
+            let match_stripped: Vec<&str> = match_block.iter().map(|s| s.trim()).collect();
+            let loose_iter = target_lines
+                .windows(match_block.len())
+                .enumerate()
+                .filter(|(_, window)| window.iter().map(|s| s.as_ref().trim()).eq(match_stripped.iter().copied()))
+                .map(|(i, _)| i);
+            Self::tie_break_with_line_number(exact_iter, old_start_line, "literal-exact", true)
+                .ok()
+                .flatten()
+                .or_else(|| Self::tie_break_with_line_number(loose_iter, old_start_line, "literal-loose", true).ok().flatten())
+        } else {
+            None
+        };
+        if let Some(index) = literal_match {
+            return Ok(vec![(HunkLocation { start_index: index, length: match_block.len() }, MatchType::Exact)]);
+        }
+
+        if has_ellipsis {
+            let mut segments: Vec<&[&str]> = Vec::new();
+            let mut current_start = 0;
+            for (idx, line) in match_block.iter().enumerate() {
+                if is_ellipsis_line(line) {
+                    if idx > current_start {
+                        segments.push(&match_block[current_start..idx]);
+                    }
+                    current_start = idx + 1;
+                }
+            }
+            if current_start < match_block.len() {
+                segments.push(&match_block[current_start..]);
+            }
+            return self.find_wildcard_segments_location(&segments, target_lines, old_start_line);
+        }
+
         let match_has_entropy = match_block.iter().any(|l| !is_low_entropy_line(l));
 
         trace!(
@@ -7613,6 +8853,115 @@ impl<'a> DefaultHunkFinder<'a> {
                 first_match
             );
             Ok(Some(first_match))
+        }
+    }
+
+    fn find_wildcard_segments_location<T: AsRef<str> + Sync>(
+        &self,
+        segments: &[&[&str]],
+        target_lines: &[T],
+        old_start_line: Option<usize>,
+    ) -> Result<Vec<(HunkLocation, MatchType)>, HunkApplyError> {
+        if segments.is_empty() {
+            return Err(HunkApplyError::ContextNotFound);
+        }
+        if segments.iter().any(|seg| is_low_entropy_segment(seg)) {
+            return Err(HunkApplyError::ContextNotFound);
+        }
+        if segments.len() == 1 {
+            return self.find_hunk_location_internal(segments[0], target_lines, old_start_line);
+        }
+
+        let target_refs: Vec<&str> = target_lines.iter().map(|s| s.as_ref().trim_end()).collect();
+        let target_loose: Vec<&str> = target_lines.iter().map(|s| s.as_ref().trim()).collect();
+
+        let mut segment_matches: Vec<Vec<(usize, usize)>> = Vec::with_capacity(segments.len());
+        for seg in segments {
+            let mut matches_for_seg = Vec::new();
+            if seg.len() <= target_lines.len() {
+                for (i, window) in target_lines.windows(seg.len()).enumerate() {
+                    if window.iter().map(|s| s.as_ref()).eq(seg.iter().copied()) {
+                        matches_for_seg.push((i, seg.len()));
+                    }
+                }
+                if matches_for_seg.is_empty() {
+                    let seg_trimmed: Vec<&str> = seg.iter().map(|s| s.trim_end()).collect();
+                    for (i, window) in target_refs.windows(seg.len()).enumerate() {
+                        if window.iter().copied().eq(seg_trimmed.iter().copied()) {
+                            matches_for_seg.push((i, seg.len()));
+                        }
+                    }
+                }
+                if matches_for_seg.is_empty() && self.options.fuzz_factor > 0.0 {
+                    let seg_loose: Vec<&str> = seg.iter().map(|s| s.trim()).collect();
+                    for (i, window) in target_loose.windows(seg.len()).enumerate() {
+                        if window.iter().copied().eq(seg_loose.iter().copied()) {
+                            matches_for_seg.push((i, seg.len()));
+                        }
+                    }
+                }
+            }
+            if matches_for_seg.is_empty() {
+                return Err(HunkApplyError::ContextNotFound);
+            }
+            if matches_for_seg.len() > 30 {
+                matches_for_seg.truncate(30);
+            }
+            segment_matches.push(matches_for_seg);
+        }
+
+        let max_gap = 250.max(segments.iter().map(|s| s.len()).sum::<usize>() * 5);
+        let mut all_chains = Vec::new();
+        let mut current_chain = Vec::with_capacity(segments.len());
+        Self::collect_wildcard_chains(0, 0, max_gap, &mut current_chain, &segment_matches, &mut all_chains);
+        if all_chains.is_empty() {
+            return Err(HunkApplyError::ContextNotFound);
+        }
+
+        all_chains.sort_by_key(|chain| {
+            let start = chain.first().unwrap().0;
+            let end = chain.last().unwrap().0 + chain.last().unwrap().1;
+            let total_seg_len: usize = chain.iter().map(|c| c.1).sum();
+            let gap = end.saturating_sub(start + total_seg_len);
+            let line_dist = old_start_line.map(|l| (start + 1).abs_diff(l)).unwrap_or(0);
+            (line_dist, gap)
+        });
+
+        let mut candidates = Vec::new();
+        for chain in all_chains {
+            let start_index = chain.first().unwrap().0;
+            let length = (chain.last().unwrap().0 + chain.last().unwrap().1) - start_index;
+            if !candidates.iter().any(|(loc, _): &(HunkLocation, MatchType)| loc.start_index == start_index && loc.length == length) {
+                candidates.push((HunkLocation { start_index, length }, MatchType::ExactIgnoringWhitespace));
+            }
+            if candidates.len() >= 20 {
+                break;
+            }
+        }
+        Ok(candidates)
+    }
+
+    fn collect_wildcard_chains(
+        seg_idx: usize,
+        min_start: usize,
+        max_gap: usize,
+        current: &mut Vec<(usize, usize)>,
+        segment_matches: &[Vec<(usize, usize)>],
+        all_chains: &mut Vec<Vec<(usize, usize)>>,
+    ) {
+        if all_chains.len() >= 100 {
+            return;
+        }
+        if seg_idx == segment_matches.len() {
+            all_chains.push(current.clone());
+            return;
+        }
+        for cand in &segment_matches[seg_idx] {
+            if cand.0 >= min_start && (seg_idx == 0 || cand.0.saturating_sub(min_start) <= max_gap) {
+                current.push(*cand);
+                Self::collect_wildcard_chains(seg_idx + 1, cand.0 + cand.1, max_gap, current, segment_matches, all_chains);
+                current.pop();
+            }
         }
     }
 }

@@ -1,8 +1,8 @@
 use indoc::indoc;
 use mpatch::{
     apply_hunk_to_lines, apply_patch_to_file, apply_patch_to_lines, apply_patches_to_dir,
-    detect_patch, find_hunk_location, find_hunk_location_in_lines, invert_patches, parse_auto,
-    parse_diffs, parse_patches, parse_patches_from_lines, patch_content_str,
+    detect_patch, find_hunk_location, find_hunk_location_in_lines, invert_patches, parse_aider,
+    parse_auto, parse_diffs, parse_patches, parse_patches_from_lines, patch_content_str,
     try_apply_patch_to_content, try_apply_patch_to_file, try_apply_patch_to_lines, ApplyOptions,
     DefaultHunkFinder, Hunk, HunkApplyError, HunkApplyStatus, HunkFinder, HunkLocation, MatchType,
     ParseError, Patch, PatchError, PatchFormat, StrictApplyError,
@@ -4784,6 +4784,436 @@ fn test_detect_markdown_patch_keyword() {
 }
 
 #[test]
+fn test_detect_aider_standard() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let content = indoc! {r#"
+        src/main.rs
+        <<<<<<< SEARCH
+        fn main() {}
+        =======
+        fn main() { println!("Hello"); }
+        >>>>>>> REPLACE
+    "#};
+    assert_eq!(detect_patch(content), PatchFormat::Aider);
+}
+
+#[test]
+fn test_detect_aider_case_insensitive() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let content = indoc! {r#"
+        <<<<<<< search
+        old
+        =======
+        new
+        >>>>>>> replace
+    "#};
+    assert_eq!(detect_patch(content), PatchFormat::Aider);
+}
+
+#[test]
+fn test_parse_aider_original_updated_syntax() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let content = indoc! {r#"
+        js/game_manager.js
+        <<<<<<< ORIGINAL
+          // Update the score
+          self.score += merged.value;
+        =======
+          // Update the score with a 10% chance of 10x bonus
+          var bonus = Math.random() <= 0.1 ? 10 : 1;
+          self.score += merged.value * bonus;
+        >>>>>>> UPDATED
+    "#};
+
+    assert_eq!(detect_patch(content), PatchFormat::Aider);
+    let patches = parse_auto(content).unwrap();
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].file_path.to_str(), Some("js/game_manager.js"));
+    let hunk = &patches[0].hunks[0];
+    assert!(hunk
+        .removed_lines()
+        .contains(&"  self.score += merged.value;"));
+    assert!(hunk
+        .added_lines()
+        .contains(&"  self.score += merged.value * bonus;"));
+}
+
+#[test]
+fn test_apply_aider_original_updated_syntax() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let original = indoc! {r#"
+        function GameManager() {
+          // Update the score
+          self.score += merged.value;
+          return self.score;
+        }
+    "#};
+
+    let diff = indoc! {r#"
+        js/game_manager.js
+        <<<<<<< ORIGINAL
+          // Update the score
+          self.score += merged.value;
+        =======
+          // Update the score with a 10% chance of 10x bonus
+          var bonus = Math.random() <= 0.1 ? 10 : 1;
+          self.score += merged.value * bonus;
+        >>>>>>> UPDATED
+    "#};
+
+    let result = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+    let expected = indoc! {r#"
+        function GameManager() {
+          // Update the score with a 10% chance of 10x bonus
+          var bonus = Math.random() <= 0.1 ? 10 : 1;
+          self.score += merged.value * bonus;
+          return self.score;
+        }
+    "#};
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn test_parse_aider_single_block_with_file_path() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let content = indoc! {r#"
+        src/main.rs
+        <<<<<<< SEARCH
+        fn main() {
+            println!("old");
+        }
+        =======
+        fn main() {
+            println!("new");
+        }
+        >>>>>>> REPLACE
+    "#};
+    let patches = parse_aider(content);
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].file_path.to_str(), Some("src/main.rs"));
+    let hunk = &patches[0].hunks[0];
+    assert_eq!(hunk.removed_lines(), vec!["    println!(\"old\");"]);
+    assert_eq!(hunk.added_lines(), vec!["    println!(\"new\");"]);
+    assert_eq!(hunk.context_lines(), vec!["fn main() {", "}"]);
+}
+
+#[test]
+fn test_parse_aider_path_on_fence_line() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let content = indoc! {r#"
+        <<<<<<< SEARCH src/main.rs
+        println!("old");
+        =======
+        println!("new");
+        >>>>>>> REPLACE
+    "#};
+    let patches = parse_aider(content);
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].file_path.to_str(), Some("src/main.rs"));
+    assert_eq!(
+        patches[0].hunks[0].removed_lines(),
+        vec!["println!(\"old\");"]
+    );
+    assert_eq!(
+        patches[0].hunks[0].added_lines(),
+        vec!["println!(\"new\");"]
+    );
+}
+
+#[test]
+fn test_parse_aider_path_in_backticks_and_markdown_header() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let content1 = indoc! {r#"
+        `src/utils.py`
+        <<<<<<< SEARCH
+        def old(): pass
+        =======
+        def new(): pass
+        >>>>>>> REPLACE
+    "#};
+    let patches1 = parse_aider(content1);
+    assert_eq!(patches1.len(), 1);
+    assert_eq!(patches1[0].file_path.to_str(), Some("src/utils.py"));
+
+    let content2 = indoc! {r#"
+        ### src/models/user.rs
+        <<<<<<< SEARCH
+        struct Old;
+        =======
+        struct New;
+        >>>>>>> REPLACE
+    "#};
+    let patches2 = parse_aider(content2);
+    assert_eq!(patches2.len(), 1);
+    assert_eq!(patches2[0].file_path.to_str(), Some("src/models/user.rs"));
+}
+
+#[test]
+fn test_parse_aider_multiple_blocks_same_file() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let content = indoc! {r#"
+        src/math.rs
+        <<<<<<< SEARCH
+        fn add() { 1 }
+        =======
+        fn add() { 2 }
+        >>>>>>> REPLACE
+        <<<<<<< SEARCH
+        fn sub() { 3 }
+        =======
+        fn sub() { 4 }
+        >>>>>>> REPLACE
+    "#};
+    let patches = parse_aider(content);
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].file_path.to_str(), Some("src/math.rs"));
+    assert_eq!(patches[0].hunks.len(), 2);
+    assert_eq!(patches[0].hunks[0].added_lines(), vec!["fn add() { 2 }"]);
+    assert_eq!(patches[0].hunks[1].added_lines(), vec!["fn sub() { 4 }"]);
+}
+
+#[test]
+fn test_parse_aider_multiple_files() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let content = indoc! {r#"
+        src/foo.rs
+        <<<<<<< SEARCH
+        fn foo() { 1 }
+        =======
+        fn foo() { 10 }
+        >>>>>>> REPLACE
+
+        src/bar.rs
+        <<<<<<< SEARCH
+        fn bar() { 2 }
+        =======
+        fn bar() { 20 }
+        >>>>>>> REPLACE
+    "#};
+    let patches = parse_auto(content).unwrap();
+    assert_eq!(patches.len(), 2);
+    assert_eq!(patches[0].file_path.to_str(), Some("src/foo.rs"));
+    assert_eq!(patches[1].file_path.to_str(), Some("src/bar.rs"));
+}
+
+#[test]
+fn test_parse_aider_inside_markdown_code_block() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let content = indoc! {r#"
+        Here is the fix:
+        ```python
+        calc.py
+        <<<<<<< SEARCH
+        def calc(): return 1
+        =======
+        def calc(): return 2
+        >>>>>>> REPLACE
+        ```
+    "#};
+    let patches = parse_auto(content).unwrap();
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].file_path.to_str(), Some("calc.py"));
+    assert_eq!(
+        patches[0].hunks[0].added_lines(),
+        vec!["def calc(): return 2"]
+    );
+}
+
+#[test]
+fn test_parse_aider_path_outside_markdown_code_block() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let content = indoc! {r#"
+        Update `calc.py` to fix addition:
+        ```python
+        <<<<<<< SEARCH
+        def add(a, b): return a - b
+        =======
+        def add(a, b): return a + b
+        >>>>>>> REPLACE
+        ```
+    "#};
+    let patches = parse_diffs(content).unwrap();
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].file_path.to_str(), Some("calc.py"));
+    assert_eq!(
+        patches[0].hunks[0].added_lines(),
+        vec!["def add(a, b): return a + b"]
+    );
+}
+
+#[test]
+fn test_parse_aider_pure_deletion() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let content = indoc! {r#"
+        clean.rs
+        <<<<<<< SEARCH
+        unused_function();
+        =======
+        >>>>>>> REPLACE
+    "#};
+    let patches = parse_aider(content);
+    assert_eq!(patches.len(), 1);
+    assert_eq!(
+        patches[0].hunks[0].removed_lines(),
+        vec!["unused_function();"]
+    );
+    assert!(patches[0].hunks[0].added_lines().is_empty());
+}
+
+#[test]
+fn test_parse_aider_pure_addition() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let content = indoc! {r#"
+        new.rs
+        <<<<<<< SEARCH
+        =======
+        fn brand_new() {}
+        >>>>>>> REPLACE
+    "#};
+    let patches = parse_aider(content);
+    assert_eq!(patches.len(), 1);
+    assert!(patches[0].hunks[0].removed_lines().is_empty());
+    assert_eq!(patches[0].hunks[0].added_lines(), vec!["fn brand_new() {}"]);
+}
+
+#[test]
+fn test_aider_patch_content_str_end_to_end() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let original = indoc! {r#"
+        def hello():
+            print("hello")
+            return 1
+    "#};
+    let diff = indoc! {r#"
+        <<<<<<< SEARCH
+            print("hello")
+            return 1
+        =======
+            print("hello, world!")
+            return 42
+        >>>>>>> REPLACE
+    "#};
+    let result = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+    let expected = indoc! {r#"
+        def hello():
+            print("hello, world!")
+            return 42
+    "#};
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn test_aider_apply_patch_to_file() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("server.py");
+    fs::write(&file_path, "def start():\n    bind(8080)\n").unwrap();
+
+    let diff = indoc! {r#"
+        server.py
+        <<<<<<< SEARCH
+        def start():
+            bind(8080)
+        =======
+        def start():
+            bind(9090)
+        >>>>>>> REPLACE
+    "#};
+
+    let patches = parse_auto(diff).unwrap();
+    let result = apply_patch_to_file(&patches[0], dir.path(), ApplyOptions::new()).unwrap();
+    assert!(result.report.all_applied_cleanly());
+
+    let content = fs::read_to_string(&file_path).unwrap();
+    assert_eq!(content, "def start():\n    bind(9090)\n");
+}
+
+#[test]
+fn test_aider_apply_patches_to_dir_multi_file() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file1_path = dir.path().join("f1.txt");
+    let file2_path = dir.path().join("f2.txt");
+    fs::write(&file1_path, "apple\n").unwrap();
+    fs::write(&file2_path, "banana\n").unwrap();
+
+    let diff = indoc! {r#"
+        f1.txt
+        <<<<<<< SEARCH
+        apple
+        =======
+        apricot
+        >>>>>>> REPLACE
+
+        f2.txt
+        <<<<<<< SEARCH
+        banana
+        =======
+        blueberry
+        >>>>>>> REPLACE
+    "#};
+
+    let patches = parse_auto(diff).unwrap();
+    assert_eq!(patches.len(), 2);
+
+    let batch = apply_patches_to_dir(&patches, dir.path(), ApplyOptions::new());
+    assert!(batch.all_succeeded());
+
+    assert_eq!(fs::read_to_string(file1_path).unwrap(), "apricot\n");
+    assert_eq!(fs::read_to_string(file2_path).unwrap(), "blueberry\n");
+}
+
+#[test]
+fn test_aider_fuzzy_matching_and_indentation() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("indented.py");
+    fs::write(
+        &file_path,
+        "def run():\n    # local comment\n    execute()\n",
+    )
+    .unwrap();
+
+    let diff = indoc! {r#"
+        indented.py
+        <<<<<<< SEARCH
+                # original comment
+                execute()
+        =======
+                # original comment
+                execute_new()
+        >>>>>>> REPLACE
+    "#};
+
+    let patches = parse_auto(diff).unwrap();
+    let result = apply_patch_to_file(&patches[0], dir.path(), ApplyOptions::new()).unwrap();
+    assert!(result.report.all_applied_cleanly());
+
+    let content = fs::read_to_string(&file_path).unwrap();
+    assert_eq!(
+        content,
+        "def run():\n    # local comment\n    execute_new()\n"
+    );
+}
+
+#[test]
+fn test_aider_unclosed_block_at_eof() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let diff = indoc! {r#"
+        truncated.txt
+        <<<<<<< SEARCH
+        old
+        =======
+        new
+    "#};
+    let patches = parse_aider(diff);
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].file_path.to_str(), Some("truncated.txt"));
+    assert_eq!(patches[0].hunks[0].removed_lines(), vec!["old"]);
+    assert_eq!(patches[0].hunks[0].added_lines(), vec!["new"]);
+}
+
+#[test]
 fn test_detect_markdown_with_language_hint() {
     let _ = env_logger::builder().is_test(true).try_init();
     let content = indoc! {r#"
@@ -7805,5 +8235,1799 @@ mod entropy_and_orphan_guards {
         assert!(content.contains(
             "This function performs two main tasks before setting the clipboard contents:"
         ));
+    }
+}
+
+mod wildcard_and_path_tests {
+    use indoc::indoc;
+    use mpatch::{
+        apply_patch_to_file, extract_file_path_from_line, is_ellipsis_line, is_plausible_file_path,
+        parse_auto, patch_content_str, ApplyOptions,
+    };
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_is_plausible_file_path_comprehensive() {
+        assert!(is_plausible_file_path(".gitignore"));
+        assert!(is_plausible_file_path(".env"));
+        assert!(is_plausible_file_path(".env.local"));
+        assert!(is_plausible_file_path(".dockerignore"));
+        assert!(is_plausible_file_path(".editorconfig"));
+        assert!(is_plausible_file_path("Makefile"));
+        assert!(is_plausible_file_path("Dockerfile"));
+        assert!(is_plausible_file_path("Jenkinsfile"));
+        assert!(is_plausible_file_path("src/components/My Component/Button.tsx"));
+        assert!(is_plausible_file_path("\"src/main.rs\""));
+        assert!(is_plausible_file_path("src/main.rs:42:10"));
+        assert!(is_plausible_file_path("schema.typescript"));
+
+        assert!(!is_plausible_file_path("Here is the code in main.rs"));
+        assert!(!is_plausible_file_path("Please check the following file:"));
+        assert!(!is_plausible_file_path("https://example.com/file.rs"));
+        assert!(!is_plausible_file_path(""));
+        assert!(!is_plausible_file_path("..."));
+    }
+
+    #[test]
+    fn test_extract_file_path_from_line_comprehensive() {
+        assert_eq!(extract_file_path_from_line("Update \"src/config.json\":").unwrap().to_str().unwrap(), "src/config.json");
+        assert_eq!(extract_file_path_from_line("In file 'src/server.ts':").unwrap().to_str().unwrap(), "src/server.ts");
+        assert_eq!(extract_file_path_from_line("See [src/auth.rs](src/auth.rs)").unwrap().to_str().unwrap(), "src/auth.rs");
+        assert_eq!(extract_file_path_from_line("File: `src/models/user.py`").unwrap().to_str().unwrap(), "src/models/user.py");
+        assert_eq!(extract_file_path_from_line("### src/server.ts:42").unwrap().to_str().unwrap(), "src/server.ts");
+        assert_eq!(extract_file_path_from_line("diff --git a/crates/core/src/lib.rs b/crates/core/src/lib.rs").unwrap().to_str().unwrap(), "crates/core/src/lib.rs");
+        assert_eq!(extract_file_path_from_line("1. .gitignore").unwrap().to_str().unwrap(), ".gitignore");
+        assert_eq!(extract_file_path_from_line("To fix this, edit src/utils/math.rs:").unwrap().to_str().unwrap(), "src/utils/math.rs");
+    }
+
+    #[test]
+    fn test_is_ellipsis_line_comprehensive() {
+        assert!(is_ellipsis_line("..."));
+        assert!(is_ellipsis_line("…"));
+        assert!(is_ellipsis_line("...."));
+        assert!(is_ellipsis_line("    // ... existing code ..."));
+        assert!(is_ellipsis_line("# ... rest of function ..."));
+        assert!(is_ellipsis_line("/* ... */"));
+        assert!(is_ellipsis_line("<!-- ... existing code ... -->"));
+        assert!(is_ellipsis_line("-- ..."));
+        assert!(is_ellipsis_line("; ..."));
+        assert!(is_ellipsis_line("[...]"));
+
+        assert!(!is_ellipsis_line("let x = 1;"));
+        assert!(!is_ellipsis_line("foo(...args);"));
+        assert!(!is_ellipsis_line("const { a, ...rest } = obj;"));
+        assert!(!is_ellipsis_line(""));
+        assert!(!is_ellipsis_line("// normal comment"));
+    }
+
+    #[test]
+    fn test_python_stub_literal_ellipsis_replacement() {
+        let original = indoc! {r#"
+            class Repository:
+                def fetch(self, id: int) -> dict:
+                    ...
+        "#};
+        let diff = indoc! {r#"
+            app.py
+            <<<<<<< SEARCH
+                def fetch(self, id: int) -> dict:
+                    ...
+            =======
+                def fetch(self, id: int) -> dict:
+                    return self.db.get(id)
+            >>>>>>> REPLACE
+        "#};
+        let patched = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+        assert!(patched.contains("return self.db.get(id)"));
+        assert!(!patched.contains("..."));
+    }
+
+    #[test]
+    fn test_aider_wildcard_boundary_ellipsis() {
+        let original = indoc! {r#"
+            def start():
+                setup()
+                old_call()
+                teardown()
+        "#};
+        let diff = indoc! {r#"
+            app.py
+            <<<<<<< SEARCH
+            // ... existing code ...
+                old_call()
+            // ... existing code ...
+            =======
+            // ... existing code ...
+                new_call()
+            // ... existing code ...
+            >>>>>>> REPLACE
+        "#};
+        let patched = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+        assert!(patched.contains("new_call()"));
+        assert!(patched.contains("setup()"));
+        assert!(patched.contains("teardown()"));
+        assert!(!patched.contains("existing code"));
+    }
+
+    #[test]
+    fn test_aider_wildcard_anchor_inside_function() {
+        let original = indoc! {r#"
+            def other():
+                val = 1
+
+            def calculate():
+                init_calc()
+                stage_1()
+                stage_2()
+                val = 1
+                return val
+        "#};
+        let diff = indoc! {r#"
+            app.py
+            <<<<<<< SEARCH
+            def calculate():
+                ...
+                val = 1
+            =======
+            def calculate():
+                ...
+                val = 2
+            >>>>>>> REPLACE
+        "#};
+        let patched = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+        assert!(patched.contains("def other():\n    val = 1"));
+        assert!(patched.contains("init_calc()"));
+        assert!(patched.contains("stage_2()"));
+        assert!(patched.contains("val = 2"));
+    }
+
+    #[test]
+    fn test_aider_wildcard_multi_hunk_split() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("main.py");
+        let mut original = String::from("import os\n\n");
+        for i in 0..50 {
+            original.push_str(&format!("def helper_{}(): pass\n", i));
+        }
+        original.push_str("\ndef run():\n    old_runner()\n");
+        fs::write(&file_path, &original).unwrap();
+
+        let diff = indoc! {r#"
+            main.py
+            <<<<<<< SEARCH
+            import os
+            ...
+            def run():
+                old_runner()
+            =======
+            import os
+            import sys
+            ...
+            def run():
+                new_runner()
+            >>>>>>> REPLACE
+        "#};
+        let patches = parse_auto(diff).unwrap();
+        let res = apply_patch_to_file(&patches[0], dir.path(), ApplyOptions::new()).unwrap();
+        assert!(res.report.all_applied_cleanly());
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("import os\nimport sys"));
+        assert!(content.contains("new_runner()"));
+        assert!(content.contains("def helper_25(): pass"));
+    }
+
+    #[test]
+    fn test_aider_wildcard_multi_hunk_with_shared_anchor() {
+        let original = indoc! {r#"
+            class Service:
+                def op_a(self):
+                    return "old_a"
+
+                def op_b(self):
+                    return "old_b"
+        "#};
+        let diff = indoc! {r#"
+            service.py
+            <<<<<<< SEARCH
+            class Service:
+                ...
+                def op_a(self):
+                    return "old_a"
+                ...
+                def op_b(self):
+                    return "old_b"
+            =======
+            class Service:
+                ...
+                def op_a(self):
+                    return "new_a"
+                ...
+                def op_b(self):
+                    return "new_b"
+            >>>>>>> REPLACE
+        "#};
+        let patched = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+        assert!(patched.contains("return \"new_a\""));
+        assert!(patched.contains("return \"new_b\""));
+        assert!(patched.contains("class Service:"));
+    }
+
+    #[test]
+    fn test_aider_wildcard_multiple_internal_ellipses() {
+        let original = indoc! {r#"
+            def workflow():
+                start()
+                step_a()
+                checkpoint_1()
+                step_b()
+                checkpoint_2()
+                finalize()
+        "#};
+        let diff = indoc! {r#"
+            wf.py
+            <<<<<<< SEARCH
+            def workflow():
+                ...
+                checkpoint_1()
+                ...
+                finalize()
+            =======
+            def workflow():
+                ...
+                checkpoint_1_v2()
+                ...
+                finalize_v2()
+            >>>>>>> REPLACE
+        "#};
+        let patched = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+        assert!(patched.contains("start()"));
+        assert!(patched.contains("step_a()"));
+        assert!(patched.contains("checkpoint_1_v2()"));
+        assert!(patched.contains("step_b()"));
+        assert!(patched.contains("checkpoint_2()"));
+        assert!(patched.contains("finalize_v2()"));
+    }
+
+    #[test]
+    fn test_aider_wildcard_runaway_gap_rejected() {
+        let mut original = String::from("def validate():\n    return False\n\n");
+        for i in 0..400 {
+            original.push_str(&format!("def intermediate_{}(): return False\n", i));
+        }
+        original.push_str("\ndef is_admin():\n    return True\n");
+
+        // validate() has 'return False', not 'return True'. The only 'return True' is in is_admin() 400 lines away.
+        let diff = indoc! {r#"
+            auth.py
+            <<<<<<< SEARCH
+            def validate():
+                ...
+                return True
+            =======
+            def validate():
+                ...
+                return False
+            >>>>>>> REPLACE
+        "#};
+        let res = patch_content_str(diff, Some(&original), &ApplyOptions::new());
+        assert!(res.is_err(), "Runaway gap spanning 400 lines across function boundaries must be rejected");
+    }
+
+    #[test]
+    fn test_aider_wildcard_low_entropy_anchor_rejected() {
+        let original = "}\n\ndef run():\n    return 1;\n";
+        let diff = indoc! {r#"
+            app.rs
+            <<<<<<< SEARCH
+            }
+            ...
+                return 1;
+            =======
+            }
+            ...
+                return 2;
+            >>>>>>> REPLACE
+        "#};
+        let res = patch_content_str(diff, Some(original), &ApplyOptions::new());
+        assert!(res.is_err(), "Lone bracket anchor across wildcard gap must be rejected");
+    }
+
+    #[test]
+    fn test_aider_wildcard_deletion() {
+        let original = indoc! {r#"
+            def deprecated_worker():
+                init()
+                run_cycles()
+                cleanup()
+                return False
+        "#};
+        let diff = indoc! {r#"
+            app.py
+            <<<<<<< SEARCH
+            def deprecated_worker():
+                ...
+                return False
+            =======
+            >>>>>>> REPLACE
+        "#};
+        let patched = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+        assert_eq!(patched.trim(), "");
+    }
+
+    #[test]
+    fn test_windows_paths_and_debug_line_formats() {
+        assert!(is_plausible_file_path(r"C:\Users\Project\src\main.rs"));
+        assert!(is_plausible_file_path(r"C:\Users\Project\src\main.rs:42:15"));
+        assert!(is_plausible_file_path("D:/workspace/app/Cargo.toml"));
+        assert!(is_plausible_file_path(r".\relative\path\file.rs"));
+
+        assert_eq!(
+            extract_file_path_from_line(r"Error at C:\Projects\repo\src\lib.rs:42:5:")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            r"C:\Projects\repo\src\lib.rs"
+        );
+        assert_eq!(
+            extract_file_path_from_line(r"Modified: D:/workspace/project/src/core.rs")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "D:/workspace/project/src/core.rs"
+        );
+    }
+
+    #[test]
+    fn test_compound_and_web_extensions_plausibility() {
+        assert!(is_plausible_file_path("components/Button.test.tsx"));
+        assert!(is_plausible_file_path("types/global.d.ts"));
+        assert!(is_plausible_file_path("archive/backup.tar.gz"));
+        assert!(is_plausible_file_path(".env.production"));
+        assert!(is_plausible_file_path(".env.staging.local"));
+        assert!(is_plausible_file_path("config/.gitattributes"));
+        assert!(is_plausible_file_path("frontend/.prettierrc"));
+
+        // Must reject web URLs and sentence abbreviations
+        assert!(!is_plausible_file_path("https://github.com/romelium/mpatch"));
+        assert!(!is_plausible_file_path("http://localhost:8080/api"));
+        assert!(!is_plausible_file_path("etc."));
+        assert!(!is_plausible_file_path("e.g."));
+        assert!(!is_plausible_file_path("vs."));
+    }
+
+    #[test]
+    fn test_extract_file_path_conversational_variations() {
+        assert_eq!(
+            extract_file_path_from_line("In src/database/models.py, replace the query:")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "src/database/models.py"
+        );
+        assert_eq!(
+            extract_file_path_from_line("// filepath: internal/auth/token.go")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "internal/auth/token.go"
+        );
+        assert_eq!(
+            extract_file_path_from_line("# filepath: scripts/deploy.py")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "scripts/deploy.py"
+        );
+        assert_eq!(
+            extract_file_path_from_line("Patch for `frontend/src/App.vue`:")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "frontend/src/App.vue"
+        );
+        assert_eq!(
+            extract_file_path_from_line("See [Auth Router](src/routes/auth.ts) for details.")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "src/routes/auth.ts"
+        );
+        assert_eq!(
+            extract_file_path_from_line("1. **config/default.toml**:")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "config/default.toml"
+        );
+        assert_eq!(
+            extract_file_path_from_line("- 'client/src/main.js'")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "client/src/main.js"
+        );
+    }
+
+    #[test]
+    fn test_multi_gap_wildcard_reconstruction_three_segments() {
+        let original = indoc! {r#"
+            fn process_pipeline() {
+                initialize_hardware();
+                // Hardware check
+                verify_bus();
+                stage_one_old();
+                // Intermediate sync
+                sync_clocks();
+                stage_two_old();
+                shutdown_hardware();
+            }
+        "#};
+        let diff = indoc! {r#"
+            pipeline.rs
+            <<<<<<< SEARCH
+            fn process_pipeline() {
+                ...
+                stage_one_old();
+                ...
+                stage_two_old();
+            =======
+            fn process_pipeline() {
+                ...
+                stage_one_new();
+                ...
+                stage_two_new();
+            >>>>>>> REPLACE
+        "#};
+        let patched = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+        assert!(patched.contains("stage_one_new();"));
+        assert!(patched.contains("stage_two_new();"));
+        assert!(patched.contains("initialize_hardware();"));
+        assert!(patched.contains("verify_bus();"));
+        assert!(patched.contains("sync_clocks();"));
+        assert!(patched.contains("shutdown_hardware();"));
+    }
+
+    #[test]
+    fn test_wildcard_with_smart_indentation_translation() {
+        // Target file uses Tab indentation
+        let original = "def compute():\n\tsetup_state()\n\tprepare_buffers()\n\told_value()\n\tfinalize()\n";
+
+        // Patch uses Space indentation and wildcard ellipsis
+        let diff = indoc! {r#"
+            worker.py
+            <<<<<<< SEARCH
+                def compute():
+                    # ... existing code ...
+                    old_value()
+            =======
+                def compute():
+                    # ... existing code ...
+                    new_value()
+            >>>>>>> REPLACE
+        "#};
+        let patched = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+
+        // The new value must be translated to match target file's tab indentation
+        assert!(patched.contains("\tnew_value()\n"));
+        assert!(patched.contains("\tprepare_buffers()\n"));
+        assert!(patched.contains("\tfinalize()\n"));
+    }
+
+    #[test]
+    fn test_wildcard_deletion_of_multi_line_class() {
+        let original = indoc! {r#"
+            class DeprecatedService:
+                def __init__(self):
+                    self.active = False
+
+                def run(self):
+                    execute_legacy()
+
+            class ModernService:
+                def run(self):
+                    execute_modern()
+        "#};
+        let diff = indoc! {r#"
+            service.py
+            <<<<<<< SEARCH
+            class DeprecatedService:
+                ...
+                def run(self):
+                    execute_legacy()
+            =======
+            >>>>>>> REPLACE
+        "#};
+        let patched = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+        assert!(!patched.contains("DeprecatedService"));
+        assert!(!patched.contains("execute_legacy"));
+        assert!(patched.contains("class ModernService:"));
+        assert!(patched.contains("execute_modern()"));
+    }
+
+    #[test]
+    fn test_wildcard_bounded_gap_success() {
+        // Anchor at line 1, 80 lines of code, target at line 82 (< 250 gap limit)
+        let mut original = String::from("def orchestrator():\n");
+        for i in 0..80 {
+            original.push_str(&format!("    step_{}();\n", i));
+        }
+        original.push_str("    old_checkpoint();\n");
+
+        let diff = indoc! {r#"
+            orch.py
+            <<<<<<< SEARCH
+            def orchestrator():
+                ...
+                old_checkpoint();
+            =======
+            def orchestrator():
+                ...
+                new_checkpoint();
+            >>>>>>> REPLACE
+        "#};
+        let patched = patch_content_str(diff, Some(&original), &ApplyOptions::new()).unwrap();
+        assert!(patched.contains("new_checkpoint();"));
+        assert!(patched.contains("step_0();"));
+        assert!(patched.contains("step_79();"));
+    }
+
+    #[test]
+    fn test_python_stub_protocol_literal_ellipsis_not_corrupted() {
+        let original = indoc! {r#"
+            from typing import Protocol
+
+            class Greeter(Protocol):
+                def greet(self, name: str) -> str:
+                    ...
+
+            class ConsoleGreeter:
+                def greet(self, name: str) -> str:
+                    return f"Hello, {name}"
+        "#};
+        let diff = indoc! {r#"
+            app.py
+            <<<<<<< SEARCH
+            class ConsoleGreeter:
+                def greet(self, name: str) -> str:
+                    return f"Hello, {name}"
+            =======
+            class ConsoleGreeter:
+                def greet(self, name: str) -> str:
+                    return f"Hi, {name}!"
+            >>>>>>> REPLACE
+        "#};
+        let patched = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+        // Greeter's literal ... must remain completely untouched
+        assert!(patched.contains("class Greeter(Protocol):"));
+        assert!(patched.contains("...\n"));
+        assert!(patched.contains("return f\"Hi, {name}!\""));
+    }
+
+    #[test]
+    fn test_aider_wildcard_multi_edit_with_distinct_anchors() {
+        let original = indoc! {r#"
+            def compute_tax(amount):
+                rate = 0.05
+                step_a()
+                step_b()
+                return amount * rate
+
+            def compute_discount(amount):
+                discount = 0.10
+                step_c()
+                step_d()
+                return amount * discount
+        "#};
+        let diff = indoc! {r#"
+            finance.py
+            <<<<<<< SEARCH
+            def compute_tax(amount):
+                ...
+                return amount * rate
+            =======
+            def compute_tax(amount):
+                ...
+                return amount * (rate + 0.01)
+            ...
+            def compute_discount(amount):
+                ...
+                return amount * discount
+            =======
+            def compute_discount(amount):
+                ...
+                return amount * (discount + 0.02)
+            >>>>>>> REPLACE
+        "#};
+        let patched = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+        assert!(patched.contains("return amount * (rate + 0.01)"));
+        assert!(patched.contains("return amount * (discount + 0.02)"));
+        assert!(patched.contains("step_a()"));
+        assert!(patched.contains("step_d()"));
+    }
+
+    #[test]
+    fn test_is_ellipsis_line_esoteric_formats() {
+        assert!(is_ellipsis_line("<!-- ... existing html ... -->"));
+        assert!(is_ellipsis_line("/* ... rest of query ... */"));
+        assert!(is_ellipsis_line("; ... existing lisp logic ..."));
+        assert!(is_ellipsis_line("-- ... existing lua code ..."));
+        assert!(is_ellipsis_line("rem ... existing batch logic ..."));
+        assert!(is_ellipsis_line("// ... snip ..."));
+        assert!(is_ellipsis_line("# ... remainder omitted ..."));
+        assert!(is_ellipsis_line("// ... code here ..."));
+        assert!(is_ellipsis_line("/* ... */"));
+        assert!(is_ellipsis_line("... existing implementation ..."));
+
+        // Non-ellipsis code or comments
+        assert!(!is_ellipsis_line("SELECT * FROM users;"));
+        assert!(!is_ellipsis_line("// Initialize variables"));
+        assert!(!is_ellipsis_line("# Configuration settings"));
+        assert!(!is_ellipsis_line("var x = [1, 2, 3];"));
+    }
+
+    #[test]
+    fn test_unified_diff_with_context_ellipsis_marker() {
+        let original = indoc! {r#"
+            pub fn setup_engine() {
+                configure_allocator();
+                init_telemetry();
+                verify_security();
+                start_worker();
+            }
+        "#};
+        let diff = indoc! {r#"
+            --- a/engine.rs
+            +++ b/engine.rs
+            @@ -1,6 +1,6 @@
+             pub fn setup_engine() {
+                 // ... existing code ...
+            -    start_worker();
+            +    start_worker_with_retries(3);
+             }
+        "#};
+        let patched = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+        assert!(patched.contains("start_worker_with_retries(3);"));
+        assert!(patched.contains("configure_allocator();"));
+        assert!(patched.contains("verify_security();"));
+    }
+
+    #[test]
+    fn test_wildcard_code_syntax_is_not_ellipsis_stress() {
+        let code_lines = [
+            "const merged = { ...baseConfig, debug: true };",
+            "const items = [ ...first, ...second ];",
+            "const copy = [...arr];",
+            "function dispatch(...args: any[]) {",
+            "int printf(const char *format, ...);",
+            "#define LOG(fmt, ...) printf(fmt, __VA_ARGS__)",
+            "let x = tensor[..., 0];",
+            "sub = matrix[:, ..., 2];",
+            "return (args + ...);",
+            "match x { 0...9 => true, _ => false }",
+            "for i in 0..=10 {",
+            "fn forward(data: ...T) {",
+            "val = Math.max(...numbers);",
+            "const { a, b, ...rest } = params;",
+            "append(slice, items...)",
+            "def process(*args, **kwargs):",
+            "let varargs = func(...);",
+        ];
+        for line in &code_lines {
+            assert!(
+                !is_ellipsis_line(line),
+                "Code construct was mistakenly identified as ellipsis: {:?}",
+                line
+            );
+        }
+    }
+
+    #[test]
+    fn test_wildcard_comment_and_syntax_variations_stress() {
+        let ellipsis_lines = [
+            // --- Bare dots, dashes, and unicode ---
+            "...",
+            "…",
+            "....",
+            ".....",
+            "......",
+            ".......",
+            "--------",
+            "~~~~~~~~",
+            "……",
+            "………",
+            "    ...",
+            "    …",
+            "\t...",
+            "\t\t...",
+            "   ...   ",
+            "   …   ",
+            "\t...\t",
+            "\t\t...\t\t",
+            "    ....    ",
+
+            // --- Enclosing brackets ---
+            "[...]",
+            "[ ... ]",
+            "[ … ]",
+            "[…]",
+            "(...)",
+            "( ... )",
+            "( … )",
+            "(…)",
+            "{...}",
+            "{ ... }",
+            "{ … }",
+            "{…}",
+            "<...>",
+            "< ... >",
+            "<…>",
+            "< … >",
+
+            // --- Bare comment markers with dots ---
+            "// ...",
+            "// ... ",
+            "// …",
+            "// … ",
+            "/// ...",
+            "/// …",
+            "/* ... */",
+            "/* … */",
+            "/*   ...   */",
+            "/*   …   */",
+            "/** ... */",
+            "/** … */",
+            "/*** ... ***/",
+            "# ...",
+            "# …",
+            "# ... ",
+            "## ...",
+            "### ...",
+            "-- ...",
+            "-- …",
+            "-- ... ",
+            "; ...",
+            "; …",
+            ";; ...",
+            ";; …",
+            "% ...",
+            "% …",
+            "%% ...",
+            "%% …",
+            "REM ...",
+            "rem ...",
+            "REM …",
+            "rem …",
+            "<!-- ... -->",
+            "<!-- … -->",
+            "<!--   ...   -->",
+            "{/* ... */}",
+            "{/* … */}",
+            "{/*   ...   */}",
+            "(* ... *)",
+            "(* … *)",
+            "''' ... '''",
+            "''' … '''",
+            "\"\"\" ... \"\"\"",
+            "\"\"\" … \"\"\"",
+
+            // --- C / C++ / Rust / Go / Java / C# / JS / TS (// and /* */) ---
+            "// ... existing code ...",
+            "// ... existing code",
+            "// ... existing logic ...",
+            "// ... existing implementation ...",
+            "// ... remaining code ...",
+            "// ... remaining code",
+            "// ... remaining lines ...",
+            "// ... unchanged code ...",
+            "// ... code unchanged ...",
+            "// ... unchanged ...",
+            "// ... remainder of function ...",
+            "// ... rest of function ...",
+            "// ... rest of method ...",
+            "// ... rest of class ...",
+            "// ... rest of file ...",
+            "// ... rest of implementation ...",
+            "// ... code omitted ...",
+            "// ... omitted code ...",
+            "// ... lines omitted ...",
+            "// ... content omitted ...",
+            "// ... snip ...",
+            "// ... snipped ...",
+            "// ... truncated ...",
+            "// ... code here ...",
+            "// ... earlier code ...",
+            "// ... later code ...",
+            "// ... previous code ...",
+            "// ... hidden ...",
+            "// ... skipped ...",
+            "// ... same as before ...",
+            "// ... original code ...",
+            "/// ... existing code ...",
+            "/// ... rest of function ...",
+            "/* ... existing code ... */",
+            "/* ... remaining code ... */",
+            "/* ... unchanged code ... */",
+            "/* ... code unchanged ... */",
+            "// ... unchanged ...",
+            "/* ... rest of function ... */",
+            "/* ... rest of method ... */",
+            "/* ... rest of class ... */",
+            "/* ... rest of file ... */",
+            "/* ... code omitted ... */",
+            "/* ... lines omitted ... */",
+            "/* ... snip ... */",
+            "/* ... truncated ... */",
+            "// ... code here ...",
+            "/** ... existing code ... */",
+            "/** ... unchanged ... */",
+            "/** ... rest of method ... */",
+
+            // --- Python / Shell / Ruby / YAML (#) ---
+            "# ... existing code ...",
+            "# ... remaining code ...",
+            "# ... unchanged code ...",
+            "# ... code unchanged ...",
+            "# ... unchanged ...",
+            "# ... rest of function ...",
+            "# ... rest of method ...",
+            "# ... rest of class ...",
+            "# ... rest of file ...",
+            "# ... rest of script ...",
+            "# ... code omitted ...",
+            "# ... lines omitted ...",
+            "# ... snip ...",
+            "# ... snipped ...",
+            "# ... truncated ...",
+            "# ... remainder of function ...",
+            "# ... earlier code ...",
+            "# ... later code ...",
+            "# ... previous code ...",
+            "# ... hidden ...",
+            "# ... skipped ...",
+            "# ... original code ...",
+            "## ... existing code ...",
+            "### ... existing code ...",
+            "# ... existing logic ...",
+
+            // --- HTML / XML / Markdown (<!-- -->) ---
+            "<!-- ... existing code ... -->",
+            "<!-- ... existing template ... -->",
+            "<!-- ... existing html ... -->",
+            "<!-- ... remaining code ... -->",
+            "<!-- ... unchanged code ... -->",
+            "<!-- ... unchanged ... -->",
+            "<!-- ... rest of template ... -->",
+            "<!-- ... rest of file ... -->",
+            "<!-- ... code omitted ... -->",
+            "<!-- ... lines omitted ... -->",
+            "<!-- ... snip ... -->",
+            "<!-- ... truncated ... -->",
+            "<!-- ... code here ... -->",
+
+            // --- SQL / Lua / Haskell (--) ---
+            "-- ... existing code ...",
+            "-- ... existing lua ...",
+            "-- ... remaining query ...",
+            "-- ... rest of query ...",
+            "-- ... unchanged code ...",
+            "-- ... unchanged ...",
+            "-- ... rest of function ...",
+            "-- ... code omitted ...",
+            "-- ... lines omitted ...",
+            "-- ... snip ...",
+            "-- ... truncated ...",
+
+            // --- Lisp / Assembly / INI (;) ---
+            "; ... existing code ...",
+            "; ... existing lisp ...",
+            "; ... rest of logic ...",
+            "; ... unchanged code ...",
+            "; ... unchanged ...",
+            "; ... code omitted ...",
+            "; ... lines omitted ...",
+            "; ... snip ...",
+            ";; ... existing code ...",
+            ";; ... rest of function ...",
+            ";; ... unchanged ...",
+
+            // --- Erlang / LaTeX / MATLAB (%) ---
+            "% ... existing code ...",
+            "% ... remaining code ...",
+            "% ... unchanged code ...",
+            "% ... unchanged ...",
+            "% ... rest of script ...",
+            "% ... code omitted ...",
+            "% ... lines omitted ...",
+            "% ... snip ...",
+            "%% ... existing code ...",
+            "%% ... unchanged ...",
+
+            // --- Windows Batch (REM / rem) ---
+            "REM ... existing code ...",
+            "REM ... remaining code ...",
+            "REM ... unchanged code ...",
+            "REM ... unchanged ...",
+            "rem ... rest of script ...",
+            "REM ... rest of batch ...",
+            "REM ... code omitted ...",
+            "REM ... snip ...",
+            "rem ... existing code ...",
+            "rem ... remaining code ...",
+            "rem ... unchanged ...",
+            "rem ... rest of script ...",
+            "rem ... code omitted ...",
+            "rem ... snip ...",
+
+            // --- React / JSX ({/* */}) ---
+            "{/* ... existing code ... */}",
+            "{/* ... existing jsx ... */}",
+            "{/* ... remaining code ... */}",
+            "{/* ... unchanged code ... */}",
+            "{/* ... unchanged ... */}",
+            "{/* ... rest of component ... */}",
+            "{/* ... code omitted ... */}",
+            "{/* ... lines omitted ... */}",
+            "{/* ... snip ... */}",
+
+            // --- OCaml / Pascal / ML ((* *)) ---
+            "(* ... existing code ... *)",
+            "(* ... remaining code ... *)",
+            "(* ... unchanged code ... *)",
+            "(* ... unchanged ... *)",
+            "(* ... rest of function ... *)",
+            "(* ... code omitted ... *)",
+            "(* ... lines omitted ... *)",
+            "(* ... snip ... *)",
+
+            // --- Python Docstrings (''' and """) ---
+            "''' ... existing code ... '''",
+            "''' ... remaining code ... '''",
+            "''' ... unchanged code ... '''",
+            "''' ... unchanged ... '''",
+            "''' ... rest of function ... '''",
+            "''' ... code omitted ... '''",
+            "''' ... snip ... '''",
+            "\"\"\" ... existing code ... \"\"\"",
+            "\"\"\" ... remaining code ... \"\"\"",
+            "\"\"\" ... unchanged code ... \"\"\"",
+            "\"\"\" ... unchanged ... \"\"\"",
+            "\"\"\" ... rest of function ... \"\"\"",
+            "\"\"\" ... code omitted ... \"\"\"",
+            "\"\"\" ... snip ... \"\"\"",
+
+            // --- Unicode ellipsis phrases ---
+            "// … existing code …",
+            "// … rest of function …",
+            "// … code omitted …",
+            "// … unchanged …",
+            "// … snip …",
+            "/* … existing code … */",
+            "/* … unchanged … */",
+            "/* … code omitted … */",
+            "# … existing code …",
+            "# … rest of function …",
+            "# … code omitted …",
+            "# … unchanged …",
+            "# … snip …",
+            "<!-- … existing code … -->",
+            "<!-- … unchanged … -->",
+            "<!-- … snip … -->",
+            "-- … existing code …",
+            "-- … remaining query …",
+            "-- … unchanged …",
+            "; … existing code …",
+            "; … rest of logic …",
+            "% … existing code …",
+            "% … code omitted …",
+            "{/* … existing code … */}",
+            "{/* … unchanged … */}",
+            "(* … existing code … *)",
+            "(* … unchanged … *)",
+            "''' … existing code … '''",
+            "\"\"\" … existing code … \"\"\"",
+            "REM … existing code …",
+            "rem … existing code …",
+
+            // --- Indented and tab-padded lines ---
+            "    // ... existing code ...",
+            "\t// ... existing code ...",
+            "\t\t// ... existing code ...",
+            "    # ... existing code ...",
+            "\t# ... existing code ...",
+            "    /* ... existing code ... */",
+            "\t/* ... existing code ... */",
+            "    <!-- ... existing code ... -->",
+            "    -- ... existing code ...",
+            "    ; ... existing code ...",
+            "    % ... existing code ...",
+            "    REM ... existing code ...",
+            "    {/* ... existing code ... */}",
+            "    (* ... existing code ... *)",
+            "    ''' ... existing code ... '''",
+            "    \"\"\" ... existing code ... \"\"\"",
+            "    // … existing code …",
+            "    # … existing code …",
+            "    /* … existing code … */",
+        ];
+        for line in &ellipsis_lines {
+            assert!(
+                is_ellipsis_line(line),
+                "Valid ellipsis variation was not identified: {:?}",
+                line
+            );
+        }
+    }
+
+    #[test]
+    fn test_wildcard_same_length_gap_and_ellipsis_lines() {
+        let original = indoc! {r#"
+            def calculate(x):
+                multiplier = 2
+                return x * multiplier
+        "#};
+        let diff = indoc! {r#"
+            calc.py
+            <<<<<<< SEARCH
+            def calculate(x):
+                ...
+                return x * multiplier
+            =======
+            def calculate(x):
+                ...
+                return x * (multiplier + 1)
+            >>>>>>> REPLACE
+        "#};
+        let patched = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+        assert!(
+            patched.contains("multiplier = 2"),
+            "Gap line must be preserved even when gap line count equals ellipsis line count"
+        );
+        assert!(patched.contains("return x * (multiplier + 1)"));
+    }
+
+    #[test]
+    fn test_wildcard_five_segment_deep_pipeline_preserves_all_gaps() {
+        let mut original = String::from("fn run_complex_pipeline() {\n    init_hardware();\n");
+        for i in 0..10 {
+            original.push_str(&format!("    let hw_reg_{} = read_reg({});\n", i, i));
+        }
+        original.push_str("    stage_one_old();\n");
+        for i in 0..15 {
+            original.push_str(&format!("    let socket_{} = connect_peer({});\n", i, i));
+        }
+        original.push_str("    stage_two_old();\n");
+        for i in 0..20 {
+            original.push_str(&format!("    let worker_{} = spawn_thread({});\n", i, i));
+        }
+        original.push_str("    stage_three_old();\n");
+        for i in 0..12 {
+            original.push_str(&format!("    let signal_{} = register_signal({});\n", i, i));
+        }
+        original.push_str("    stage_four_old();\n    shutdown_hardware();\n}\n");
+
+        let diff = indoc! {r#"
+            pipeline.rs
+            <<<<<<< SEARCH
+            fn run_complex_pipeline() {
+                init_hardware();
+                ...
+                stage_one_old();
+                ...
+                stage_two_old();
+                ...
+                stage_three_old();
+                ...
+                stage_four_old();
+                shutdown_hardware();
+            =======
+            fn run_complex_pipeline() {
+                init_hardware();
+                ...
+                stage_one_new();
+                ...
+                stage_two_new();
+                ...
+                stage_three_new();
+                ...
+                stage_four_new();
+                shutdown_hardware();
+            >>>>>>> REPLACE
+        "#};
+        let patched = patch_content_str(diff, Some(&original), &ApplyOptions::new()).unwrap();
+        assert!(patched.contains("stage_one_new();"));
+        assert!(patched.contains("stage_two_new();"));
+        assert!(patched.contains("stage_three_new();"));
+        assert!(patched.contains("stage_four_new();"));
+        assert!(!patched.contains("stage_one_old();"));
+        assert!(!patched.contains("stage_two_old();"));
+        assert!(!patched.contains("stage_three_old();"));
+        assert!(!patched.contains("stage_four_old();"));
+
+        assert!(patched.contains("let hw_reg_0 = read_reg(0);"));
+        assert!(patched.contains("let hw_reg_9 = read_reg(9);"));
+        assert!(patched.contains("let socket_0 = connect_peer(0);"));
+        assert!(patched.contains("let socket_14 = connect_peer(14);"));
+        assert!(patched.contains("let worker_0 = spawn_thread(0);"));
+        assert!(patched.contains("let worker_19 = spawn_thread(19);"));
+        assert!(patched.contains("let signal_0 = register_signal(0);"));
+        assert!(patched.contains("let signal_11 = register_signal(11);"));
+    }
+
+    #[test]
+    fn test_wildcard_zero_length_gap_adjacent_anchors() {
+        let original = indoc! {r#"
+            def workflow():
+                step_a()
+                step_b()
+        "#};
+        let diff = indoc! {r#"
+            wf.py
+            <<<<<<< SEARCH
+            def workflow():
+                step_a()
+                ...
+                step_b()
+            =======
+            def workflow():
+                step_a()
+                inserted_between()
+                step_b()
+            >>>>>>> REPLACE
+        "#};
+        let patched = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+        assert!(patched.contains("step_a()\n    inserted_between()\n    step_b()"));
+    }
+
+    #[test]
+    fn test_wildcard_ellipsis_removal_deletes_gap_completely() {
+        let original = indoc! {r#"
+            def authenticate(user, password):
+                log_attempt(user)
+                legacy_auth_1(user)
+                legacy_auth_2(user)
+                legacy_auth_3(user)
+                return grant_token(user)
+        "#};
+        let diff = indoc! {r#"
+            auth.py
+            <<<<<<< SEARCH
+            def authenticate(user, password):
+                log_attempt(user)
+                ...
+                return grant_token(user)
+            =======
+            def authenticate(user, password):
+                log_attempt(user)
+                return grant_token(user)
+            >>>>>>> REPLACE
+        "#};
+        let patched = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+        assert!(patched.contains("log_attempt(user)\n    return grant_token(user)"));
+        assert!(!patched.contains("legacy_auth_1"));
+        assert!(!patched.contains("legacy_auth_2"));
+        assert!(!patched.contains("legacy_auth_3"));
+    }
+
+    #[test]
+    fn test_wildcard_gap_replaced_with_new_logic() {
+        let original = indoc! {r#"
+            def process_items(items):
+                validate_input(items)
+                for item in items:
+                    step_1(item)
+                    step_2(item)
+                    step_3(item)
+                return finalize()
+        "#};
+        let diff = indoc! {r#"
+            proc.py
+            <<<<<<< SEARCH
+            def process_items(items):
+                validate_input(items)
+                ...
+                return finalize()
+            =======
+            def process_items(items):
+                validate_input(items)
+                batch_parallel_process(items)
+                return finalize()
+            >>>>>>> REPLACE
+        "#};
+        let patched = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+        assert!(patched.contains("batch_parallel_process(items)"));
+        assert!(!patched.contains("step_1(item)"));
+        assert!(!patched.contains("step_2(item)"));
+        assert!(!patched.contains("step_3(item)"));
+        assert!(patched.contains("validate_input(items)"));
+        assert!(patched.contains("return finalize()"));
+    }
+
+    #[test]
+    fn test_wildcard_identical_anchors_disambiguation_stress() {
+        let mut original = String::new();
+        for i in 0..8 {
+            original.push_str(&format!(
+                "def worker_{}():\n    acquire_lock()\n    perform_task({})\n    release_lock()\n\n",
+                i, i
+            ));
+        }
+        let diff = indoc! {r#"
+            workers.py
+            <<<<<<< SEARCH
+            def worker_4():
+                ...
+                release_lock()
+            =======
+            def worker_4():
+                ...
+                release_lock()
+                audit_log("worker_4_done")
+            >>>>>>> REPLACE
+        "#};
+        let patched = patch_content_str(diff, Some(&original), &ApplyOptions::new()).unwrap();
+        assert!(patched.contains("audit_log(\"worker_4_done\")"));
+        for i in 0..8 {
+            if i == 4 {
+                assert!(patched.contains("def worker_4():\n    acquire_lock()\n    perform_task(4)\n    release_lock()\n    audit_log(\"worker_4_done\")"));
+            } else {
+                assert!(patched.contains(&format!("def worker_{}():\n    acquire_lock()\n    perform_task({})\n    release_lock()\n", i, i)));
+            }
+        }
+    }
+
+    #[test]
+    fn test_wildcard_reverse_anchor_order_must_fail() {
+        let original = indoc! {r#"
+            def shutdown_system():
+                power_off()
+
+            def startup_system():
+                power_on()
+        "#};
+        let diff = indoc! {r#"
+            system.py
+            <<<<<<< SEARCH
+            def startup_system():
+                ...
+                power_off()
+            =======
+            def startup_system():
+                ...
+                power_off_safely()
+            >>>>>>> REPLACE
+        "#};
+        let res = patch_content_str(diff, Some(original), &ApplyOptions::new());
+        assert!(res.is_err(), "Anchors appearing in reverse order must be rejected");
+    }
+
+    #[test]
+    fn test_wildcard_multi_block_aider_in_single_file_stress() {
+        let original = indoc! {r#"
+            def setup_database():
+                cfg = load_db_config()
+                validate_cfg(cfg)
+                pool = create_pool(cfg)
+                return pool
+
+            def run_migrations():
+                init_migrator()
+                apply_pending()
+                record_migration_hash()
+                return True
+
+            def teardown_database():
+                flush_wal()
+                close_active_conns()
+                shutdown_pool()
+                return True
+        "#};
+        let diff = indoc! {r#"
+            db.py
+            <<<<<<< SEARCH
+            def setup_database():
+                ...
+                pool = create_pool(cfg)
+            =======
+            def setup_database():
+                ...
+                verify_ssl_certs(cfg)
+                pool = create_pool(cfg)
+            >>>>>>> REPLACE
+
+            <<<<<<< SEARCH
+            def teardown_database():
+                ...
+                shutdown_pool()
+            =======
+            def teardown_database():
+                ...
+                shutdown_pool()
+                log_clean_shutdown()
+            >>>>>>> REPLACE
+        "#};
+        let patched = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+        assert!(patched.contains("verify_ssl_certs(cfg)"));
+        assert!(patched.contains("log_clean_shutdown()"));
+        assert!(patched.contains("apply_pending()"));
+    }
+
+    #[test]
+    fn test_wildcard_in_nested_control_flow_with_duplicate_tokens() {
+        let original = indoc! {r#"
+            fn process_event(event: Event) -> Result<(), AppError> {
+                match event {
+                    Event::Data(buffer) => {
+                        for chunk in buffer {
+                            if chunk.is_corrupted() {
+                                return Err(AppError::Invalid);
+                            }
+                        }
+                        finalize_data();
+                        Ok(())
+                    }
+                    Event::Disconnect => {
+                        log_disconnect();
+                        return Err(AppError::Invalid);
+                    }
+                }
+            }
+        "#};
+        let diff = indoc! {r#"
+            event.rs
+            <<<<<<< SEARCH
+            Event::Data(buffer) => {
+                for chunk in buffer {
+                    ...
+                    return Err(AppError::Invalid);
+            =======
+            Event::Data(buffer) => {
+                for chunk in buffer {
+                    ...
+                    return Err(AppError::CorruptedPayload);
+            >>>>>>> REPLACE
+        "#};
+        let patched = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+        assert!(patched.contains("return Err(AppError::CorruptedPayload);"));
+        assert!(patched.contains("Event::Disconnect => {\n            log_disconnect();\n            return Err(AppError::Invalid);"));
+    }
+
+    #[test]
+    fn test_wildcard_consecutive_ellipses_handled_cleanly() {
+        let original = indoc! {r#"
+            def compute():
+                step_1()
+                step_2()
+                step_3()
+                return 42
+        "#};
+        let diff = indoc! {r#"
+            comp.py
+            <<<<<<< SEARCH
+            def compute():
+                ...
+                ...
+                return 42
+            =======
+            def compute():
+                ...
+                ...
+                return 100
+            >>>>>>> REPLACE
+        "#};
+        let patched = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+        assert!(patched.contains("step_1()"));
+        assert!(patched.contains("step_2()"));
+        assert!(patched.contains("step_3()"));
+        assert!(patched.contains("return 100"));
+    }
+}
+
+mod false_positive_and_negative_tests {
+    use indoc::indoc;
+    use mpatch::{
+        apply_patch_to_file, detect_patch, extract_file_path_from_line, is_ellipsis_line,
+        is_plausible_file_path, parse_auto, parse_patches, patch_content_str, ApplyOptions,
+        PatchFormat,
+    };
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_is_ellipsis_line_code_constructs_false_positive_rejection() {
+        let code_lines = [
+            // JS / TS spread & rest syntax
+            "const newObj = { ...oldObj, key: 'val' };",
+            "const copy = [...original];",
+            "function sum(...nums: number[]) {",
+            "const { a, b, ...others } = data;",
+            "<Component {...props} className=\"btn\" />",
+            "log(...args);",
+            "new Array(...elements);",
+            "type Fn = (...params: string[]) => void;",
+            // Python Ellipsis & variadics
+            "tensor[..., 0] = 5",
+            "sub_matrix = data[:, ..., 1]",
+            "def method(self, *args: Any, **kwargs: Any) -> tuple[int, ...]:",
+            "arr[...] = 0",
+            // C / C++ varargs & fold expressions
+            "int printf(const char* format, ...);",
+            "int scanf(const char* format, ...);",
+            "#define DBG(fmt, ...) fprintf(stderr, fmt, __VA_ARGS__)",
+            "template<typename... Ts> struct Tuple {};",
+            "return (... + args);",
+            "(args + ...);",
+            // Rust syntax
+            "for idx in 0..=10 {",
+            "match val { 0...9 => true, _ => false }",
+            "Point { x: 10, ..Default::default() };",
+            "let Config { port, .. } = cfg;",
+            // Go variadics
+            "func Variadic(vals ...string)",
+            "items = append(items, extra...)",
+            "fmt.Sprintf(\"%s\", args...)",
+            // PHP variadics
+            "function sum(...$numbers) {",
+            "call_user_func($fn, ...$params);",
+            // Kotlin spread
+            "val list = listOf(*items)",
+            // Code comments that happen to have dots at the end
+            "// Loading system configuration...",
+            "// Initializing telemetry client...",
+            "// Connecting to remote host...",
+            "// Processing incoming requests...",
+            "// Please wait...",
+            "// TODO: Refactor this logic later...",
+            "// FIXME: Temporary hack for legacy compatibility...",
+            "/* Calculating running average... */",
+            "<!-- Loading spinner placeholder... -->",
+            "# Saving database checkpoint...",
+            "# Installing runtime dependencies...",
+            "-- Querying customer records...",
+            "; Synchronizing worker threads...",
+            "// Waiting for server response...",
+            // String literals with dots
+            "let status = \"Connecting...\";",
+            "const errorMsg = \"Something went wrong...\";",
+            "printf(\"Loading assets...\\n\");",
+            "throw new Error(\"Operation timed out...\");",
+            "<p>Loading content...</p>",
+            "<div>Please wait while processing...</div>",
+            // Other
+            "{ element1, ... }",
+        ];
+        for line in &code_lines {
+            assert!(
+                !is_ellipsis_line(line),
+                "False positive: Code/text construct was mistakenly identified as ellipsis: {:?}",
+                line
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_ellipsis_line_tricky_variations_false_negative_prevention() {
+        let ellipsis_lines = [
+            // Uppercase and title case keywords
+            "// ... EXISTING CODE ...",
+            "// ... Existing Code ...",
+            "// ... UNCHANGED ...",
+            "// ... Unchanged Code ...",
+            "// ... REST OF FILE ...",
+            "// ... Rest of Method ...",
+            "// ... CODE OMITTED ...",
+            "// ... LINES OMITTED ...",
+            "// ... SNIP ...",
+            // Parentheses and brackets inside comments
+            "// ... (unchanged code) ...",
+            "// ... (existing code) ...",
+            "/* ... [rest of implementation] ... */",
+            "<!-- ... (existing template) ... -->",
+            "# ... [existing logic] ...",
+            "-- ... (remaining query) ...",
+            "; ... (rest of function) ...",
+            // Banners and decorations around ellipsis
+            "// ================= ... existing code ... =================",
+            "// ----------------- ... existing code ... -----------------",
+            "// ***************** ... existing code ... *****************",
+            "// ~~~~~~~~~~~~~~~~~ ... existing code ... ~~~~~~~~~~~~~~~~~",
+            "// >>> ... existing code ... <<<",
+            "// <<< ... existing code ... >>>",
+            // Additional trigger phrases
+            "// ... more code here ...",
+            "// ... earlier logic ...",
+            "// ... later logic ...",
+            "// ... previous logic ...",
+            "// ... original implementation ...",
+            "// ... remainder of script ...",
+        ];
+        for line in &ellipsis_lines {
+            assert!(
+                is_ellipsis_line(line),
+                "False negative: Valid ellipsis was not recognized: {:?}",
+                line
+            );
+        }
+    }
+
+    #[test]
+    fn test_path_detection_conversational_text_false_positive_rejection() {
+        let non_paths = [
+            "Please look at the changes.",
+            "I have updated the code.",
+            "The bug was caused by a null pointer.",
+            "Run with --dry-run.",
+            "Version 2.0.1",
+            "Check if it's true vs. false.",
+            "Tested on Python 3.10.",
+            "https://github.com/romelium/mpatch/issues/12",
+            "https://example.com/downloads/v1.0.tar.gz",
+            "http://localhost:8080/metrics",
+            "Run git commit -m 'initial commit' to save.",
+            "cargo test --all-features",
+            "pip install .[test]",
+            "10/20 tests passed successfully.",
+            "Formula: a/b = c/d",
+        ];
+        for text in &non_paths {
+            assert!(
+                !is_plausible_file_path(text),
+                "False positive: Conversational text was treated as plausible file path: {:?}",
+                text
+            );
+        }
+
+        let non_path_lines = [
+            "Here is the diff:",
+            "Please check the following code snippet:",
+            "Let me know if this works.",
+            "I've modified the file to fix the bug.",
+            "The changes are shown below:",
+            "See details at https://github.com/romelium/mpatch",
+            "This resolves issue #42 on GitHub.",
+            "Output of running `cargo check`:",
+        ];
+        for line in &non_path_lines {
+            assert_eq!(
+                extract_file_path_from_line(line),
+                None,
+                "False positive: File path extracted from non-path conversational line: {:?}",
+                line
+            );
+        }
+    }
+
+    #[test]
+    fn test_path_detection_valid_paths_false_negative_prevention() {
+        let valid_paths = [
+            "src/main.rs",
+            "internal/auth/token.go",
+            "crates/core/src/lib.rs",
+            "frontend/src/App.vue",
+            "config/default.toml",
+            "assets/styles/main.scss",
+            ".gitignore",
+            ".env",
+            ".env.production",
+            "Makefile",
+            "Dockerfile",
+            "Jenkinsfile",
+            "package.json",
+            "types/index.d.ts",
+            "bundle.min.js",
+            "src/components/My Component/Button.tsx",
+            r"C:\Projects\repo\src\main.rs",
+            "D:/workspace/app/Cargo.toml",
+            "src/lib.rs:120:5",
+        ];
+        for path in &valid_paths {
+            assert!(
+                is_plausible_file_path(path),
+                "False negative: Valid file path was not recognized: {:?}",
+                path
+            );
+        }
+
+        let conversational_path_lines = [
+            ("In src/main.rs, change the function:", "src/main.rs"),
+            ("Update 'config/settings.toml' with the new port:", "config/settings.toml"),
+            ("Check `lib/utils.py` for helper functions", "lib/utils.py"),
+            ("// filepath: internal/auth/token.go", "internal/auth/token.go"),
+            ("# filepath: scripts/deploy.py", "scripts/deploy.py"),
+            ("Patch for `frontend/src/App.vue`:", "frontend/src/App.vue"),
+            ("1. **config/default.toml**:", "config/default.toml"),
+            ("See [Auth Router](src/routes/auth.ts) for details.", "src/routes/auth.ts"),
+            ("--- a/crates/core/src/lib.rs", "crates/core/src/lib.rs"),
+            ("diff --git a/src/index.ts b/src/index.ts", "src/index.ts"),
+        ];
+        for (line, expected) in &conversational_path_lines {
+            let extracted = extract_file_path_from_line(line);
+            assert_eq!(
+                extracted.as_deref().and_then(|p| p.to_str()),
+                Some(*expected),
+                "False negative: Failed to extract expected path from line: {:?}",
+                line
+            );
+        }
+    }
+
+    #[test]
+    fn test_detect_patch_false_positive_rejection() {
+        let table = indoc! {r#"
+            | Name | Version | Status |
+            | --- | --- | --- |
+            | mpatch | 1.6.4 | Stable |
+        "#};
+        assert_eq!(detect_patch(table), PatchFormat::Unknown);
+
+        let list = indoc! {r#"
+            Review Notes:
+            + Performance improved by 20%
+            - Memory usage slightly higher
+            + Code is cleaner
+            - Missing test coverage
+        "#};
+        assert_eq!(detect_patch(list), PatchFormat::Unknown);
+
+        let bitwise = indoc! {r#"
+            let flag = 1 << 8;
+            let mask = flag >> 2;
+        "#};
+        assert_eq!(detect_patch(bitwise), PatchFormat::Unknown);
+
+        let comparisons = indoc! {r#"
+            if x <= 100 && y >= 200 {
+                do_something();
+            }
+        "#};
+        assert_eq!(detect_patch(comparisons), PatchFormat::Unknown);
+
+        let h1 = indoc! {r#"
+            Installation Guide
+            ==================
+            Follow the instructions below.
+        "#};
+        assert_eq!(detect_patch(h1), PatchFormat::Unknown);
+
+        let h2 = indoc! {r#"
+            Troubleshooting
+            ---------------
+            Check your configuration.
+        "#};
+        assert_eq!(detect_patch(h2), PatchFormat::Unknown);
+
+        let banner = indoc! {r#"
+            // ==========================================
+            // ============ WORKER DISPATCH =============
+            // ==========================================
+        "#};
+        assert_eq!(detect_patch(banner), PatchFormat::Unknown);
+
+        let plain_code = indoc! {r#"
+            ```rust
+            pub fn hello() {
+                println!("Hello world");
+            }
+            ```
+        "#};
+        assert_eq!(detect_patch(plain_code), PatchFormat::Unknown);
+
+        let dangling_header = indoc! {r#"
+            --- a/some_file.txt
+            Just regular text without plus plus plus.
+        "#};
+        assert_eq!(detect_patch(dangling_header), PatchFormat::Unknown);
+    }
+
+    #[test]
+    fn test_patch_apply_similar_functions_no_false_positive_clobber() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("serializer.rs");
+        let original = indoc! {r#"
+            pub fn serialize_json<T: Serialize>(val: &T) -> Result<String, Error> {
+                let mut buf = String::new();
+                let mut ser = Serializer::new(&mut buf);
+                val.serialize(&mut ser)?;
+                validate_output(&buf)?;
+                Ok(buf)
+            }
+
+            pub fn serialize_yaml<T: Serialize>(val: &T) -> Result<String, Error> {
+                let mut buf = String::new();
+                let mut ser = Serializer::new(&mut buf);
+                val.serialize(&mut ser)?;
+                validate_output(&buf)?;
+                Ok(buf)
+            }
+        "#};
+        fs::write(&file_path, original).unwrap();
+
+        let diff = indoc! {r#"
+            --- a/serializer.rs
+            +++ b/serializer.rs
+            @@ -10,6 +10,6 @@
+             pub fn serialize_yaml<T: Serialize>(val: &T) -> Result<String, Error> {
+                 let mut buf = String::new();
+                 let mut ser = Serializer::new(&mut buf);
+                 val.serialize(&mut ser)?;
+            -    validate_output(&buf)?;
+            +    validate_yaml_output(&buf)?;
+                 Ok(buf)
+             }
+        "#};
+        let patches = parse_auto(diff).unwrap();
+        let res = apply_patch_to_file(&patches[0], dir.path(), ApplyOptions::new()).unwrap();
+        assert!(res.report.all_applied_cleanly());
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("validate_yaml_output(&buf)?;"));
+        assert!(content.contains("pub fn serialize_json<T: Serialize>(val: &T) -> Result<String, Error> {\n    let mut buf = String::new();\n    let mut ser = Serializer::new(&mut buf);\n    val.serialize(&mut ser)?;\n    validate_output(&buf)?;\n    Ok(buf)\n}"));
+    }
+
+    #[test]
+    fn test_wildcard_similar_loop_constructs_no_false_positive() {
+        let original = indoc! {r#"
+            fn handle_incoming(items: &[Item]) {
+                log("incoming");
+                for item in items {
+                    process(item);
+                }
+                finalize_incoming();
+            }
+
+            fn handle_outgoing(items: &[Item]) {
+                log("outgoing");
+                for item in items {
+                    process(item);
+                }
+                finalize_outgoing();
+            }
+        "#};
+        let diff = indoc! {r#"
+            handler.rs
+            <<<<<<< SEARCH
+            fn handle_outgoing(items: &[Item]) {
+                ...
+                for item in items {
+                    process(item);
+                }
+                finalize_outgoing();
+            =======
+            fn handle_outgoing(items: &[Item]) {
+                ...
+                for item in items {
+                    process_outgoing(item);
+                }
+                finalize_outgoing();
+            >>>>>>> REPLACE
+        "#};
+        let patched = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+        assert!(patched.contains("process_outgoing(item);"));
+        assert!(patched.contains("fn handle_incoming(items: &[Item]) {\n    log(\"incoming\");\n    for item in items {\n        process(item);\n    }\n    finalize_incoming();\n}"));
+    }
+
+    #[test]
+    fn test_wildcard_empty_or_whitespace_gap_handling() {
+        let original = "def start_job():\n    setup()\n\n    \n\t\n    finish()\n";
+        let diff = indoc! {r#"
+            job.py
+            <<<<<<< SEARCH
+            def start_job():
+                setup()
+                ...
+                finish()
+            =======
+            def start_job():
+                setup()
+                ...
+                record_completion()
+                finish()
+            >>>>>>> REPLACE
+        "#};
+        let patched = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+        assert_eq!(
+            patched,
+            "def start_job():\n    setup()\n\n    \n\t\n    record_completion()\n    finish()\n"
+        );
     }
 }

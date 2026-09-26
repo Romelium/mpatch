@@ -881,12 +881,13 @@ impl PyBatchResult {
 ///     diff (str): The patch content.
 ///
 /// Returns:
-///     str: 'Markdown', 'Unified', 'Conflict', or 'Unknown'.
+///     str: 'Markdown', 'Unified', 'Aider', 'Conflict', or 'Unknown'.
 fn detect_patch(diff: &str) -> String {
     match ::mpatch::detect_patch(diff) {
         ::mpatch::PatchFormat::Markdown => "Markdown".to_string(),
         ::mpatch::PatchFormat::Unified => "Unified".to_string(),
         ::mpatch::PatchFormat::Conflict => "Conflict".to_string(),
+        ::mpatch::PatchFormat::Aider => "Aider".to_string(),
         ::mpatch::PatchFormat::Unknown => "Unknown".to_string(),
         _ => "Unknown".to_string(),
     }
@@ -959,6 +960,25 @@ fn parse_conflict_markers(py: Python<'_>, diff: &str) -> Vec<PyPatch> {
     let diff_str = diff.to_string();
     py.detach(move || {
         ::mpatch::parse_conflict_markers(&diff_str)
+            .into_iter()
+            .map(|p| PyPatch { inner: p })
+            .collect()
+    })
+}
+
+#[pyfunction]
+#[pyo3(signature = (diff))]
+/// Parses a string containing "Aider" style search/replace blocks (<<<<<<< SEARCH, =======, >>>>>>> REPLACE).
+///
+/// Args:
+///     diff (str): The Aider search/replace content.
+///
+/// Returns:
+///     list[Patch]: A list of parsed patches.
+fn parse_aider(py: Python<'_>, diff: &str) -> Vec<PyPatch> {
+    let diff_str = diff.to_string();
+    py.detach(move || {
+        ::mpatch::parse_aider(&diff_str)
             .into_iter()
             .map(|p| PyPatch { inner: p })
             .collect()
@@ -1203,6 +1223,7 @@ fn mpatch(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parse_diffs, m)?)?;
     m.add_function(wrap_pyfunction!(parse_patches, m)?)?;
     m.add_function(wrap_pyfunction!(parse_conflict_markers, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_aider, m)?)?;
     m.add_function(wrap_pyfunction!(invert_patches, m)?)?;
     m.add_function(wrap_pyfunction!(create_unified_diff, m)?)?;
     m.add_function(wrap_pyfunction!(apply_patch_to_content, m)?)?;

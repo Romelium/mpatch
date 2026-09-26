@@ -1,8 +1,8 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use indoc::indoc;
 use mpatch::{
-    apply_patch_to_content, detect_patch, find_hunk_location_in_lines, parse_conflict_markers,
-    parse_diffs, parse_patches, ApplyOptions, Patch,
+    apply_patch_to_content, detect_patch, find_hunk_location_in_lines, parse_aider,
+    parse_conflict_markers, parse_diffs, parse_patches, ApplyOptions, Patch,
 };
 
 // --- Detecting Benchmarks ---
@@ -13,6 +13,7 @@ fn detecting_benches(c: &mut Criterion) {
     let md_diff = "```diff\n--- a/file\n+++ b/file\n@@ -1 +1 @@\n-a\n+b\n```";
     let raw_diff = "--- a/file\n+++ b/file\n@@ -1 +1 @@\n-a\n+b";
     let conflict_diff = "<<<<\na\n====\nb\n>>>>";
+    let aider_diff = "file.txt\n<<<<<<< SEARCH\na\n=======\nb\n>>>>>>> REPLACE";
 
     group.bench_function("detect_markdown", |b| {
         b.iter(|| detect_patch(black_box(md_diff)))
@@ -24,6 +25,10 @@ fn detecting_benches(c: &mut Criterion) {
 
     group.bench_function("detect_conflict", |b| {
         b.iter(|| detect_patch(black_box(conflict_diff)))
+    });
+
+    group.bench_function("detect_aider", |b| {
+        b.iter(|| detect_patch(black_box(aider_diff)))
     });
 
     group.finish();
@@ -103,6 +108,11 @@ fn parsing_benches(c: &mut Criterion) {
     let conflict_diff = "<<<<\nfoo\n====\nbar\n>>>>\n";
     group.bench_function("conflict_markers", |b| {
         b.iter(|| parse_conflict_markers(black_box(conflict_diff)))
+    });
+
+    let aider_diff = "file.txt\n<<<<<<< SEARCH\nfoo\n=======\nbar\n>>>>>>> REPLACE\n";
+    group.bench_function("aider_blocks", |b| {
+        b.iter(|| parse_aider(black_box(aider_diff)))
     });
 
     group.finish();

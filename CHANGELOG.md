@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Parser & Formats:** Added native support for Aider search/replace blocks (`<<<<<<< SEARCH`, `=======`, `>>>>>>> REPLACE`, and `ORIGINAL`/`UPDATED` variants) via `parse_aider`, `PatchFormat::Aider`, and automatic format detection in `detect_patch`, `parse_auto`, and `parse_diffs`.
+- **Parser & Formats:** Implemented heuristic target file path detection from preceding markdown lines, code comments, backticks, or search fence headers for blocks lacking unified diff headers.
+- **Fuzzy Matching & Wildcards:** Introduced wildcard ellipsis matching (`...`, `…`, `// ... existing code ...`, `<!-- ... -->`, etc.) across single and multi-segment hunks, reconstructing multi-line code gaps while preserving untouched code and guarding against runaway gaps or syntax false positives.
+- **Python Bindings:** Exposed `mpatch.parse_aider` and updated format detection and type stubs (`mpatch.pyi`) for Aider search/replace blocks.
+- **CLI & Diagnostics:** Added Aider search/replace format detection to CLI diagnostics and benchmark suites.
+
 ### Performance
 - **Patch Application:** Eliminated redundant target slice cloning and heap string allocations in `try_apply_hunk_at_location` by referencing `target_lines` directly and borrowing hunk addition slices.
 - **Diagnostics & Results:** Optimized `ApplyResult::failure_count()`, `success_count()`, and `has_failures()` to count in-place with zero heap allocations or error cloning.
