@@ -175,7 +175,7 @@ impl PyHunk {
                     "Line index out of range",
                 ));
             }
-            lines[index as usize].clone().into_bound_py_any(py)
+            lines[index as usize].as_str().into_bound_py_any(py)
         } else {
             Err(pyo3::exceptions::PyTypeError::new_err(
                 "Line indices must be integers or slices",

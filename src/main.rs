@@ -692,26 +692,40 @@ fn format_normalized_patch(patch: &Patch) -> String {
         all_added.extend(hunk.added_lines().into_iter().map(|s| s.trim().to_string()));
     }
 
-    // Remove identical lines (self-replacements) using multiset subtraction
-    let mut i = 0;
-    while i < all_removed.len() {
-        if let Some(j) = all_added.iter().position(|a| a == &all_removed[i]) {
-            all_removed.remove(i);
-            all_added.remove(j);
-        } else {
-            i += 1;
-        }
-    }
-
     // Sort to ignore ordering differences across hunks
     all_removed.sort();
     all_added.sort();
 
+    // Remove identical lines (self-replacements) using two-pointer multiset subtraction
+    let mut i = 0;
+    let mut j = 0;
+    let mut filtered_removed = Vec::with_capacity(all_removed.len());
+    let mut filtered_added = Vec::with_capacity(all_added.len());
+
+    while i < all_removed.len() && j < all_added.len() {
+        match all_removed[i].cmp(&all_added[j]) {
+            std::cmp::Ordering::Less => {
+                filtered_removed.push(std::mem::take(&mut all_removed[i]));
+                i += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                filtered_added.push(std::mem::take(&mut all_added[j]));
+                j += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    filtered_removed.extend(all_removed.drain(i..));
+    filtered_added.extend(all_added.drain(j..));
+
     let mut output = String::new();
-    for line in all_removed {
+    for line in filtered_removed {
         let _ = writeln!(output, "-{}", line);
     }
-    for line in all_added {
+    for line in filtered_added {
         let _ = writeln!(output, "+{}", line);
     }
     if !patch.ends_with_newline {

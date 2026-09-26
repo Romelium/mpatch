@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+- **Fuzzy Matching:** Precomputed contiguous target slices and character indices in `find_hunk_location_internal` to eliminate four heap allocations per candidate window.
+- **Fuzzy Matching:** Added mathematical upper-bound pruning and lazy metric evaluation in `score_window` to skip expensive character- and word-level Myers diffs when line-level similarity reaches 1.0 or non-whitespace bounds cannot alter the window's score.
+- **Fuzzy Matching:** Short-circuited anchor occurrence search in `find_search_ranges` as soon as the maximum occurrence threshold is exceeded, avoiding full linear scans and unbounded vector allocations on repetitive target files.
+- **Patch Application:** Eliminated redundant `target_lines.clone()` during candidate window backtracking in `apply_hunk_to_lines`.
+- **Parser & Core:** Replaced dynamic `format!` allocations with pre-allocated buffer pushes in `Patch::from_texts`, `Hunk::invert`, `Hunk::required_match_span`, and conflict marker parsing.
+- **CLI Diagnostics:** Replaced $O(N^2)$ multiset subtraction in `format_normalized_patch` with a sorted $O(N)$ two-pointer pass.
+
 ### Fixed
 - **Patch Application:** Implemented candidate location backtracking in `apply_hunk_to_lines`. If the highest-scoring candidate window fails during reconstruction (e.g., due to the orphan addition guard), the applier now backtracks and attempts remaining candidate windows instead of failing immediately.
 - **Patch Application:** Added semantic statement matching across line breaks (`find_statement_match_in_block`) and `required_match_span` validation, allowing hunks with multi-line signatures or formatted statements to cleanly match single-line targets (and vice-versa) while pruning candidate windows too short to contain all edits.

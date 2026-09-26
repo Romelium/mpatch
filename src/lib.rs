@@ -2284,9 +2284,15 @@ impl Hunk {
             .iter()
             .map(|line| {
                 if let Some(stripped) = line.strip_prefix('+') {
-                    format!("-{}", stripped)
+                    let mut s = String::with_capacity(line.len());
+                    s.push('-');
+                    s.push_str(stripped);
+                    s
                 } else if let Some(stripped) = line.strip_prefix('-') {
-                    format!("+{}", stripped)
+                    let mut s = String::with_capacity(line.len());
+                    s.push('+');
+                    s.push_str(stripped);
+                    s
                 } else {
                     line.clone()
                 }
@@ -2519,8 +2525,7 @@ impl Hunk {
     /// assert_eq!(hunk.required_match_span(), 2);
     /// ```
     pub fn required_match_span(&self) -> usize {
-        let match_block = self.get_match_block();
-        if match_block.is_empty() {
+        if !self.lines.iter().any(|l| !l.starts_with('+')) {
             return 0;
         }
 
@@ -2834,6 +2839,8 @@ impl Patch {
     ) -> Result<Self, ParseError> {
         let path = file_path.into();
         let diff = TextDiff::from_lines(old_text, new_text);
+        let old_slices = diff.old_slices();
+        let new_slices = diff.new_slices();
         let mut hunks = Vec::new();
 
         for group in diff.grouped_ops(context_len) {
@@ -2850,27 +2857,33 @@ impl Patch {
                 match op {
                     similar::DiffOp::Equal { old_index, len, .. } => {
                         for i in 0..len {
-                            let line =
-                                diff.old_slices()[old_index + i].trim_end_matches(['\r', '\n']);
-                            lines.push(format!(" {}", line));
+                            let line = old_slices[old_index + i].trim_end_matches(['\r', '\n']);
+                            let mut s = String::with_capacity(line.len() + 1);
+                            s.push(' ');
+                            s.push_str(line);
+                            lines.push(s);
                         }
                     }
                     similar::DiffOp::Delete {
                         old_index, old_len, ..
                     } => {
                         for i in 0..old_len {
-                            let line =
-                                diff.old_slices()[old_index + i].trim_end_matches(['\r', '\n']);
-                            lines.push(format!("-{}", line));
+                            let line = old_slices[old_index + i].trim_end_matches(['\r', '\n']);
+                            let mut s = String::with_capacity(line.len() + 1);
+                            s.push('-');
+                            s.push_str(line);
+                            lines.push(s);
                         }
                     }
                     similar::DiffOp::Insert {
                         new_index, new_len, ..
                     } => {
                         for i in 0..new_len {
-                            let line =
-                                diff.new_slices()[new_index + i].trim_end_matches(['\r', '\n']);
-                            lines.push(format!("+{}", line));
+                            let line = new_slices[new_index + i].trim_end_matches(['\r', '\n']);
+                            let mut s = String::with_capacity(line.len() + 1);
+                            s.push('+');
+                            s.push_str(line);
+                            lines.push(s);
                         }
                     }
                     similar::DiffOp::Replace {
@@ -2880,14 +2893,18 @@ impl Patch {
                         new_len,
                     } => {
                         for i in 0..old_len {
-                            let line =
-                                diff.old_slices()[old_index + i].trim_end_matches(['\r', '\n']);
-                            lines.push(format!("-{}", line));
+                            let line = old_slices[old_index + i].trim_end_matches(['\r', '\n']);
+                            let mut s = String::with_capacity(line.len() + 1);
+                            s.push('-');
+                            s.push_str(line);
+                            lines.push(s);
                         }
                         for i in 0..new_len {
-                            let line =
-                                diff.new_slices()[new_index + i].trim_end_matches(['\r', '\n']);
-                            lines.push(format!("+{}", line));
+                            let line = new_slices[new_index + i].trim_end_matches(['\r', '\n']);
+                            let mut s = String::with_capacity(line.len() + 1);
+                            s.push('+');
+                            s.push_str(line);
+                            lines.push(s);
                         }
                     }
                 }
@@ -3222,8 +3239,12 @@ pub fn detect_patch(content: &str) -> PatchFormat {
     while let Some(line) = lines.next() {
         // Check for Markdown code blocks
         let trimmed = line.trim_start();
-        if trimmed.starts_with("```") {
-            let fence_len = trimmed.chars().take_while(|&c| c == '`').count();
+        if trimmed.as_bytes().starts_with(b"```") {
+            let fence_len = trimmed
+                .as_bytes()
+                .iter()
+                .take_while(|&&c| c == b'`')
+                .count();
             if fence_len >= 3 {
                 if !in_code_block {
                     in_code_block = true;
@@ -3254,7 +3275,6 @@ pub fn detect_patch(content: &str) -> PatchFormat {
         }
 
         // Check for Conflict Markers
-        let trimmed = line.trim_start();
         if trimmed.starts_with("<<<<") {
             has_conflict_start = true;
         } else if (trimmed.starts_with("====") || trimmed.starts_with(">>>>")) && has_conflict_start
@@ -3501,7 +3521,7 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
                 "Parsing diff block starting on line {}.",
                 diff_block_start_line
             );
-            let block_patches = parse_generic_block_lines(block_lines, diff_block_start_line)?;
+            let block_patches = parse_generic_block_lines(&block_lines, diff_block_start_line)?;
             all_patches.extend(block_patches);
         } else {
             trace!(
@@ -3561,16 +3581,13 @@ fn has_patch_signature_at_level_1<S: AsRef<str>>(lines: &[S]) -> bool {
 
 /// Helper function to parse a block of lines that could be Unified or Conflict.
 /// This consolidates the fallback logic previously inside `parse_diffs`.
-fn parse_generic_block_lines(
-    lines: Vec<&str>,
-    start_line: usize,
-) -> Result<Vec<Patch>, ParseError> {
+fn parse_generic_block_lines(lines: &[&str], start_line: usize) -> Result<Vec<Patch>, ParseError> {
     trace!(
         "  Attempting to parse generic block starting at line {} as standard unified diff.",
         start_line
     );
     // 1. Try parsing as standard unified diff
-    let standard_result = parse_patches_from_lines(lines.clone().into_iter());
+    let standard_result = parse_patches_from_lines(lines.iter().copied());
 
     match standard_result {
         Ok(patches) => {
@@ -3580,7 +3597,7 @@ fn parse_generic_block_lines(
             } else {
                 trace!("  Standard parser found no patches. Attempting conflict markers.");
                 // 2. If standard parsing found nothing, try conflict markers
-                let conflict_patches = parse_conflict_markers_from_lines(lines.into_iter());
+                let conflict_patches = parse_conflict_markers_from_lines(lines.iter().copied());
                 if !conflict_patches.is_empty() {
                     trace!("  Successfully parsed block as conflict markers.");
                 } else {
@@ -3595,7 +3612,7 @@ fn parse_generic_block_lines(
                 e
             );
             // 3. If standard parsing failed (e.g. missing header), check for conflict markers
-            let conflict_patches = parse_conflict_markers_from_lines(lines.into_iter());
+            let conflict_patches = parse_conflict_markers_from_lines(lines.iter().copied());
             if !conflict_patches.is_empty() {
                 trace!("  Successfully parsed block as conflict markers.");
                 Ok(conflict_patches)
@@ -3975,6 +3992,9 @@ where
     if unmerged_patches.is_empty() {
         return Ok(vec![]);
     }
+    if unmerged_patches.len() == 1 {
+        return Ok(unmerged_patches);
+    }
 
     debug!(
         "Merging {} patch section(s) found in the block.",
@@ -4058,9 +4078,24 @@ where
         }
 
         match state {
-            State::Context => hunk_lines.push(format!(" {}", line)),
-            State::Old => hunk_lines.push(format!("-{}", line)),
-            State::New => hunk_lines.push(format!("+{}", line)),
+            State::Context => {
+                let mut s = String::with_capacity(line.len() + 1);
+                s.push(' ');
+                s.push_str(line);
+                hunk_lines.push(s);
+            }
+            State::Old => {
+                let mut s = String::with_capacity(line.len() + 1);
+                s.push('-');
+                s.push_str(line);
+                hunk_lines.push(s);
+            }
+            State::New => {
+                let mut s = String::with_capacity(line.len() + 1);
+                s.push('+');
+                s.push_str(line);
+                hunk_lines.push(s);
+            }
         }
     }
 
@@ -5589,10 +5624,8 @@ pub fn apply_hunk_to_lines(
     let mut last_error = HunkApplyError::ContextNotFound;
 
     for (location, match_type) in candidates {
-        let mut lines_clone = target_lines.clone();
-        match try_apply_hunk_at_location(hunk, &mut lines_clone, location, match_type.clone()) {
+        match try_apply_hunk_at_location(hunk, target_lines, location, match_type.clone()) {
             Ok(status) => {
-                *target_lines = lines_clone;
                 return status;
             }
             Err(e) => {
@@ -6242,6 +6275,179 @@ pub struct DefaultHunkFinder<'a> {
     options: &'a ApplyOptions,
 }
 
+struct TargetPrecomputed<'a> {
+    target_loose_refs: Vec<&'a str>,
+    target_content: String,
+    line_starts: Vec<usize>,
+    line_ends: Vec<usize>,
+    target_loose_content: String,
+    loose_line_starts: Vec<usize>,
+    loose_line_ends: Vec<usize>,
+    target_no_ws_content: String,
+    no_ws_line_starts: Vec<usize>,
+    no_ws_line_ends: Vec<usize>,
+}
+
+fn precompute_target<'a>(target_refs: &[&'a str]) -> TargetPrecomputed<'a> {
+    let n = target_refs.len();
+    let mut target_loose_refs = Vec::with_capacity(n);
+    let mut line_starts = Vec::with_capacity(n);
+    let mut line_ends = Vec::with_capacity(n);
+    let mut loose_line_starts = Vec::with_capacity(n);
+    let mut loose_line_ends = Vec::with_capacity(n);
+    let mut no_ws_line_starts = Vec::with_capacity(n);
+    let mut no_ws_line_ends = Vec::with_capacity(n);
+
+    let mut total_ref_len = 0;
+    let mut total_loose_len = 0;
+    let mut total_no_ws_len = 0;
+
+    for &line in target_refs {
+        let loose = line.trim_start();
+        target_loose_refs.push(loose);
+        total_ref_len += line.len() + 1;
+        total_loose_len += loose.len() + 1;
+        total_no_ws_len += line.len();
+    }
+
+    let mut target_content = String::with_capacity(total_ref_len);
+    let mut target_loose_content = String::with_capacity(total_loose_len);
+    let mut target_no_ws_content = String::with_capacity(total_no_ws_len);
+
+    for i in 0..n {
+        let line = target_refs[i];
+        let loose = target_loose_refs[i];
+
+        if i > 0 {
+            target_content.push('\n');
+        }
+        let start = target_content.len();
+        target_content.push_str(line);
+        let end = target_content.len();
+        line_starts.push(start);
+        line_ends.push(end);
+
+        if i > 0 {
+            target_loose_content.push('\n');
+        }
+        let l_start = target_loose_content.len();
+        target_loose_content.push_str(loose);
+        let l_end = target_loose_content.len();
+        loose_line_starts.push(l_start);
+        loose_line_ends.push(l_end);
+
+        let nw_start = target_no_ws_content.len();
+        for c in line.chars() {
+            if !c.is_whitespace() {
+                target_no_ws_content.push(c);
+            }
+        }
+        let nw_end = target_no_ws_content.len();
+        no_ws_line_starts.push(nw_start);
+        no_ws_line_ends.push(nw_end);
+    }
+
+    TargetPrecomputed {
+        target_loose_refs,
+        target_content,
+        line_starts,
+        line_ends,
+        target_loose_content,
+        loose_line_starts,
+        loose_line_ends,
+        target_no_ws_content,
+        no_ws_line_starts,
+        no_ws_line_ends,
+    }
+}
+
+fn score_window(
+    window_stripped_lines: &[&str],
+    match_stripped_lines: &[&str],
+    window_loose_lines: &[&str],
+    match_loose_lines: &[&str],
+    window_str: &str,
+    match_content: &str,
+    wlc: &str,
+    match_loose_content: &str,
+    window_no_ws: &str,
+    match_no_ws: &str,
+    match_no_ws_chars: usize,
+    match_is_ascii: bool,
+    len: usize,
+    window_len: usize,
+) -> (f64, f64, f64, f64) {
+    let diff_lines = similar::TextDiff::from_slices(window_stripped_lines, match_stripped_lines);
+    let ratio_lines = diff_lines.ratio();
+
+    let diff_loose_lines = similar::TextDiff::from_slices(window_loose_lines, match_loose_lines);
+    let ratio_loose_lines = diff_loose_lines.ratio();
+
+    let scale = if window_len > len && len > 0 {
+        (window_len + len) as f64 / (2.0 * len as f64)
+    } else {
+        1.0
+    };
+
+    let line_score = (ratio_lines as f64 * scale).max(ratio_loose_lines as f64 * scale);
+
+    if ratio_lines == 1.0 {
+        return (1.0, 1.0, 1.0, 1.0);
+    }
+    if ratio_loose_lines == 1.0 {
+        return (1.0, 1.0, ratio_lines as f64, 1.0);
+    }
+
+    let ratio_words = if window_str == match_content {
+        1.0
+    } else {
+        similar::TextDiff::from_words(window_str, match_content).ratio()
+    };
+
+    let ratio_loose_words = if wlc == match_loose_content {
+        1.0
+    } else if window_str == wlc && match_content == match_loose_content {
+        ratio_words
+    } else {
+        similar::TextDiff::from_words(wlc, match_loose_content).ratio()
+    };
+
+    let ratio_strict = 0.3 * ratio_lines as f64 + 0.7 * ratio_words as f64;
+    let ratio_loose = 0.3 * ratio_loose_lines as f64 + 0.7 * ratio_loose_words as f64;
+    let current_max = ratio_strict.max(ratio_loose).max(line_score);
+
+    let c_w = if match_is_ascii && window_no_ws.is_ascii() {
+        window_no_ws.len()
+    } else {
+        window_no_ws.chars().count()
+    };
+    let c_m = match_no_ws_chars;
+
+    let ub_no_ws = if c_w == 0 && c_m == 0 {
+        1.0
+    } else if c_w == 0 || c_m == 0 {
+        0.0
+    } else {
+        2.0 * (c_w.min(c_m) as f64) / ((c_w + c_m) as f64)
+    };
+
+    let ub_very_loose = 0.1 * ratio_lines as f64 + 0.9 * ub_no_ws;
+
+    let ratio_no_ws = if ub_very_loose <= current_max {
+        0.0
+    } else if window_no_ws == match_no_ws {
+        1.0
+    } else {
+        similar::TextDiff::from_chars(window_no_ws, match_no_ws).ratio()
+    };
+
+    let ratio_very_loose = 0.1 * ratio_lines as f64 + 0.9 * ratio_no_ws as f64;
+    let ratio = current_max.max(ratio_very_loose);
+    let score = ratio;
+
+    (score, ratio, ratio_lines as f64, ratio_words as f64)
+}
+
 impl<'a> DefaultHunkFinder<'a> {
     /// Creates a new finder with the given options.
     ///
@@ -6372,13 +6578,16 @@ impl<'a> DefaultHunkFinder<'a> {
                         continue;
                     }
 
-                    // Find all occurrences of the anchor line.
-                    let occurrences: Vec<_> = target_lines
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, l)| l.as_ref().trim() == anchor_line)
-                        .map(|(i, _)| i)
-                        .collect();
+                    // Find occurrences of the anchor line, stopping early if too common.
+                    let mut occurrences = Vec::with_capacity(MAX_ANCHOR_OCCURRENCES + 1);
+                    for (idx, l) in target_lines.iter().enumerate() {
+                        if l.as_ref().trim() == anchor_line {
+                            occurrences.push(idx);
+                            if occurrences.len() > MAX_ANCHOR_OCCURRENCES {
+                                break;
+                            }
+                        }
+                    }
 
                     // If the line is unique enough, use it to create search ranges.
                     if !occurrences.is_empty() && occurrences.len() <= MAX_ANCHOR_OCCURRENCES {
@@ -6511,13 +6720,9 @@ impl<'a> DefaultHunkFinder<'a> {
         }
 
         // Pre-calculate trimmed lines for subsequent strategies.
-        // This avoids repeated allocation and trimming in loops.
-        let target_trimmed: Vec<String> = target_lines
-            .iter()
-            .map(|s| s.as_ref().trim_end().to_string())
-            .collect();
+        // This borrows string slices directly to avoid repeated allocation in loops.
+        let target_refs: Vec<&str> = target_lines.iter().map(|s| s.as_ref().trim_end()).collect();
         // Create references to the trimmed strings to avoid allocations in TextDiff
-        let target_refs: Vec<&str> = target_trimmed.iter().map(|s| s.as_str()).collect();
 
         // --- STRATEGY 2: Exact Match (Ignoring Trailing Whitespace) ---
         // Handles minor formatting differences.
@@ -6525,15 +6730,10 @@ impl<'a> DefaultHunkFinder<'a> {
         {
             let match_stripped: Vec<_> = match_block.iter().map(|s| s.trim_end()).collect();
             let result = if match_block.len() <= target_lines.len() {
-                let iter = target_trimmed
+                let iter = target_refs
                     .windows(match_block.len())
                     .enumerate()
-                    .filter(|(_, window)| {
-                        window
-                            .iter()
-                            .map(|s| s.as_str())
-                            .eq(match_stripped.iter().copied())
-                    })
+                    .filter(|(_, window)| window.iter().copied().eq(match_stripped.iter().copied()))
                     .map(|(i, _)| i);
                 Self::tie_break_with_line_number(
                     iter,
@@ -6599,6 +6799,8 @@ impl<'a> DefaultHunkFinder<'a> {
                 .chars()
                 .filter(|c| !c.is_whitespace())
                 .collect();
+            let match_no_ws_chars = match_no_ws.chars().count();
+            let match_is_ascii = match_no_ws.is_ascii();
 
             let mut best_score = -1.0;
             let mut best_ratio_at_best_score = -1.0;
@@ -6622,8 +6824,10 @@ impl<'a> DefaultHunkFinder<'a> {
             );
 
             // Performance heuristic: narrow down the search space using anchor lines.
-            let search_ranges = Self::find_search_ranges(match_block, &target_trimmed, len);
+            let search_ranges = Self::find_search_ranges(match_block, &target_refs, len);
             trace!("    Using search ranges: {:?}", search_ranges);
+
+            let pre = precompute_target(&target_refs);
 
             // When the anchor heuristic fails, the search can be slow. We parallelize the
             // scoring of all possible windows using Rayon if the `parallel` feature is enabled.
@@ -6631,111 +6835,63 @@ impl<'a> DefaultHunkFinder<'a> {
             let all_scored_windows: Vec<(f64, f64, f64, f64, usize, usize)> = search_ranges
                 .par_iter()
                 .flat_map(|&(range_start, range_end)| {
-                    // By creating local references, we ensure that the inner `move` closures
-                    // capture these references (which are `Copy`) instead of attempting to move
-                    // the original non-`Copy` `Vec` and `String` from the outer scope.
+                    let pre = &pre;
+                    let target_refs = &target_refs;
                     let match_stripped_lines = &match_stripped_lines;
                     let match_content = &match_content;
                     let match_loose_lines = &match_loose_lines;
                     let match_loose_content = &match_loose_content;
                     let match_no_ws = &match_no_ws;
-                    let target_slice = &target_refs[range_start..range_end];
+                    let target_len = range_end.saturating_sub(range_start);
 
                     (min_len..=max_len)
                         .into_par_iter()
-                        .filter(move |&window_len| window_len <= target_slice.len())
+                        .filter(move |&window_len| window_len <= target_len)
                         .filter(move |&window_len| {
                             len == 0 || window_len >= len.saturating_sub(min_reduction)
                         })
                         .flat_map(move |window_len| {
-                            (0..=target_slice.len() - window_len)
-                                .into_par_iter()
-                                .map(move |i| {
-                                    let window_stripped_lines = &target_slice[i..i + window_len];
-                                    let absolute_index = range_start + i;
+                            (0..=target_len - window_len).into_par_iter().map(move |i| {
+                                let absolute_index = range_start + i;
+                                let window_stripped_lines =
+                                    &target_refs[absolute_index..absolute_index + window_len];
+                                let window_loose_lines = &pre.target_loose_refs
+                                    [absolute_index..absolute_index + window_len];
+                                let window_str = &pre.target_content[pre.line_starts[absolute_index]
+                                    ..pre.line_ends[absolute_index + window_len - 1]];
+                                let wlc = &pre.target_loose_content[pre.loose_line_starts
+                                    [absolute_index]
+                                    ..pre.loose_line_ends[absolute_index + window_len - 1]];
+                                let window_no_ws = &pre.target_no_ws_content[pre.no_ws_line_starts
+                                    [absolute_index]
+                                    ..pre.no_ws_line_ends[absolute_index + window_len - 1]];
 
-                                    // HYBRID SCORING: (Copied from original sequential loop)
-                                    let diff_lines = similar::TextDiff::from_slices(
-                                        window_stripped_lines,
-                                        match_stripped_lines,
-                                    );
-                                    let ratio_lines = diff_lines.ratio();
+                                let (score, ratio, ratio_lines, ratio_words) = score_window(
+                                    window_stripped_lines,
+                                    match_stripped_lines,
+                                    window_loose_lines,
+                                    match_loose_lines,
+                                    window_str,
+                                    match_content,
+                                    wlc,
+                                    match_loose_content,
+                                    window_no_ws,
+                                    match_no_ws,
+                                    match_no_ws_chars,
+                                    match_is_ascii,
+                                    len,
+                                    window_len,
+                                );
 
-                                    let window_loose_lines: Vec<&str> =
-                                        window_stripped_lines.iter().map(|s| s.trim()).collect();
-                                    let diff_loose_lines = similar::TextDiff::from_slices(
-                                        &window_loose_lines,
-                                        match_loose_lines,
-                                    );
-                                    let ratio_loose_lines = diff_loose_lines.ratio();
-
-                                    let mut capacity = 0;
-                                    for line in window_stripped_lines {
-                                        capacity += line.len() + 1;
-                                    }
-                                    let mut window_content = String::with_capacity(capacity);
-                                    for (j, line) in window_stripped_lines.iter().enumerate() {
-                                        if j > 0 {
-                                            window_content.push('\n');
-                                        }
-                                        window_content.push_str(line);
-                                    }
-                                    let ratio_words = similar::TextDiff::from_words(
-                                        &window_content,
-                                        match_content,
-                                    )
-                                    .ratio();
-                                    let wlc = window_loose_lines.join("\n");
-                                    let ratio_loose_words =
-                                        similar::TextDiff::from_words(&wlc, match_loose_content)
-                                            .ratio();
-
-                                    let window_no_ws: String = window_content
-                                        .chars()
-                                        .filter(|c| !c.is_whitespace())
-                                        .collect();
-                                    let ratio_no_ws =
-                                        similar::TextDiff::from_chars(&window_no_ws, match_no_ws)
-                                            .ratio();
-
-                                    // HYBRID SCORING: Give more weight to word-based ratio, as it's
-                                    // better at detecting small changes within a line. Line-based
-                                    // ratio is still important for overall structure, especially
-                                    // when lines are inserted or deleted.
-                                    let ratio_strict =
-                                        0.3 * ratio_lines as f64 + 0.7 * ratio_words as f64;
-
-                                    // --- LOOSE MATCHING (Ignore Indentation) ---
-                                    // Calculate a score based on fully trimmed lines. This helps
-                                    // when the patch is nested (e.g. in a markdown list) but the file is flat.
-                                    let ratio_loose = 0.3 * ratio_loose_lines as f64
-                                        + 0.7 * ratio_loose_words as f64;
-
-                                    let ratio_very_loose =
-                                        0.1 * ratio_lines as f64 + 0.9 * ratio_no_ws as f64;
-
-                                    let scale = if window_len > len && len > 0 {
-                                        (window_len + len) as f64 / (2.0 * len as f64)
-                                    } else {
-                                        1.0
-                                    };
-
-                                    let ratio = ratio_strict
-                                        .max(ratio_loose)
-                                        .max(ratio_very_loose)
-                                        .max(ratio_lines as f64 * scale)
-                                        .max(ratio_loose_lines as f64 * scale);
-                                    let score = ratio;
-
-                                    (
-                                        score,
-                                        ratio,
-                                        ratio_lines as f64,
-                                        ratio_words as f64,
-                                        absolute_index,
-                                        window_len,
-                                    )
-                                })
+                                (
+                                    score,
+                                    ratio,
+                                    ratio_lines,
+                                    ratio_words,
+                                    absolute_index,
+                                    window_len,
+                                )
+                            })
                         })
                 })
                 .collect();
@@ -6744,102 +6900,58 @@ impl<'a> DefaultHunkFinder<'a> {
             let all_scored_windows: Vec<(f64, f64, f64, f64, usize, usize)> = search_ranges
                 .iter()
                 .flat_map(|&(range_start, range_end)| {
-                    // By creating local references, we ensure that the inner `move` closures
-                    // capture these references (which are `Copy`) instead of attempting to move
-                    // the original non-`Copy` `Vec` and `String` from the outer scope.
+                    let pre = &pre;
+                    let target_refs = &target_refs;
                     let match_stripped_lines = &match_stripped_lines;
                     let match_content = &match_content;
                     let match_loose_lines = &match_loose_lines;
                     let match_loose_content = &match_loose_content;
                     let match_no_ws = &match_no_ws;
-                    let target_slice = &target_refs[range_start..range_end];
+                    let target_len = range_end.saturating_sub(range_start);
 
                     (min_len..=max_len)
-                        .filter(move |&window_len| window_len <= target_slice.len())
+                        .filter(move |&window_len| window_len <= target_len)
                         .filter(move |&window_len| {
                             len == 0 || window_len >= len.saturating_sub(min_reduction)
                         })
                         .flat_map(move |window_len| {
-                            (0..=target_slice.len() - window_len).map(move |i| {
-                                let window_stripped_lines = &target_slice[i..i + window_len];
+                            (0..=target_len - window_len).map(move |i| {
                                 let absolute_index = range_start + i;
+                                let window_stripped_lines =
+                                    &target_refs[absolute_index..absolute_index + window_len];
+                                let window_loose_lines = &pre.target_loose_refs
+                                    [absolute_index..absolute_index + window_len];
+                                let window_str = &pre.target_content[pre.line_starts[absolute_index]
+                                    ..pre.line_ends[absolute_index + window_len - 1]];
+                                let wlc = &pre.target_loose_content[pre.loose_line_starts
+                                    [absolute_index]
+                                    ..pre.loose_line_ends[absolute_index + window_len - 1]];
+                                let window_no_ws = &pre.target_no_ws_content[pre.no_ws_line_starts
+                                    [absolute_index]
+                                    ..pre.no_ws_line_ends[absolute_index + window_len - 1]];
 
-                                // HYBRID SCORING: (Copied from original sequential loop)
-                                let diff_lines = similar::TextDiff::from_slices(
+                                let (score, ratio, ratio_lines, ratio_words) = score_window(
                                     window_stripped_lines,
                                     match_stripped_lines,
-                                );
-                                let ratio_lines = diff_lines.ratio();
-
-                                let window_loose_lines: Vec<&str> =
-                                    window_stripped_lines.iter().map(|s| s.trim()).collect();
-                                let diff_loose_lines = similar::TextDiff::from_slices(
-                                    &window_loose_lines,
+                                    window_loose_lines,
                                     match_loose_lines,
+                                    window_str,
+                                    match_content,
+                                    wlc,
+                                    match_loose_content,
+                                    window_no_ws,
+                                    match_no_ws,
+                                    match_no_ws_chars,
+                                    match_is_ascii,
+                                    len,
+                                    window_len,
                                 );
-                                let ratio_loose_lines = diff_loose_lines.ratio();
-
-                                let mut capacity = 0;
-                                for line in window_stripped_lines {
-                                    capacity += line.len() + 1;
-                                }
-                                let mut window_content = String::with_capacity(capacity);
-                                for (j, line) in window_stripped_lines.iter().enumerate() {
-                                    if j > 0 {
-                                        window_content.push('\n');
-                                    }
-                                    window_content.push_str(line);
-                                }
-                                let ratio_words =
-                                    similar::TextDiff::from_words(&window_content, match_content)
-                                        .ratio();
-                                let wlc = window_loose_lines.join("\n");
-                                let ratio_loose_words =
-                                    similar::TextDiff::from_words(&wlc, match_loose_content)
-                                        .ratio();
-
-                                let window_no_ws: String = window_content
-                                    .chars()
-                                    .filter(|c| !c.is_whitespace())
-                                    .collect();
-                                let ratio_no_ws =
-                                    similar::TextDiff::from_chars(&window_no_ws, match_no_ws)
-                                        .ratio();
-
-                                // HYBRID SCORING: Give more weight to word-based ratio, as it's
-                                // better at detecting small changes within a line. Line-based
-                                // ratio is still important for overall structure, especially
-                                // when lines are inserted or deleted.
-                                let ratio_strict =
-                                    0.3 * ratio_lines as f64 + 0.7 * ratio_words as f64;
-
-                                // --- LOOSE MATCHING (Ignore Indentation) ---
-                                // Calculate a score based on fully trimmed lines. This helps
-                                // when the patch is nested (e.g. in a markdown list) but the file is flat.
-                                let ratio_loose =
-                                    0.3 * ratio_loose_lines as f64 + 0.7 * ratio_loose_words as f64;
-
-                                let ratio_very_loose =
-                                    0.1 * ratio_lines as f64 + 0.9 * ratio_no_ws as f64;
-
-                                let scale = if window_len > len && len > 0 {
-                                    (window_len + len) as f64 / (2.0 * len as f64)
-                                } else {
-                                    1.0
-                                };
-
-                                let ratio = ratio_strict
-                                    .max(ratio_loose)
-                                    .max(ratio_very_loose)
-                                    .max(ratio_lines as f64 * scale)
-                                    .max(ratio_loose_lines as f64 * scale);
-                                let score = ratio;
 
                                 (
                                     score,
                                     ratio,
-                                    ratio_lines as f64,
-                                    ratio_words as f64,
+                                    ratio_lines,
+                                    ratio_words,
                                     absolute_index,
                                     window_len,
                                 )
@@ -7364,15 +7476,16 @@ pub fn find_hunk_location_in_lines<T: AsRef<str> + Sync>(
 fn parse_hunk_header(line: &str) -> (Option<usize>, Option<usize>) {
     // We are interested in the original file's line number, which is the first number after '-'.
     // Example: @@ -21,8 +21,8 @@
-    let parts: Vec<_> = line.split_whitespace().collect();
-    if parts.len() < 3 {
+    let mut parts = line.split_whitespace();
+    parts.next(); // skip "@@"
+    let (Some(old_part), Some(new_part)) = (parts.next(), parts.next()) else {
         return (None, None);
-    }
-    let old_line = parts[1]
+    };
+    let old_line = old_part
         .strip_prefix('-')
         .and_then(|s| s.split(',').next())
         .and_then(|s| s.parse::<usize>().ok());
-    let new_line = parts[2]
+    let new_line = new_part
         .strip_prefix('+')
         .and_then(|s| s.split(',').next())
         .and_then(|s| s.parse::<usize>().ok());
