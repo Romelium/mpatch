@@ -4378,7 +4378,7 @@ pub fn is_plausible_file_path(s: &str) -> bool {
         return false;
     }
 
-    if s.contains(['\0', '<', '>', '|', '?', '"', '{', '}', ';', '=', '*']) {
+    if s.contains(['\0', '<', '>', '|', '?', '"', ';', '=', '*']) {
         trace!(
             "is_plausible_file_path: '{}' rejected (contains forbidden characters)",
             s
@@ -4514,6 +4514,13 @@ pub fn is_plausible_file_path(s: &str) -> bool {
         "dockerfile"
             | "containerfile"
             | "makefile"
+            | "build"
+            | "workspace"
+            | "configure"
+            | "install"
+            | "version"
+            | "news"
+            | "todo"
             | "gnumakefile"
             | "cmakelists.txt"
             | "gemfile"
@@ -9099,7 +9106,11 @@ fn adjust_indentation(line: &str, hunk_indent: &str, target_indent: &str) -> Str
     // but target file/block uses tabs (critical for Makefiles and Go):
     if hunk_indent.is_empty() && target_indent == "\t" {
         if line_indent.chars().all(|c| c == ' ') && !line_indent.is_empty() {
-            let tabs = (line_indent.len() + 3) / 4;
+            let tabs = if line_indent.len() % 4 != 0 && line_indent.len() % 2 == 0 {
+                (line_indent.len() + 1) / 2
+            } else {
+                (line_indent.len() + 3) / 4
+            };
             let new_indent = "\t".repeat(tabs);
             return format!("{}{}", new_indent, &line[line_indent.len()..]);
         }
@@ -9274,6 +9285,10 @@ fn extract_primary_identifier(line: &str) -> Option<&str> {
         || trimmed.starts_with(';')
         || trimmed.starts_with('%')
         || trimmed.starts_with('!')
+        || trimmed.starts_with("::")
+        || trimmed.starts_with("(*")
+        || trimmed.starts_with("{/*")
+        || trimmed.to_ascii_lowercase().starts_with("rem ")
     {
         return None;
     }
@@ -9532,54 +9547,44 @@ fn extract_primary_identifier(line: &str) -> Option<&str> {
     // 5. Command/call invocation without parentheses (Ruby, Shell, Haskell):
     // E.g. `render :json => data`, `puts "hello"`, `echo "hello"`, `npm install`
     if !trimmed.contains('=') && !trimmed.contains(';') && !trimmed.contains('{') && !trimmed.contains('}') {
-        let mut words = trimmed.split_whitespace();
-        if let Some(first_word) = words.next() {
-            let clean = first_word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
-            if !clean.is_empty()
-                && clean.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
-                && words.next().is_some()
-            {
-                if !matches!(
-                    clean,
-                    "if" | "while"
-                        | "for"
-                        | "switch"
-                        | "match"
-                        | "catch"
-                        | "return"
-                        | "typeof"
-                        | "sizeof"
-                        | "alignof"
-                        | "decltype"
-                        | "new"
-                        | "delete"
-                        | "throw"
-                        | "assert"
-                        | "let"
-                        | "var"
-                        | "const"
-                        | "pub"
-                        | "else"
-                        | "case"
-                        | "yield"
-                        | "await"
-                        | "import"
-                        | "from"
-                        | "export"
-                        | "use"
-                        | "package"
-                        | "type"
-                        | "struct"
-                        | "class"
-                        | "fn"
-                        | "def"
-                ) {
-                    trace!(
-                        "extract_primary_identifier: found non-parenthesized call identifier '{}' in '{}'",
-                        clean,
-                        trimmed
-                    );
-                    return Some(clean);
+        if !trimmed.ends_with('.')
+            && !trimmed.starts_with("- ")
+            && !trimmed.starts_with("* ")
+            && !trimmed.starts_with("+ ")
+            && !trimmed.starts_with("> ")
+        {
+            let mut words = trimmed.split_whitespace();
+            if let Some(first_word) = words.next() {
+                if !first_word.ends_with(':') {
+                    let clean = first_word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                    let clean_lower = clean.to_ascii_lowercase();
+                    if !clean.is_empty()
+                        && clean.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                        && words.next().is_some()
+                    {
+                        const NON_CALL_WORDS: &[&str] = &[
+                            "if", "while", "for", "switch", "match", "catch", "return", "typeof",
+                            "sizeof", "alignof", "decltype", "new", "delete", "throw", "assert",
+                            "let", "var", "const", "pub", "else", "case", "yield", "await",
+                            "import", "from", "export", "use", "package", "type", "struct",
+                            "class", "fn", "def", "select", "where", "having", "join",
+                            "the", "a", "an", "this", "that", "these", "those", "please", "note",
+                            "see", "in", "on", "at", "to", "by", "with", "we", "you", "they",
+                            "it", "all", "some", "any", "each", "every", "there", "here", "when",
+                            "where", "why", "how", "what", "which", "who", "is", "are", "was",
+                            "were", "be", "been", "being", "have", "has", "had", "do", "does",
+                            "did", "can", "could", "shall", "should", "will", "would", "may",
+                            "might", "must",
+                        ];
+                        if !NON_CALL_WORDS.contains(&clean_lower.as_str()) {
+                            trace!(
+                                "extract_primary_identifier: found non-parenthesized call identifier '{}' in '{}'",
+                                clean,
+                                trimmed
+                            );
+                            return Some(clean);
+                        }
+                    }
                 }
             }
         }
@@ -9605,6 +9610,10 @@ fn is_definition(line: &str) -> bool {
         || trimmed.starts_with(';')
         || trimmed.starts_with('%')
         || trimmed.starts_with('!')
+        || trimmed.starts_with("::")
+        || trimmed.starts_with("(*")
+        || trimmed.starts_with("{/*")
+        || trimmed.to_ascii_lowercase().starts_with("rem ")
     {
         return false;
     }
@@ -9755,50 +9764,39 @@ fn is_definition(line: &str) -> bool {
     // E.g.: `int calculate(int x, int y) {`
     //       `public void run() {`
     //       `Task<int> ExecuteAsync(int x)`
-    if let Some(paren_pos) = text.find('(') {
-        if text.contains(')') {
-            let before_paren = text[..paren_pos].trim();
-            if !before_paren.contains('=')
-                && !before_paren.contains('.')
-                && !before_paren.contains("->")
-            {
-                let tokens: Vec<&str> = before_paren.split_whitespace().collect();
-                if tokens.len() >= 2 {
-                    let first_clean = tokens[0].trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
-                    if !matches!(
-                        first_clean,
-                        "if" | "while"
-                            | "for"
-                            | "switch"
-                            | "match"
-                            | "catch"
-                            | "return"
-                            | "typeof"
-                            | "sizeof"
-                            | "alignof"
-                            | "decltype"
-                            | "new"
-                            | "delete"
-                            | "throw"
-                            | "assert"
-                            | "let"
-                            | "var"
-                            | "else"
-                            | "case"
-                            | "yield"
-                            | "await"
-                    ) {
-                        let last_token = tokens[tokens.len() - 1];
-                        let clean_name = last_token.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != ':');
-                        if !clean_name.is_empty()
-                            && clean_name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
-                        {
-                            trace!(
-                                "is_definition: '{}' recognized as C/C++/Java/C# style function/method definition ('{}')",
-                                trimmed,
-                                clean_name
-                            );
-                            return true;
+    if !trimmed.ends_with('.') {
+        if let Some(paren_pos) = text.find('(') {
+            if text.contains(')') {
+                let before_paren = text[..paren_pos].trim();
+                if !before_paren.contains('=')
+                    && !before_paren.contains('.')
+                    && !before_paren.contains("->")
+                {
+                    let tokens: Vec<&str> = before_paren.split_whitespace().collect();
+                    if tokens.len() >= 2 {
+                        let first_clean = tokens[0].trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                        let first_lower = first_clean.to_ascii_lowercase();
+                        const NON_DEF_FIRST_TOKENS: &[&str] = &[
+                            "if", "while", "for", "switch", "match", "catch", "return", "typeof",
+                            "sizeof", "alignof", "decltype", "new", "delete", "throw", "assert",
+                            "let", "var", "else", "case", "yield", "await", "with", "raise",
+                            "except", "elif", "select", "where", "from", "insert", "update",
+                            "having", "join", "and", "or", "set", "media", "supports", "keyframes",
+                            "see", "note", "in", "at", "on", "by", "to", "when", "print", "echo",
+                        ];
+                        if !NON_DEF_FIRST_TOKENS.contains(&first_lower.as_str()) {
+                            let last_token = tokens[tokens.len() - 1];
+                            let clean_name = last_token.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != ':');
+                            if !clean_name.is_empty()
+                                && clean_name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                            {
+                                trace!(
+                                    "is_definition: '{}' recognized as C/C++/Java/C# style function/method definition ('{}')",
+                                    trimmed,
+                                    clean_name
+                                );
+                                return true;
+                            }
                         }
                     }
                 }
@@ -9856,6 +9854,10 @@ fn find_statement_match_in_block(
             || first_trimmed.starts_with(';')
             || first_trimmed.starts_with('%')
             || first_trimmed.starts_with('!')
+            || first_trimmed.starts_with("::")
+            || first_trimmed.starts_with("(*")
+            || first_trimmed.starts_with("{/*")
+            || first_trimmed.to_ascii_lowercase().starts_with("rem ")
             || first_trimmed.ends_with('{')
             || first_trimmed.ends_with(';')
             || first_trimmed.ends_with('}')
@@ -10060,11 +10062,16 @@ fn normalize_line_delimiters(s: &str) -> String {
         }
     } else if let Some(pos) = trimmed.rfind(';') {
         if pos > 0 && trimmed.as_bytes()[pos - 1].is_ascii_whitespace() {
-            let after = trimmed[pos + 1..].trim();
-            if !after.is_empty() {
-                let before = trimmed[..pos].trim_end();
-                if !before.is_empty() {
-                    trimmed = before;
+            let before_str = &trimmed[..pos];
+            let in_double_quotes = before_str.chars().filter(|&c| c == '"').count() % 2 == 1;
+            let in_single_quotes = before_str.chars().filter(|&c| c == '\'').count() % 2 == 1;
+            if !in_double_quotes && !in_single_quotes {
+                let after = trimmed[pos + 1..].trim();
+                if !after.is_empty() {
+                    let before = before_str.trim_end();
+                    if !before.is_empty() {
+                        trimmed = before;
+                    }
                 }
             }
         }
@@ -11324,8 +11331,9 @@ fn try_apply_hunk_at_location(
 
                             // 3. Definitions cannot be unaligned in replacement
                             for i in 0..*old_len {
+                                let (is_removal, _) = &match_lines_meta[old_index + i];
                                 let line = match_block_content[old_index + i];
-                                if is_definition(line) {
+                                if !*is_removal && is_definition(line) {
                                     warn!(
                                         "    Fuzzy match rejected: Definition {:?} is unaligned in replacement block.",
                                         line
@@ -13624,8 +13632,10 @@ impl<'a> DefaultHunkFinder<'a> {
             warn!("find_wildcard_segments_location: empty segments slice");
             return Err(HunkApplyError::ContextNotFound);
         }
-        if segments.iter().any(|seg| is_low_entropy_segment(seg)) {
-            warn!("find_wildcard_segments_location: one or more segments consist solely of low-entropy syntax");
+        if segments.first().is_some_and(|seg| is_low_entropy_segment(seg))
+            || segments.iter().all(|seg| is_low_entropy_segment(seg))
+        {
+            warn!("find_wildcard_segments_location: leading segment or all segments consist solely of low-entropy syntax");
             return Err(HunkApplyError::ContextNotFound);
         }
         if segments.len() == 1 {

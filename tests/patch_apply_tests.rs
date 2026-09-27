@@ -14448,4 +14448,81 @@ mod polyglot_language_support_tests {
         assert!(is_ellipsis_line(":: ... existing batch ..."));
         assert!(is_plausible_file_path("src/core/module.c++"));
     }
+
+    #[test]
+    fn test_routes_with_curly_braces_are_plausible_paths() {
+        assert!(is_plausible_file_path("routes/{user_id}/profile.ts"));
+        assert!(is_plausible_file_path("api/{version}/items/{id}.py"));
+    }
+
+    #[test]
+    fn test_bazel_build_and_version_plausible_paths() {
+        assert!(is_plausible_file_path("BUILD"));
+        assert!(is_plausible_file_path("WORKSPACE"));
+        assert!(is_plausible_file_path("configure"));
+        assert!(is_plausible_file_path("VERSION"));
+    }
+
+    #[test]
+    fn test_markdown_prose_fuzzy_match_not_rejected_by_identifier() {
+        let original = indoc! {r#"
+            # Setup
+            Please verify that the server is operational.
+            Proceed with installation.
+        "#};
+        let diff = indoc! {r#"
+            --- a/README.md
+            +++ b/README.md
+            @@ -1,3 +1,3 @@
+             # Setup
+            -Kindly verify that the server is operational.
+            +Kindly verify that the server is active.
+             Proceed with installation.
+        "#};
+        let patch = parse_auto(diff).unwrap().remove(0);
+        let res = patch_content_str(&patch.to_string(), Some(original), &ApplyOptions::new()).unwrap();
+        assert!(res.contains("Kindly verify that the server is active."));
+    }
+
+    #[test]
+    fn test_sql_select_count_fuzzy_match_not_rejected_as_definition() {
+        let original = indoc! {r#"
+            -- Query
+            SELECT count(id) FROM orders
+            WHERE active = true;
+        "#};
+        let diff = indoc! {r#"
+            --- a/query.sql
+            +++ b/query.sql
+            @@ -1,3 +1,3 @@
+             -- Query
+            -SELECT count(id) FROM orders
+            +SELECT count(id) AS total_orders FROM orders
+             WHERE active = true;
+        "#};
+        let patch = parse_auto(diff).unwrap().remove(0);
+        let res = patch_content_str(&patch.to_string(), Some(original), &ApplyOptions::new()).unwrap();
+        assert!(res.contains("SELECT count(id) AS total_orders FROM orders"));
+    }
+
+    #[test]
+    fn test_python_with_statement_fuzzy_match_not_rejected_as_definition() {
+        let original = indoc! {r#"
+            def read_data():
+                with open("test.txt") as f:
+                    return f.read()
+        "#};
+        let diff = indoc! {r#"
+            --- a/reader.py
+            +++ b/reader.py
+            @@ -1,3 +1,4 @@
+             def read_data():
+                 with open("test.txt") as f:
+            +        log_read()
+                     return f.read()
+        "#};
+        let patch = parse_auto(diff).unwrap().remove(0);
+        let res = patch_content_str(&patch.to_string(), Some(original), &ApplyOptions::new()).unwrap();
+        assert!(res.contains("log_read()"));
+    }
 }
