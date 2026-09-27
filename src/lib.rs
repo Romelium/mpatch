@@ -3317,9 +3317,10 @@ impl Patch {
     /// assert!(patch.is_creation());
     /// ````
     pub fn is_creation(&self) -> bool {
-        let is_create = self.hunks.first().is_some_and(|h| {
-            h.old_start_line == Some(0) || h.get_match_block().is_empty()
-        });
+        let is_create = self
+            .hunks
+            .first()
+            .is_some_and(|h| h.old_start_line == Some(0) || h.get_match_block().is_empty());
         trace!(
             "Patch::is_creation for '{}': {} (first hunk old_start_line={:?})",
             self.file_path.display(),
@@ -10469,9 +10470,8 @@ fn try_apply_hunk_at_location(
                     });
 
                     if *old_index == 0 && has_substantive_head {
-                        let has_definition = (0..*old_len).any(|i| {
-                            is_definition(match_block_content[*old_index + i])
-                        });
+                        let has_definition = (0..*old_len)
+                            .any(|i| is_definition(match_block_content[*old_index + i]));
                         let lost_substantive_head = (0..(*old_len).min(head_context_end))
                             .filter(|&i| {
                                 let (is_removal, _) = &match_lines_meta[i];
@@ -10501,10 +10501,10 @@ fn try_apply_hunk_at_location(
                     });
 
                     if is_tail && !is_eof_restoration && has_substantive_tail {
-                        let has_definition = (0..*old_len).any(|i| {
-                            is_definition(match_block_content[*old_index + i])
-                        });
-                        let lost_substantive_tail = ((*old_index).max(tail_context_start)..match_block_content.len())
+                        let has_definition = (0..*old_len)
+                            .any(|i| is_definition(match_block_content[*old_index + i]));
+                        let lost_substantive_tail = ((*old_index).max(tail_context_start)
+                            ..match_block_content.len())
                             .filter(|&i| {
                                 let (is_removal, _) = &match_lines_meta[i];
                                 !*is_removal && !match_block_content[i].trim().is_empty()
@@ -10881,9 +10881,8 @@ fn try_apply_hunk_at_location(
 
                             // 1. Head context cannot be unaligned in replacement if it contains a definition or all outer context is lost
                             if *old_index == 0 && has_substantive_context {
-                                let has_definition = (0..*old_len).any(|i| {
-                                    is_definition(match_block_content[old_index + i])
-                                });
+                                let has_definition = (0..*old_len)
+                                    .any(|i| is_definition(match_block_content[old_index + i]));
                                 let lost_substantive_head = (0..(*old_len).min(head_context_end))
                                     .filter(|&i| {
                                         let (is_removal, _) = &match_lines_meta[i];
@@ -10903,10 +10902,10 @@ fn try_apply_hunk_at_location(
                             if *old_index + *old_len == match_block_content.len()
                                 && has_substantive_context
                             {
-                                let has_definition = (0..*old_len).any(|i| {
-                                    is_definition(match_block_content[old_index + i])
-                                });
-                                let lost_substantive_tail = ((*old_index).max(tail_context_start)..match_block_content.len())
+                                let has_definition = (0..*old_len)
+                                    .any(|i| is_definition(match_block_content[old_index + i]));
+                                let lost_substantive_tail = ((*old_index).max(tail_context_start)
+                                    ..match_block_content.len())
                                     .filter(|&i| {
                                         let (is_removal, _) = &match_lines_meta[i];
                                         !*is_removal && !match_block_content[i].trim().is_empty()
