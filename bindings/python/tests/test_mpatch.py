@@ -1089,3 +1089,45 @@ def test_python_find_hunk_location():
 
     # Test via Hunk method
     assert hunk.find_location("old\n") == (0, 1, "Exact")
+
+
+def test_python_merge_patches():
+    diff1 = textwrap.dedent("""\
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1 +1 @@
+        -line 1
+        +line one
+    """)
+    diff2 = textwrap.dedent("""\
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -10 +10 @@
+        -line 10
+        +line ten
+    """)
+    diff3 = textwrap.dedent("""\
+        --- a/other.txt
+        +++ b/other.txt
+        @@ -1 +1 @@
+        -foo
+        +bar
+    """)
+    p1 = mpatch.parse_single_patch(diff1)
+    p2 = mpatch.parse_single_patch(diff2)
+    p3 = mpatch.parse_single_patch(diff3)
+
+    merged = mpatch.merge_patches([p1, p3, p2])
+    assert len(merged) == 2
+    assert Path(merged[0].file_path).as_posix() == "file.txt"
+    assert len(merged[0].hunks) == 2
+    assert merged[0].hunks[0].added_lines == ["line one"]
+    assert merged[0].hunks[1].added_lines == ["line ten"]
+    assert Path(merged[1].file_path).as_posix() == "other.txt"
+    assert len(merged[1].hunks) == 1
+
+    p1_copy = mpatch.parse_single_patch(diff1)
+    p2_copy = mpatch.parse_single_patch(diff2)
+    p1_copy.merge(p2_copy)
+    assert len(p1_copy.hunks) == 2
+    assert p1_copy.hunks[1].added_lines == ["line ten"]

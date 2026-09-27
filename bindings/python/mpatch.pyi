@@ -196,6 +196,14 @@ class Patch:
     def invert(self) -> Patch:
         """Creates a new Patch that reverses the changes in this one."""
         ...
+    def merge(self, other: Patch) -> None:
+        """
+        Merges another patch targeting the same file into this patch by appending its hunks.
+
+        Args:
+            other (Patch): Another patch whose hunks will be appended to this patch.
+        """
+        ...
     def apply_to_file(
         self,
         target_dir: str | os.PathLike[Any],
@@ -534,6 +542,18 @@ def invert_patches(patches: list[Patch]) -> list[Patch]:
 
     Returns:
         list[Patch]: The inverted patches.
+    """
+    ...
+
+def merge_patches(patches: list[Patch]) -> list[Patch]:
+    """
+    Merges patches that target the same file into single patches with combined hunks.
+
+    Args:
+        patches (list[Patch]): The patches to merge.
+
+    Returns:
+        list[Patch]: The deduplicated and merged patches.
     """
     ...
 

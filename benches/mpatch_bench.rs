@@ -2,8 +2,8 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use indoc::indoc;
 use mpatch::{
     apply_patch_to_content, detect_patch, find_hunk_location_in_lines, format_inline_diff,
-    merge_three_way, parse_aider, parse_conflict_markers, parse_diffs, parse_patches, ApplyOptions,
-    Patch, WindowLengthIter,
+    merge_patches, merge_three_way, parse_aider, parse_conflict_markers, parse_diffs,
+    parse_patches, ApplyOptions, Hunk, Patch, WindowLengthIter,
 };
 
 // --- Detecting Benchmarks ---
@@ -116,6 +116,23 @@ fn parsing_benches(c: &mut Criterion) {
         b.iter(|| parse_aider(black_box(aider_diff)))
     });
 
+    // Patch Merging Benchmark (100 interleaved patches across 10 files)
+    let mut patches_to_merge = Vec::with_capacity(100);
+    for i in 0..100 {
+        let file_num = i % 10;
+        patches_to_merge.push(Patch {
+            file_path: std::path::PathBuf::from(format!("src/module_{}.rs", file_num)),
+            hunks: vec![Hunk {
+                lines: vec![format!("-old_{}", i), format!("+new_{}", i)],
+                old_start_line: Some(i * 10 + 1),
+                new_start_line: Some(i * 10 + 1),
+            }],
+            ends_with_newline: true,
+        });
+    }
+    group.bench_function("merge_patches_100_interleaved", |b| {
+        b.iter(|| merge_patches(black_box(patches_to_merge.clone())))
+    });
     group.finish();
 }
 

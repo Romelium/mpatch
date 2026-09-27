@@ -401,6 +401,15 @@ impl PyPatch {
         }
     }
 
+    /// Merges another patch targeting the same file into this patch.
+    ///
+    /// Args:
+    ///     other (Patch): Another patch whose hunks will be appended to this patch.
+    #[pyo3(signature = (other))]
+    fn merge(&mut self, other: &PyPatch) {
+        self.inner.merge(other.inner.clone());
+    }
+
     /// Applies the patch to a file on disk.
     ///
     /// Args:
@@ -1135,6 +1144,23 @@ fn invert_patches(patches: Vec<PyPatch>) -> Vec<PyPatch> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (patches))]
+/// Merges patches that target the same file into single patches with combined hunks.
+///
+/// Args:
+///     patches (list[Patch]): The patches to merge.
+///
+/// Returns:
+///     list[Patch]: The deduplicated and merged patches.
+fn merge_patches(patches: Vec<PyPatch>) -> Vec<PyPatch> {
+    let unmerged: Vec<::mpatch::Patch> = patches.into_iter().map(|p| p.inner).collect();
+    ::mpatch::merge_patches(unmerged)
+        .into_iter()
+        .map(|p| PyPatch { inner: p })
+        .collect()
+}
+
+#[pyfunction]
 #[pyo3(signature = (file_path, old_text, new_text, *, context_len=3))]
 /// Creates a unified diff string by comparing two texts.
 ///
@@ -1598,6 +1624,7 @@ fn mpatch(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parse_conflict_markers, m)?)?;
     m.add_function(wrap_pyfunction!(parse_aider, m)?)?;
     m.add_function(wrap_pyfunction!(invert_patches, m)?)?;
+    m.add_function(wrap_pyfunction!(merge_patches, m)?)?;
     m.add_function(wrap_pyfunction!(create_unified_diff, m)?)?;
     m.add_function(wrap_pyfunction!(apply_patch_to_content, m)?)?;
     m.add_function(wrap_pyfunction!(apply_patch_to_file, m)?)?;

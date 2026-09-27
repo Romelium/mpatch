@@ -278,6 +278,7 @@
 //! You can also manipulate patches before application:
 //!
 //! - [`invert_patches()`]: Reverses a list of patches (swapping additions and deletions).
+//! - [`merge_patches()`]: Merges patches that target the same file path into single [`Patch`] instances with combined hunks.
 //!
 //! ### Granular Application & Utilities
 //!
@@ -3371,6 +3372,62 @@ impl Patch {
         is_delete
     }
 
+    /// Merges another patch targeting the same file into this patch.
+    ///
+    /// Appends all hunks from `other` to this patch's hunk list and updates
+    /// `ends_with_newline` to match `other.ends_with_newline`.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - Another [`Patch`] whose hunks should be appended to this patch.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use mpatch::{Hunk, Patch};
+    /// use std::path::PathBuf;
+    ///
+    /// let mut patch1 = Patch {
+    ///     file_path: PathBuf::from("main.rs"),
+    ///     hunks: vec![Hunk {
+    ///         lines: vec!["-old1".to_string(), "+new1".to_string()],
+    ///         old_start_line: Some(1),
+    ///         new_start_line: Some(1),
+    ///     }],
+    ///     ends_with_newline: true,
+    /// };
+    /// let patch2 = Patch {
+    ///     file_path: PathBuf::from("main.rs"),
+    ///     hunks: vec![Hunk {
+    ///         lines: vec!["-old2".to_string(), "+new2".to_string()],
+    ///         old_start_line: Some(10),
+    ///         new_start_line: Some(10),
+    ///     }],
+    ///     ends_with_newline: false,
+    /// };
+    ///
+    /// patch1.merge(patch2);
+    /// assert_eq!(patch1.hunks.len(), 2);
+    /// assert_eq!(patch1.ends_with_newline, false);
+    /// ```
+    pub fn merge(&mut self, other: Patch) {
+        if self.file_path != other.file_path {
+            warn!(
+                "Patch::merge: merging patch for '{}' into patch for different file '{}'",
+                other.file_path.display(),
+                self.file_path.display()
+            );
+        } else {
+            debug!(
+                "Patch::merge: merging {} hunk(s) from '{}' into existing patch",
+                other.hunks.len(),
+                other.file_path.display()
+            );
+        }
+        self.hunks.extend(other.hunks);
+        self.ends_with_newline = other.ends_with_newline;
+    }
+
     /// Applies this patch to a file on disk.
     ///
     /// This is an associated method equivalent to [`apply_patch_to_file()`].
@@ -5217,7 +5274,7 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
         "Finished parsing. Found {} patch(es) in total.",
         all_patches.len()
     );
-    Ok(all_patches)
+    Ok(merge_patches(all_patches))
 }
 
 /// Checks if the provided lines contain a patch signature at the first level of nesting.
@@ -5756,18 +5813,11 @@ where
         return Vec::new();
     }
 
-    let mut merged_patches: Vec<Patch> = Vec::new();
-    for patch in unmerged_patches {
-        if let Some(existing) = merged_patches
-            .iter_mut()
-            .find(|p| p.file_path == patch.file_path)
-        {
-            existing.hunks.extend(patch.hunks);
-        } else {
-            merged_patches.push(patch);
-        }
-    }
-
+    debug!(
+        "parse_aider_from_lines: merging {} patch section(s) found in Aider content",
+        unmerged_patches.len()
+    );
+    let merged_patches = merge_patches(unmerged_patches);
     debug!(
         "parse_aider_from_lines: completed. Merged into {} patch(es).",
         merged_patches.len()
@@ -6208,45 +6258,11 @@ where
     }
 
     // Merge patch sections for the same file.
-    if unmerged_patches.is_empty() {
-        debug!("parse_patches_from_lines: completed. 0 patch sections found.");
-        return Ok(vec![]);
-    }
-    if unmerged_patches.len() == 1 {
-        debug!(
-            "parse_patches_from_lines: completed. Single patch section for '{}' with {} hunk(s).",
-            unmerged_patches[0].file_path.display(),
-            unmerged_patches[0].hunks.len()
-        );
-        return Ok(unmerged_patches);
-    }
-
     debug!(
-        "Merging {} patch section(s) found in the block.",
+        "parse_patches_from_lines: merging {} patch section(s)",
         unmerged_patches.len()
     );
-    let mut merged_patches: Vec<Patch> = Vec::new();
-    for patch_section in unmerged_patches {
-        if let Some(existing_patch) = merged_patches
-            .iter_mut()
-            .find(|p| p.file_path == patch_section.file_path)
-        {
-            debug!(
-                "  Merging {} hunk(s) for '{}' into existing patch.",
-                patch_section.hunks.len(),
-                patch_section.file_path.display()
-            );
-            existing_patch.hunks.extend(patch_section.hunks);
-            existing_patch.ends_with_newline = patch_section.ends_with_newline;
-        } else {
-            debug!(
-                "  Adding new patch for '{}'.",
-                patch_section.file_path.display()
-            );
-            merged_patches.push(patch_section);
-        }
-    }
-
+    let merged_patches = merge_patches(unmerged_patches);
     debug!(
         "parse_patches_from_lines: completed with {} merged patch(es).",
         merged_patches.len()
@@ -7167,6 +7183,101 @@ pub fn try_apply_patches_to_dir(
 pub fn invert_patches(patches: &[Patch]) -> Vec<Patch> {
     debug!("invert_patches: inverting {} patch(es)", patches.len());
     patches.iter().map(|p| p.invert()).collect()
+}
+
+/// Merges patches that target the same file path into single [`Patch`] instances with combined hunks.
+///
+/// Preserves the order of first appearance of each file path. Subsequent patches for an already
+/// seen file path have their hunks appended in order to that file's existing patch, and their
+/// `ends_with_newline` setting updates the patch's trailing newline status.
+///
+/// This provides a fast, deduplicated patch merging mechanism with linear $O(N)$ performance,
+/// replacing repetitive ad-hoc merging loops across parsers.
+///
+/// # Arguments
+///
+/// * `patches` - An iterator or collection yielding [`Patch`] instances to merge.
+///
+/// # Returns
+///
+/// A vector of deduplicated and merged [`Patch`] objects.
+///
+/// # Examples
+///
+/// ```rust
+/// use mpatch::{merge_patches, Hunk, Patch};
+/// use std::path::PathBuf;
+///
+/// let patch1 = Patch {
+///     file_path: PathBuf::from("file.txt"),
+///     hunks: vec![Hunk {
+///         lines: vec!["-a".to_string(), "+b".to_string()],
+///         old_start_line: Some(1),
+///         new_start_line: Some(1),
+///     }],
+///     ends_with_newline: true,
+/// };
+/// let patch2 = Patch {
+///     file_path: PathBuf::from("file.txt"),
+///     hunks: vec![Hunk {
+///         lines: vec!["-c".to_string(), "+d".to_string()],
+///         old_start_line: Some(10),
+///         new_start_line: Some(10),
+///     }],
+///     ends_with_newline: false,
+/// };
+///
+/// let merged = merge_patches(vec![patch1, patch2]);
+/// assert_eq!(merged.len(), 1);
+/// assert_eq!(merged[0].hunks.len(), 2);
+/// assert_eq!(merged[0].ends_with_newline, false);
+/// ```
+pub fn merge_patches<I>(patches: I) -> Vec<Patch>
+where
+    I: IntoIterator<Item = Patch>,
+{
+    let mut iter = patches.into_iter();
+    let first = match iter.next() {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+
+    let second = match iter.next() {
+        Some(p) => p,
+        None => return vec![first],
+    };
+
+    let (lower, _) = iter.size_hint();
+    let mut merged: Vec<Patch> = Vec::with_capacity(lower + 2);
+    let mut path_indices: HashMap<PathBuf, usize> = HashMap::with_capacity(lower + 2);
+
+    path_indices.insert(first.file_path.clone(), 0);
+    merged.push(first);
+
+    for patch in std::iter::once(second).chain(iter) {
+        if let Some(&idx) = path_indices.get(&patch.file_path) {
+            trace!(
+                "merge_patches: merging {} hunk(s) for '{}' into existing patch",
+                patch.hunks.len(),
+                patch.file_path.display()
+            );
+            merged[idx].merge(patch);
+        } else {
+            trace!(
+                "merge_patches: adding initial patch for '{}' ({} hunk(s))",
+                patch.file_path.display(),
+                patch.hunks.len()
+            );
+            path_indices.insert(patch.file_path.clone(), merged.len());
+            merged.push(patch);
+        }
+    }
+
+    debug!(
+        "merge_patches: completed deduplicated patch merging. Result: {} patch(es).",
+        merged.len()
+    );
+    merged
 }
 
 /// A convenience function that applies a single [`Patch`] to the filesystem.

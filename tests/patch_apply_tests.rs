@@ -2,11 +2,11 @@ use indoc::indoc;
 use mpatch::{
     apply_hunk_to_lines, apply_patch_to_file, apply_patch_to_lines, apply_patches_to_dir,
     apply_patches_to_dir_atomic, detect_patch, find_hunk_location, find_hunk_location_in_lines,
-    invert_patches, parse_aider, parse_auto, parse_diffs, parse_patches, parse_patches_from_lines,
-    patch_content_str, try_apply_patch_to_content, try_apply_patch_to_file,
-    try_apply_patch_to_lines, window_lengths, ApplyOptions, DefaultHunkFinder, Hunk,
-    HunkApplyError, HunkApplyStatus, HunkFinder, HunkLocation, MatchType, ParseError, Patch,
-    PatchError, PatchFormat, StrictApplyError, WindowLengthIter,
+    invert_patches, merge_patches, parse_aider, parse_auto, parse_diffs, parse_patches,
+    parse_patches_from_lines, patch_content_str, try_apply_patch_to_content,
+    try_apply_patch_to_file, try_apply_patch_to_lines, window_lengths, ApplyOptions,
+    DefaultHunkFinder, Hunk, HunkApplyError, HunkApplyStatus, HunkFinder, HunkLocation, MatchType,
+    ParseError, Patch, PatchError, PatchFormat, StrictApplyError, WindowLengthIter,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -13419,4 +13419,136 @@ mod window_length_iter_tests {
         assert_eq!(iter.next(), None);
         assert_eq!(iter.next(), None);
     }
+}
+
+#[test]
+fn test_merge_patches_comprehensive() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    // 1. Empty input
+    let empty: Vec<Patch> = Vec::new();
+    assert!(merge_patches(empty).is_empty());
+
+    // 2. Single patch
+    let p1 = Patch {
+        file_path: std::path::PathBuf::from("a.txt"),
+        hunks: vec![Hunk {
+            lines: vec!["-1".to_string(), "+2".to_string()],
+            old_start_line: Some(1),
+            new_start_line: Some(1),
+        }],
+        ends_with_newline: true,
+    };
+    let merged_single = merge_patches(vec![p1.clone()]);
+    assert_eq!(merged_single.len(), 1);
+    assert_eq!(merged_single[0], p1);
+
+    // 3. Same file multiple patches
+    let p2 = Patch {
+        file_path: std::path::PathBuf::from("a.txt"),
+        hunks: vec![Hunk {
+            lines: vec!["-10".to_string(), "+20".to_string()],
+            old_start_line: Some(10),
+            new_start_line: Some(10),
+        }],
+        ends_with_newline: false,
+    };
+    let merged_same = merge_patches(vec![p1.clone(), p2.clone()]);
+    assert_eq!(merged_same.len(), 1);
+    assert_eq!(merged_same[0].file_path.to_str().unwrap(), "a.txt");
+    assert_eq!(merged_same[0].hunks.len(), 2);
+    assert!(!merged_same[0].ends_with_newline);
+
+    // 4. Interleaved files preserving first-appearance order
+    let p_b = Patch {
+        file_path: std::path::PathBuf::from("b.txt"),
+        hunks: vec![Hunk {
+            lines: vec!["-x".to_string(), "+y".to_string()],
+            old_start_line: Some(5),
+            new_start_line: Some(5),
+        }],
+        ends_with_newline: true,
+    };
+    let p_c = Patch {
+        file_path: std::path::PathBuf::from("c.txt"),
+        hunks: vec![Hunk {
+            lines: vec!["-foo".to_string(), "+bar".to_string()],
+            old_start_line: Some(2),
+            new_start_line: Some(2),
+        }],
+        ends_with_newline: true,
+    };
+    let p_b2 = Patch {
+        file_path: std::path::PathBuf::from("b.txt"),
+        hunks: vec![Hunk {
+            lines: vec!["-w".to_string(), "+z".to_string()],
+            old_start_line: Some(15),
+            new_start_line: Some(15),
+        }],
+        ends_with_newline: true,
+    };
+
+    let merged_interleaved = merge_patches(vec![
+        p1.clone(),
+        p_b.clone(),
+        p_c.clone(),
+        p2.clone(),
+        p_b2.clone(),
+    ]);
+    assert_eq!(merged_interleaved.len(), 3);
+    assert_eq!(merged_interleaved[0].file_path.to_str().unwrap(), "a.txt");
+    assert_eq!(merged_interleaved[0].hunks.len(), 2);
+    assert_eq!(merged_interleaved[1].file_path.to_str().unwrap(), "b.txt");
+    assert_eq!(merged_interleaved[1].hunks.len(), 2);
+    assert_eq!(merged_interleaved[2].file_path.to_str().unwrap(), "c.txt");
+    assert_eq!(merged_interleaved[2].hunks.len(), 1);
+
+    // 5. Patch::merge method directly
+    let mut target = p1;
+    target.merge(p2);
+    assert_eq!(target.hunks.len(), 2);
+    assert!(!target.ends_with_newline);
+}
+
+#[test]
+fn test_parse_diffs_merges_separate_blocks_for_same_file() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let content = indoc! {r#"
+        First change to file:
+        ```diff
+        --- a/service.rs
+        +++ b/service.rs
+        @@ -1 +1 @@
+        -fn start() {}
+        +fn start() { init(); }
+        ```
+
+        Some commentary in between the patches.
+
+        Second change to the same file:
+        ```diff
+        --- a/service.rs
+        +++ b/service.rs
+        @@ -10 +10 @@
+        -fn stop() {}
+        +fn stop() { cleanup(); }
+        ```
+    "#};
+
+    let patches = parse_diffs(content).unwrap();
+    assert_eq!(
+        patches.len(),
+        1,
+        "Separate markdown blocks modifying the same file must be merged into one Patch"
+    );
+    assert_eq!(patches[0].file_path.to_str().unwrap(), "service.rs");
+    assert_eq!(patches[0].hunks.len(), 2);
+    assert_eq!(
+        patches[0].hunks[0].added_lines(),
+        vec!["fn start() { init(); }"]
+    );
+    assert_eq!(
+        patches[0].hunks[1].added_lines(),
+        vec!["fn stop() { cleanup(); }"]
+    );
 }

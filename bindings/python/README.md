@@ -208,6 +208,19 @@ reversed_patch = ~patch
 reversed_patch.apply_to_file("./my_project")
 ```
 
+### 7. Deduplicating and Merging Patches
+Consolidate multiple patches or blocks targeting the same file into unified `Patch` objects:
+
+```python
+import mpatch
+
+# Combine all patches targeting the same file path
+consolidated = mpatch.merge_patches(patches)
+
+# Or merge an individual patch into another:
+patch1.merge(patch2)
+```
+
 ### 7. Creating Diffs Programmatically
 Need to generate a unified diff between two strings? You can generate the raw string representation or get a `Patch` object directly.
 

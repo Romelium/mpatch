@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Parser & Formats
 - **Aider Search/Replace Blocks:** Added native support for Aider search/replace blocks (`<<<<<<< SEARCH`, `=======`, `>>>>>>> REPLACE` along with `ORIGINAL` and `UPDATED` syntax variants) via `mpatch::parse_aider`, `mpatch::parse_aider_from_lines`, and `PatchFormat::Aider`.
 - **Automatic Format Detection:** Updated `detect_patch`, `parse_auto`, and `parse_diffs` to recognize and parse Aider search/replace blocks alongside unified diffs, markdown code fences, and conflict markers.
+- **Deduplicated Patch Merging:** Added `mpatch::merge_patches` and `Patch::merge` to consolidate multiple patch blocks targeting the same file path into single `Patch` objects with combined hunks in linear $O(N)$ time.
 - **Heuristic Target File Path Detection:** Implemented `extract_file_path_from_line`, `is_plausible_file_path`, and `normalize_candidate_path` to infer target file paths from preceding markdown text, headings, code comments (`// filepath:`), backticks, and search fence headers for blocks lacking unified diff headers.
 - **Wildcard & Ellipsis Matching:** Added support for wildcard ellipsis lines (`...`, `…`, `// ... existing code ...`, `<!-- ... -->`, `# ... rest of function ...`, etc.) across single and multi-segment hunks via `is_ellipsis_line`. Multi-line code gaps between anchors are accurately preserved while strictly guarding against runaway gaps or syntax false positives.
 - **Zero-Allocation Window Length Iterator:** Added `mpatch::WindowLengthIter` and `mpatch::window_lengths` implementing `Iterator`, `ExactSizeIterator`, and `FusedIterator` to generate candidate window lengths radiating outward from nominal length without heap allocations.
@@ -44,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Aider Parsing:** Exposed `mpatch.parse_aider` and updated `detect_patch` and type stubs (`mpatch.pyi`) for Aider search/replace blocks.
 - **Atomic Operations:** Added the `atomic: bool = False` keyword parameter to `apply_directory`, `apply_patches_to_dir`, `apply_patch_to_file`, and `Patch.apply_to_file`, alongside dedicated `apply_patch_to_file_atomic`, `apply_patches_to_dir_atomic`, and `Patch.apply_to_file_atomic` functions.
 - **Batch Outcome Inspection:** Added `BatchResult.has_failures` and normalized cross-platform path lookups in `BatchResult`.
+- **Deduplicated Patch Merging:** Exposed `mpatch.merge_patches` and `Patch.merge`.
 - **Merge & Inline Functions:** Exposed `mpatch.merge_three_way` and `mpatch.format_inline_diff` with comprehensive type annotations (`mpatch.pyi`).
 - **API Expansion:** Exposed `mpatch.parse_single_patch`, `mpatch.suggest_close_file_paths`, `mpatch.find_hunk_location`, `Hunk.find_location`, `Hunk.required_match_span`, and `mpatch.ensure_path_is_safe`.
 - **Path & Wildcard Inspection Utilities:** Exposed `mpatch.is_ellipsis_line`, `mpatch.is_plausible_file_path`, and `mpatch.extract_file_path_from_line`.
@@ -62,6 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Performance
 
 - **Histogram Sequence Comparisons:** Switched word-level sequence comparisons in `score_window`, `find_statement_match_in_block`, and `try_apply_hunk_at_location` to `similar::Algorithm::Histogram`, eliminating quadratic Myers degradation on repetitive code.
+- **Linear-Time Patch Deduplication:** Replaced $O(N^2)$ ad-hoc patch merging loops in `parse_patches_from_lines`, `parse_aider_from_lines`, and `parse_diffs` with `merge_patches`, using index-mapped tracking and fast-path handling for single/empty patch sets.
 - **$O(N + M)$ Single-Pass Inverted Indexing:** Implemented single-pass inverted indexing for candidate anchor discovery, evaluating up to 100 high-entropy lines across hunks in $O(1)$ lookups instead of repetitive $O(N)$ linear scans.
 - **Admissible Upper-Bound Pruning:** Added mathematical upper-bound pruning and lazy metric evaluation in `score_window` to skip expensive character- and word-level diff evaluations when line-level similarity bounds show the candidate window cannot reach the fuzz threshold.
 - **Zero-Allocation Window Length Search:** Refactored candidate window length exploration in `WindowScorer::score_candidate` radiating from nominal hunk length to use the zero-allocation `WindowLengthIter`, eliminating thousands of transient `Vec` heap allocations during sliding window fuzzy search.

@@ -274,6 +274,16 @@ let reversed = invert_patches(&patches);
 // Now apply `reversed` to undo changes
 ```
 
+### 4. Deduplicating and Merging Patches
+Consolidate multiple patch sections or blocks targeting the same file into unified `Patch` objects with combined hunks:
+
+```rust
+use mpatch::merge_patches;
+
+// Automatically merges patches targeting the same file in O(N) time
+let consolidated = merge_patches(patches);
+```
+
 ### 4. Strict Apply-or-Fail Workflow
 If you want to treat partial applications (where some hunks fail) as an error, use the `try_` variants.
 
