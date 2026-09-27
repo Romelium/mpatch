@@ -209,7 +209,7 @@ Ideal for processing text in memory.
 use mpatch::{patch_content_str, ApplyOptions};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let original_code = "fn main() { println!(\"Old\"); }";
+    let original_code = "fn main() { println!(\"Old\"); }\n";
 
     // Input can be Markdown, Raw Diff, or Conflict Markers
     let patch_text = r#"
@@ -225,7 +225,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let options = ApplyOptions::new(); // Default fuzz_factor: 0.7
     let new_code = patch_content_str(patch_text, Some(original_code), &options)?;
 
-    assert_eq!(new_code, "fn main() { println!(\"New\"); }");
+    assert_eq!(new_code, "fn main() { println!(\"New\"); }\n");
     Ok(())
 }
 ```
@@ -238,7 +238,20 @@ use mpatch::{parse_auto, apply_patches_to_dir, ApplyOptions};
 use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let diff_content = include_str!("../tests/fixtures/changes.md");
+    let diff_content = r#"
+    ```diff
+    --- a/file1.txt
+    +++ b/file1.txt
+    @@ -1 +1 @@
+    -foo
+    +bar
+    --- a/file2.txt
+    +++ b/file2.txt
+    @@ -1 +1 @@
+    -baz
+    +qux
+    ```
+    "#;
 
     // 1. Parse (automatically detects format)
     let patches = parse_auto(diff_content)?;
@@ -284,14 +297,14 @@ use mpatch::merge_patches;
 let consolidated = merge_patches(patches);
 ```
 
-### 4. Strict Apply-or-Fail Workflow
+### 5. Strict Apply-or-Fail Workflow
 If you want to treat partial applications (where some hunks fail) as an error, use the `try_` variants.
 
 ```rust
 use mpatch::{parse_single_patch, try_apply_patch_to_content, ApplyOptions, StrictApplyError};
 
-let original_content = "fn main() { println!(\"Old\"); }";
-let diff_content = "--- a/main.rs\n+++ b/main.rs\n@@ -1 +1 @@\n-fn main() { println!(\"Old\"); }\n+fn main() { println!(\"New\"); }";
+let original_content = "fn main() { println!(\"Old\"); }\n";
+let diff_content = "--- a/main.rs\n+++ b/main.rs\n@@ -1 +1 @@\n-fn main() { println!(\"Old\"); }\n+fn main() { println!(\"New\"); }\n";
 
 let patch = parse_single_patch(diff_content)?;
 let options = ApplyOptions::exact();
@@ -306,7 +319,7 @@ match try_apply_patch_to_content(&patch, Some(original_content), &options) {
 }
 ```
 
-### 5. Creating Patches
+### 6. Creating Patches
 You can also use `mpatch` to generate patches by comparing two strings.
 
 ```rust
@@ -321,7 +334,7 @@ let patch = Patch::from_texts("src/main.rs", old_text, new_text, 3).unwrap();
 println!("{}", patch);
 ```
 
-### 6. Atomic (All-or-Nothing) Batch Application
+### 7. Atomic (All-or-Nothing) Batch Application
 Stage all changes in memory and commit to disk if and only if all hunks across all patches apply cleanly:
 
 ```rust
@@ -345,7 +358,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### 7. Aider Search/Replace with Wildcard Ellipsis Matching
+### 8. Aider Search/Replace with Wildcard Ellipsis Matching
 Apply Aider search/replace blocks containing wildcard ellipsis lines (`...`) that match and preserve multi-line code gaps:
 
 ```rust
@@ -376,7 +389,7 @@ def compute(x):
 }
 ```
 
-### 8. Three-Way Line Merging
+### 9. Three-Way Line Merging
 Perform line-level 3-way merges backed by `similar::TextMerge`, automatically generating Diff3 conflict markers on conflicts:
 
 ```rust
@@ -391,7 +404,7 @@ assert!(!is_conflicted);
 assert_eq!(merged, "Apples\nBlueberries\nCherries\nDragonfruit\n");
 ```
 
-### 9. Inline Word Diffs & Path Suggestions
+### 10. Inline Word Diffs & Path Suggestions
 Visualize sub-line changes with word-level highlights and suggest close matching file paths when a target is not found:
 
 ```rust

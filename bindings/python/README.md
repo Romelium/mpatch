@@ -221,7 +221,7 @@ consolidated = mpatch.merge_patches(patches)
 patch1.merge(patch2)
 ```
 
-### 7. Creating Diffs Programmatically
+### 8. Creating Diffs Programmatically
 Need to generate a unified diff between two strings? You can generate the raw string representation or get a `Patch` object directly.
 
 ```python
@@ -244,7 +244,7 @@ patch = mpatch.Patch.from_texts("fruits.txt", old_text, new_text)
 print(patch[0].removed_lines)  # ['banana']
 ```
 
-### 8. Aider Search/Replace Blocks with Wildcards
+### 9. Aider Search/Replace Blocks with Wildcards
 Apply Aider-style search/replace blocks directly. The parser automatically detects file paths and supports wildcard ellipsis lines (`...`) to preserve intermediate code gaps.
 
 ```python
@@ -280,7 +280,7 @@ result = mpatch.patch_content(diff, original=original_code)
 # Normalization and output steps are preserved; Step 2 is updated!
 ```
 
-### 9. Three-Way Line Merging
+### 10. Three-Way Line Merging
 Perform line-level 3-way merges between an ancestor (`base`), local code (`ours`), and incoming changes (`theirs`):
 
 ```python
@@ -295,6 +295,7 @@ assert not is_conflicted
 print(merged)
 # Apples
 # Blueberries
+# Cherries
 # Dragonfruit
 
 # If there is a conflict, standard Diff3 markers are inserted:
@@ -315,7 +316,7 @@ print(conflict_merged)
 # >>>>>>> theirs
 ```
 
-### 10. Sub-Line Word Diff Visualization
+### 11. Sub-Line Word Diff Visualization
 Format near-miss comparisons or word-level diffs with highlighted changes:
 
 ```python
@@ -328,7 +329,7 @@ diff_view = mpatch.format_inline_diff(expected, actual)
 print(diff_view)
 ```
 
-### 11. Format Detection
+### 12. Format Detection
 Inspect the format of an incoming patch string before processing:
 
 ```python
@@ -338,7 +339,7 @@ fmt = mpatch.detect_patch(diff_string)
 # Returns: 'Markdown', 'Unified', 'Aider', 'Conflict', or 'Unknown'
 ```
 
-### 12. Path Validation & Missing Target Suggestions
+### 13. Path Validation & Missing Target Suggestions
 Suggest close matching files in the target directory when a patch specifies an unknown or misspelled file path:
 
 ```python
@@ -354,7 +355,7 @@ for candidate in suggestions:
 safe_path = mpatch.ensure_path_is_safe("./src", "utils/helpers.py")
 ```
 
-### 13. Wildcard Ellipsis & Path Utilities
+### 14. Wildcard Ellipsis & Path Utilities
 Check for wildcard ellipsis lines or extract file paths from conversational prose:
 
 ```python

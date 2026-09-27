@@ -1131,3 +1131,290 @@ def test_python_merge_patches():
     p1_copy.merge(p2_copy)
     assert len(p1_copy.hunks) == 2
     assert p1_copy.hunks[1].added_lines == ["line ten"]
+
+
+# --- README Examples Tests ---
+
+
+def test_python_readme_problem_and_solution_table():
+    original = textwrap.dedent("""\
+        def main():
+            # Updated comment
+            print("Hello")
+    """)
+    diff = textwrap.dedent("""\
+        --- a/main.py
+        +++ b/main.py
+        @@ -1,3 +1,3 @@
+         def main():
+        -    print("Hello")
+        +    print("World")
+    """)
+    patched = mpatch.patch_content(diff, original=original)
+    expected = textwrap.dedent("""\
+        def main():
+            # Updated comment
+            print("World")
+    """)
+    assert patched == expected
+
+
+def test_python_readme_quick_start():
+    original_code = """\
+def greet():
+    print("Hello, old friend")
+"""
+    diff = """\
+Here is the fix:
+```diff
+--- a/greet.py
++++ b/greet.py
+@@ -1,2 +1,2 @@
+ def greet():
+-    print("Hello, old friend")
++    print("Hello, new world!")
+```
+"""
+    new_code = mpatch.patch_content(diff, original=original_code)
+    expected = """\
+def greet():
+    print("Hello, new world!")
+"""
+    assert new_code == expected
+
+
+def test_python_readme_tour_parsing_and_inspecting():
+    diff_string = textwrap.dedent("""\
+        --- a/example.py
+        +++ b/example.py
+        @@ -1 +1 @@
+        -old
+        +new
+    """)
+    patches = mpatch.parse_auto(diff_string)
+    assert len(patches) == 1
+    for patch in patches:
+        assert Path(patch.file_path).as_posix() == "example.py"
+        assert len(patch) == 1
+        assert not patch.is_creation
+
+    patch = patches[0]
+    for i, hunk in enumerate(patch):
+        assert hunk.removed_lines == ["old"]
+        assert hunk.added_lines == ["new"]
+        assert hunk.required_match_span == 1
+
+    single_diff_str = textwrap.dedent("""\
+        --- a/single.py
+        +++ b/single.py
+        @@ -1 +1 @@
+        -a
+        +b
+    """)
+    single_patch = mpatch.parse_single_patch(single_diff_str)
+    assert Path(single_patch.file_path).as_posix() == "single.py"
+
+
+def test_python_readme_tour_filesystem_and_atomicity(tmp_path: Path):
+    target_dir = tmp_path / "my_project"
+    target_dir.mkdir()
+    target_file = target_dir / "file.txt"
+    target_file.write_text("hello\n")
+
+    diff = textwrap.dedent("""\
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1 +1 @@
+        -hello
+        +world
+    """)
+
+    # 1. apply_directory
+    success = mpatch.apply_directory(diff, target_dir)
+    assert success is True
+    assert target_file.read_text() == "world\n"
+
+    # 2. apply_directory with atomic=True
+    diff_atomic = textwrap.dedent("""\
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1 +1 @@
+        -world
+        +universe
+    """)
+    success = mpatch.apply_directory(diff_atomic, target_dir, atomic=True)
+    assert success is True
+    assert target_file.read_text() == "universe\n"
+
+    # 3. apply_patches_to_dir
+    diff_batch = textwrap.dedent("""\
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1 +1 @@
+        -universe
+        +multiverse
+    """)
+    patches = mpatch.parse_auto(diff_batch)
+    batch_result = mpatch.apply_patches_to_dir(patches, target_dir)
+    assert batch_result.all_succeeded is True
+    assert not batch_result.has_failures
+    assert target_file.read_text() == "multiverse\n"
+
+
+def test_python_readme_tour_reporting_and_dry_run(tmp_path: Path):
+    target_dir = tmp_path / "my_project"
+    target_dir.mkdir()
+    target_file = target_dir / "calc.py"
+    target_file.write_text("def calc(): return 1\n")
+
+    diff = textwrap.dedent("""\
+        --- a/calc.py
+        +++ b/calc.py
+        @@ -1 +1 @@
+        -def calc(): return 1
+        +def calc(): return 2
+    """)
+    patch = mpatch.parse_auto(diff)[0]
+
+    # Dry run with fuzz factor
+    result = patch.apply_to_file(target_dir, fuzz_factor=0.5, dry_run=True)
+    assert result.report.all_applied_cleanly is True
+    assert result.diff is not None
+    assert "+def calc(): return 2" in result.diff
+    assert target_file.read_text() == "def calc(): return 1\n"
+
+    # Invert patch with ~
+    reversed_patch = ~patch
+    assert reversed_patch[0].removed_lines == ["def calc(): return 2"]
+    assert reversed_patch[0].added_lines == ["def calc(): return 1"]
+
+
+def test_python_readme_tour_deduplication_and_diff_creation():
+    diff1 = textwrap.dedent("""\
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1 +1 @@
+        -line 1
+        +line one
+    """)
+    diff2 = textwrap.dedent("""\
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -10 +10 @@
+        -line 10
+        +line ten
+    """)
+    patches = mpatch.parse_auto(diff1) + mpatch.parse_auto(diff2)
+    consolidated = mpatch.merge_patches(patches)
+    assert len(consolidated) == 1
+    assert len(consolidated[0].hunks) == 2
+
+    # Patch.merge
+    p1 = mpatch.parse_single_patch(diff1)
+    p2 = mpatch.parse_single_patch(diff2)
+    p1.merge(p2)
+    assert len(p1.hunks) == 2
+
+    # create_unified_diff & Patch.from_texts
+    old_text = "apple\nbanana\npineapple\n"
+    new_text = "apple\norange\npineapple\n"
+    diff_str = mpatch.create_unified_diff("fruits.txt", old_text, new_text)
+    assert "--- a/fruits.txt" in diff_str
+    assert "+++ b/fruits.txt" in diff_str
+    assert "-banana" in diff_str
+    assert "+orange" in diff_str
+
+    patch_obj = mpatch.Patch.from_texts("fruits.txt", old_text, new_text)
+    assert patch_obj[0].removed_lines == ["banana"]
+    assert patch_obj[0].added_lines == ["orange"]
+
+
+def test_python_readme_tour_aider_wildcards():
+    original_code = textwrap.dedent("""\
+        def process_data(data):
+            validate(data)
+            # Step 1: Normalize
+            normalized = [x.strip() for x in data]
+            # Step 2: Transform
+            transformed = [x.upper() for x in normalized]
+            # Step 3: Output
+            return transformed
+    """)
+
+    diff = textwrap.dedent("""\
+        process.py
+        <<<<<<< SEARCH
+        def process_data(data):
+            ...
+            # Step 2: Transform
+            transformed = [x.upper() for x in normalized]
+        =======
+        def process_data(data):
+            ...
+            # Step 2: Transform
+            transformed = [x.lower() for x in normalized]
+        >>>>>>> REPLACE
+    """)
+
+    result = mpatch.patch_content(diff, original=original_code)
+    assert "validate(data)" in result
+    assert "# Step 1: Normalize" in result
+    assert "normalized = [x.strip() for x in data]" in result
+    assert "transformed = [x.lower() for x in normalized]" in result
+    assert "# Step 3: Output" in result
+    assert "return transformed" in result
+
+
+def test_python_readme_tour_three_way_merge():
+    base = "Apples\nBananas\nCherries\nDates\n"
+    ours = "Apples\nBlueberries\nCherries\nDates\n"
+    theirs = "Apples\nBananas\nCherries\nDragonfruit\n"
+
+    merged, is_conflicted = mpatch.merge_three_way(base, ours, theirs)
+    assert not is_conflicted
+    assert merged == "Apples\nBlueberries\nCherries\nDragonfruit\n"
+
+    conflict_merged, is_conflicted = mpatch.merge_three_way(
+        "val = 1\n",
+        "val = 2\n",
+        "val = 3\n",
+        labels=("base", "ours", "theirs"),
+    )
+    assert is_conflicted
+    assert "<<<<<<< ours\nval = 2\n" in conflict_merged
+    assert "||||||| base\nval = 1\n" in conflict_merged
+    assert "=======\nval = 3\n" in conflict_merged
+    assert ">>>>>>> theirs\n" in conflict_merged
+
+
+def test_python_readme_tour_inline_diff_and_utilities(tmp_path: Path):
+    expected = ["def calculate(val: int, factor: float = 1.0) -> float:"]
+    actual = ["def calculate(val: int, factor: float = 2.5) -> float:"]
+
+    diff_view = mpatch.format_inline_diff(expected, actual)
+    assert "calculate" in diff_view
+    assert "1.0" in diff_view
+    assert "2.5" in diff_view
+
+    fmt = mpatch.detect_patch("```diff\n--- a/f\n+++ b/f\n```")
+    assert fmt == "Markdown"
+
+    # suggest_close_file_paths & ensure_path_is_safe
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    (src_dir / "calculate.rs").write_text("fn calculate() {}\n")
+
+    suggestions = mpatch.suggest_close_file_paths("calculate.rs", src_dir, limit=3)
+    assert len(suggestions) >= 1
+    assert "calculate.rs" in str(suggestions[0])
+
+    safe_path = mpatch.ensure_path_is_safe(src_dir, "utils/helpers.py")
+    assert safe_path.is_absolute()
+
+    # Wildcard and path inspection
+    assert mpatch.is_ellipsis_line("// ... existing code ...") is True
+    assert mpatch.is_ellipsis_line("const copy = [...items];") is False
+
+    path = mpatch.extract_file_path_from_line("In `src/server.ts`, replace the handler:")
+    assert Path(path).as_posix() == "src/server.ts"
+    assert mpatch.is_plausible_file_path("src/server.ts") is True

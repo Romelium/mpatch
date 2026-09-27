@@ -2,13 +2,15 @@ use indoc::indoc;
 use mpatch::{
     apply_hunk_to_lines, apply_patch_to_file, apply_patch_to_lines, apply_patches_to_dir,
     apply_patches_to_dir_atomic, detect_patch, find_hunk_location, find_hunk_location_in_lines,
-    invert_patches, merge_patches, parse_aider, parse_auto, parse_diffs, parse_patches,
-    parse_patches_from_lines, patch_content_str, try_apply_patch_to_content,
-    try_apply_patch_to_file, try_apply_patch_to_lines, window_lengths, ApplyOptions,
-    DefaultHunkFinder, Hunk, HunkApplyError, HunkApplyStatus, HunkFinder, HunkLocation, MatchType,
-    ParseError, Patch, PatchError, PatchFormat, StrictApplyError, WindowLengthIter,
+    format_inline_diff, invert_patches, merge_patches, merge_three_way, parse_aider, parse_auto,
+    parse_diffs, parse_patches, parse_patches_from_lines, parse_single_patch, patch_content_str,
+    suggest_close_file_paths, try_apply_patch_to_content, try_apply_patch_to_file,
+    try_apply_patch_to_lines, window_lengths, ApplyOptions, DefaultHunkFinder, Hunk,
+    HunkApplyError, HunkApplyStatus, HunkFinder, HunkLocation, MatchType, ParseError, Patch,
+    PatchError, PatchFormat, StrictApplyError, WindowLengthIter,
 };
 use std::fs;
+use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
 #[test]
@@ -13749,4 +13751,432 @@ fn test_parse_diffs_merges_separate_blocks_for_same_file() {
         patches[0].hunks[1].added_lines(),
         vec!["fn stop() { cleanup(); }"]
     );
+}
+
+mod readme_examples_tests {
+    use super::*;
+    use indoc::indoc;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use tempfile::tempdir;
+
+    /// Verifies the "The Problem and the Solution" comparison table from README.md:
+    /// A local file with an extra comment line is modified cleanly by an AI patch
+    /// with stale context via fuzzy matching.
+    #[test]
+    fn test_readme_problem_and_solution_table() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let original = indoc! {r#"
+            fn main() {
+                // Forgettable comment
+                println!("Hello");
+            }
+        "#};
+
+        let patch = indoc! {r#"
+            --- a/main.rs
+            +++ b/main.rs
+            @@ -1,4 +1,4 @@
+             fn main() {
+            -    println!("Hello");
+            +    println!("World");
+             }
+        "#};
+
+        let expected = indoc! {r#"
+            fn main() {
+                // Forgettable comment
+                println!("World");
+            }
+        "#};
+
+        let options = ApplyOptions::new();
+        let result = patch_content_str(patch, Some(original), &options).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    /// Verifies Library Usage Example 1: Simple One-Shot (String to String).
+    /// Note: `patch_content_str` normalizes EOF with a trailing newline unless
+    /// explicitly suppressed with `\ No newline at end of file`.
+    #[test]
+    fn test_readme_library_usage_1_simple_one_shot() -> Result<(), Box<dyn std::error::Error>> {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let original_code = "fn main() { println!(\"Old\"); }\n";
+
+        // Input can be Markdown, Raw Diff, or Conflict Markers
+        let patch_text = indoc! {r#"
+            ```diff
+            --- a/main.rs
+            +++ b/main.rs
+            @@ -1 +1 @@
+            -fn main() { println!("Old"); }
+            +fn main() { println!("New"); }
+            ```
+        "#};
+
+        let options = ApplyOptions::new(); // Default fuzz_factor: 0.7
+        let new_code = patch_content_str(patch_text, Some(original_code), &options)?;
+
+        assert_eq!(new_code, "fn main() { println!(\"New\"); }\n");
+        Ok(())
+    }
+
+    /// Verifies Library Usage Example 2: Batch Application (File System).
+    #[test]
+    fn test_readme_library_usage_2_batch_application() -> Result<(), Box<dyn std::error::Error>> {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir()?;
+        let target_dir = dir.path();
+        fs::write(target_dir.join("file1.txt"), "foo\n")?;
+        fs::write(target_dir.join("file2.txt"), "baz\n")?;
+
+        let diff_content = indoc! {r#"
+            ```diff
+            --- a/file1.txt
+            +++ b/file1.txt
+            @@ -1 +1 @@
+            -foo
+            +bar
+            --- a/file2.txt
+            +++ b/file2.txt
+            @@ -1 +1 @@
+            -baz
+            +qux
+            ```
+        "#};
+
+        // 1. Parse (automatically detects format)
+        let patches = parse_auto(diff_content)?;
+
+        // 2. Apply
+        let options = ApplyOptions::new();
+        let results = apply_patches_to_dir(&patches, target_dir, options);
+
+        assert!(results.all_succeeded());
+        assert!(results.hard_failures().is_empty());
+        assert_eq!(fs::read_to_string(target_dir.join("file1.txt"))?, "bar\n");
+        assert_eq!(fs::read_to_string(target_dir.join("file2.txt"))?, "qux\n");
+        Ok(())
+    }
+
+    /// Verifies Library Usage Example 3: Reversing Patches.
+    #[test]
+    fn test_readme_library_usage_3_reversing_patches() -> Result<(), Box<dyn std::error::Error>> {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let diff_content = "--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new";
+        let patches = parse_auto(diff_content)?;
+        let reversed = invert_patches(&patches);
+
+        assert_eq!(reversed.len(), 1);
+        assert_eq!(reversed[0].hunks[0].removed_lines(), vec!["new"]);
+        assert_eq!(reversed[0].hunks[0].added_lines(), vec!["old"]);
+        Ok(())
+    }
+
+    /// Verifies Library Usage Example 4: Deduplicating and Merging Patches.
+    #[test]
+    fn test_readme_library_usage_4_deduplicating_and_merging_patches(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let diff1 = "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old1\n+new1\n";
+        let diff2 = "--- a/file.txt\n+++ b/file.txt\n@@ -10 +10 @@\n-old2\n+new2\n";
+        let mut patches = parse_auto(diff1)?;
+        patches.extend(parse_auto(diff2)?);
+
+        // Automatically merges patches targeting the same file in O(N) time
+        let consolidated = merge_patches(patches);
+        assert_eq!(consolidated.len(), 1);
+        assert_eq!(consolidated[0].file_path, Path::new("file.txt"));
+        assert_eq!(consolidated[0].hunks.len(), 2);
+        assert_eq!(consolidated[0].hunks[0].added_lines(), vec!["new1"]);
+        assert_eq!(consolidated[0].hunks[1].added_lines(), vec!["new2"]);
+        Ok(())
+    }
+
+    /// Verifies Library Usage Example 5: Strict Apply-or-Fail Workflow.
+    #[test]
+    fn test_readme_library_usage_5_strict_apply_or_fail() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let original_content = "fn main() { println!(\"Old\"); }\n";
+        let diff_content = "--- a/main.rs\n+++ b/main.rs\n@@ -1 +1 @@\n-fn main() { println!(\"Old\"); }\n+fn main() { println!(\"New\"); }\n";
+
+        let patch = parse_single_patch(diff_content)?;
+        let options = ApplyOptions::exact();
+
+        let mut applied_cleanly = false;
+        // Returns an Err if any hunk fails to apply
+        match try_apply_patch_to_content(&patch, Some(original_content), &options) {
+            Ok(result) => {
+                assert_eq!(result.new_content, "fn main() { println!(\"New\"); }\n");
+                assert!(result.report.all_applied_cleanly());
+                applied_cleanly = true;
+            }
+            Err(StrictApplyError::PartialApply { report }) => {
+                panic!(
+                    "Patch partially applied: {} hunks failed.",
+                    report.failure_count()
+                );
+            }
+            Err(e) => panic!("Hard error: {}", e),
+        }
+        assert!(applied_cleanly);
+
+        let failing_diff = "--- a/main.rs\n+++ b/main.rs\n@@ -1 +1 @@\n-fn main() { println!(\"Different\"); }\n+fn main() { println!(\"New\"); }\n";
+        let failing_patch = parse_single_patch(failing_diff)?;
+        let failure_res =
+            try_apply_patch_to_content(&failing_patch, Some(original_content), &options);
+        assert!(matches!(
+            failure_res,
+            Err(StrictApplyError::PartialApply { .. })
+        ));
+        Ok(())
+    }
+
+    /// Verifies Library Usage Example 6: Creating Patches.
+    #[test]
+    fn test_readme_library_usage_6_creating_patches() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let old_text = "fn main() { println!(\"Old\"); }";
+        let new_text = "fn main() { println!(\"New\"); }";
+
+        // Create a patch with 3 lines of context
+        let patch = Patch::from_texts("src/main.rs", old_text, new_text, 3).unwrap();
+
+        let patch_display = format!("{}", patch);
+        assert!(patch_display.contains("--- a/src/main.rs"));
+        assert!(patch_display.contains("+++ b/src/main.rs"));
+        assert!(patch_display.contains("-fn main() { println!(\"Old\"); }"));
+        assert!(patch_display.contains("+fn main() { println!(\"New\"); }"));
+    }
+
+    /// Verifies Library Usage Example 7: Atomic (All-or-Nothing) Batch Application.
+    #[test]
+    fn test_readme_library_usage_7_atomic_batch_application(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir()?;
+        let target_dir = dir.path();
+        let file_path = target_dir.join("file.txt");
+        fs::write(&file_path, "old\n")?;
+
+        let diff_content = "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n";
+        let patches = parse_auto(diff_content)?;
+        let options = ApplyOptions::exact();
+
+        // Changes are only written to disk if ALL patches and hunks succeed
+        let batch = apply_patches_to_dir_atomic(&patches, target_dir, options);
+        assert!(batch.all_applied_cleanly());
+        assert_eq!(fs::read_to_string(&file_path)?, "new\n");
+        Ok(())
+    }
+
+    /// Verifies Library Usage Example 8: Aider Search/Replace with Wildcard Ellipsis Matching.
+    #[test]
+    fn test_readme_library_usage_8_aider_search_replace_wildcards(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let original =
+            "def compute(x):\n    setup()\n    res = x * 2\n    teardown()\n    return res\n";
+        let aider_diff = indoc! {r#"
+            math.py
+            <<<<<<< SEARCH
+            def compute(x):
+                res = x * 2
+            =======
+            def compute(x):
+        res = x * 4
+    >>>>>>> REPLACE
+"#};
+
+        let options = ApplyOptions::new();
+        let new_code = patch_content_str(aider_diff, Some(original), &options)?;
+
+        assert!(new_code.contains("res = x * 4"));
+        assert!(new_code.contains("setup()"));
+        assert!(new_code.contains("teardown()"));
+        Ok(())
+    }
+
+    /// Verifies Library Usage Example 9: Three-Way Line Merging.
+    #[test]
+    fn test_readme_library_usage_9_three_way_line_merging() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let base = "Apples\nBananas\nCherries\nDates\n";
+        let ours = "Apples\nBlueberries\nCherries\nDates\n";
+        let theirs = "Apples\nBananas\nCherries\nDragonfruit\n";
+
+        let (merged, is_conflicted) = merge_three_way(base, ours, theirs, None);
+        assert!(!is_conflicted);
+        assert_eq!(merged, "Apples\nBlueberries\nCherries\nDragonfruit\n");
+    }
+
+    /// Verifies Library Usage Example 10: Inline Word Diffs & Path Suggestions.
+    #[test]
+    fn test_readme_library_usage_10_inline_word_diffs_and_path_suggestions(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let _ = env_logger::builder().is_test(true).try_init();
+        // Highlight sub-line word additions and deletions
+        let expected = vec!["fn compute(x: i32) -> i32 {"];
+        let actual = vec!["fn compute(x: i64) -> i32 {"];
+        let diff_view = format_inline_diff(&expected, &actual);
+        assert!(diff_view.contains("compute"));
+        assert!(diff_view.contains("i32"));
+        assert!(diff_view.contains("i64"));
+
+        // Find close file path candidates when a patch targets a misspelled path
+        let dir = tempdir()?;
+        let target_file = dir.path().join("calculate.rs");
+        fs::write(&target_file, "fn calculate() {}\n")?;
+
+        let suggestions = suggest_close_file_paths(Path::new("calculate.rs"), dir.path(), 3);
+        assert!(!suggestions.is_empty());
+        assert_eq!(suggestions[0], PathBuf::from("calculate.rs"));
+        Ok(())
+    }
+
+    /// Verifies CLI usage examples from README.md: basic apply, default target dir, dry-run, reverse, atomic, and sensitivity.
+    #[test]
+    fn test_readme_cli_usage_workflow() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let bin = env!("CARGO_BIN_EXE_mpatch");
+        let dir = tempdir().unwrap();
+        let target_dir = dir.path().join("src");
+        fs::create_dir_all(&target_dir).unwrap();
+        let file_path = target_dir.join("main.rs");
+        fs::write(&file_path, "fn main() {\n    println!(\"Hello\");\n}\n").unwrap();
+
+        let diff_content = indoc! {r#"
+    ```diff
+    --- a/main.rs
+    +++ b/main.rs
+    @@ -1,3 +1,3 @@
+     fn main() {
+    -    println!("Hello");
+    +    println!("World");
+    ```
+"#};
+        let diff_file = dir.path().join("changes.md");
+        fs::write(&diff_file, diff_content).unwrap();
+
+        // 1. Dry run: `mpatch --dry-run changes.md ./src`
+        let dry_output = std::process::Command::new(bin)
+            .arg("--dry-run")
+            .arg(&diff_file)
+            .arg(&target_dir)
+            .output()
+            .expect("Failed to execute mpatch --dry-run");
+        assert!(dry_output.status.success());
+        assert_eq!(
+            fs::read_to_string(&file_path).unwrap(),
+            "fn main() {\n    println!(\"Hello\");\n}\n"
+        );
+
+        // 2. Basic apply: `mpatch changes.md ./src`
+        let apply_output = std::process::Command::new(bin)
+            .arg(&diff_file)
+            .arg(&target_dir)
+            .output()
+            .expect("Failed to execute mpatch");
+        assert!(apply_output.status.success());
+        assert_eq!(
+            fs::read_to_string(&file_path).unwrap(),
+            "fn main() {\n    println!(\"World\");\n}\n"
+        );
+
+        // 3. Reverse: `mpatch -R changes.md ./src`
+        let rev_output = std::process::Command::new(bin)
+            .arg("-R")
+            .arg(&diff_file)
+            .arg(&target_dir)
+            .output()
+            .expect("Failed to execute mpatch -R");
+        assert!(rev_output.status.success());
+        assert_eq!(
+            fs::read_to_string(&file_path).unwrap(),
+            "fn main() {\n    println!(\"Hello\");\n}\n"
+        );
+
+        // 4. Default target dir '.' when omitted: `mpatch changes.md`
+        let current_dir_output = std::process::Command::new(bin)
+            .current_dir(&target_dir)
+            .arg(&diff_file)
+            .output()
+            .expect("Failed to execute mpatch changes.md with implicit current dir");
+        assert!(current_dir_output.status.success());
+        assert_eq!(
+            fs::read_to_string(&file_path).unwrap(),
+            "fn main() {\n    println!(\"World\");\n}\n"
+        );
+    }
+
+    /// Verifies CLI usage examples for stdin piping and reverse piping.
+    #[test]
+    fn test_readme_cli_usage_stdin_piping() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let bin = env!("CARGO_BIN_EXE_mpatch");
+        let dir = tempdir().unwrap();
+        let target_dir = dir.path().join("src");
+        fs::create_dir_all(&target_dir).unwrap();
+        let file_path = target_dir.join("main.rs");
+        fs::write(&file_path, "fn main() {\n    println!(\"alpha\");\n}\n").unwrap();
+
+        // 1. Pipe into mpatch: `git diff | mpatch - ./src`
+        let diff = indoc! {r#"
+    --- a/main.rs
+    +++ b/main.rs
+    @@ -1,3 +1,3 @@
+     fn main() {
+    -    println!("alpha");
+    +    println!("beta");
+     }
+"#};
+
+        let mut child = std::process::Command::new(bin)
+            .arg("-")
+            .arg(&target_dir)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("Failed to spawn mpatch - ./src");
+
+        use std::io::Write;
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(diff.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            fs::read_to_string(&file_path).unwrap(),
+            "fn main() {\n    println!(\"beta\");\n}\n"
+        );
+
+        // 2. Reverse piped patch: `git diff | mpatch -R - ./src`
+        let mut rev_child = std::process::Command::new(bin)
+            .arg("-R")
+            .arg("-")
+            .arg(&target_dir)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("Failed to spawn mpatch -R - ./src");
+
+        rev_child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(diff.as_bytes())
+            .unwrap();
+        let rev_output = rev_child.wait_with_output().unwrap();
+        assert!(rev_output.status.success());
+        assert_eq!(
+            fs::read_to_string(&file_path).unwrap(),
+            "fn main() {\n    println!(\"alpha\");\n}\n"
+        );
+    }
 }
