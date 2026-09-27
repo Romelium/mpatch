@@ -12240,13 +12240,18 @@ fn test_large_hunk_large_file_fuzzy_match_with_anchor() {
     for i in 5000..5500 {
         if i == 5250 {
             patch_lines.push(format!("-    let stage_{} = execute_step({});", i, i));
-            patch_lines.push(format!("+    let stage_{} = execute_step_optimized({});", i, i));
+            patch_lines.push(format!(
+                "+    let stage_{} = execute_step_optimized({});",
+                i, i
+            ));
         } else {
             patch_lines.push(format!("     let stage_{} = execute_step({});", i, i));
         }
     }
 
-    let patch = mpatch::parse_auto(&patch_lines.join("\n")).unwrap().remove(0);
+    let patch = mpatch::parse_auto(&patch_lines.join("\n"))
+        .unwrap()
+        .remove(0);
     let options = ApplyOptions::new(); // Fuzz factor 0.70
     let result = apply_patch_to_file(&patch, dir.path(), options).unwrap();
 
@@ -12289,13 +12294,18 @@ fn test_large_hunk_large_file_coincidental_anchor_fallback() {
             patch_lines.push("     let unique_marker_token = 0xDEADBEEF;".to_string());
         } else if i == 8250 {
             patch_lines.push(format!("-    let core_calc_{} = compute_val({});", i, i));
-            patch_lines.push(format!("+    let core_calc_{} = compute_val_fast({});", i, i));
+            patch_lines.push(format!(
+                "+    let core_calc_{} = compute_val_fast({});",
+                i, i
+            ));
         } else {
             patch_lines.push(format!("     let core_calc_{} = compute_val({});", i, i));
         }
     }
 
-    let patch = mpatch::parse_auto(&patch_lines.join("\n")).unwrap().remove(0);
+    let patch = mpatch::parse_auto(&patch_lines.join("\n"))
+        .unwrap()
+        .remove(0);
     let options = ApplyOptions::new();
 
     let timeout = if cfg!(debug_assertions) {
@@ -12316,7 +12326,12 @@ fn test_large_hunk_large_file_coincidental_anchor_fallback() {
 
     let result = rx
         .recv_timeout(timeout)
-        .unwrap_or_else(|_| panic!("test_large_hunk_large_file_coincidental_anchor_fallback took too long (> {:?})", timeout))
+        .unwrap_or_else(|_| {
+            panic!(
+                "test_large_hunk_large_file_coincidental_anchor_fallback took too long (> {:?})",
+                timeout
+            )
+        })
         .unwrap();
 
     let elapsed = start_time.elapsed();
@@ -12341,7 +12356,9 @@ fn test_large_hunk_non_matching_fast_rejection() {
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("unrelated_file.rs");
 
-    let lines: Vec<String> = (0..10_000).map(|i| format!("fn handler_{}() {{}}", i)).collect();
+    let lines: Vec<String> = (0..10_000)
+        .map(|i| format!("fn handler_{}() {{}}", i))
+        .collect();
     fs::write(&file_path, lines.join("\n") + "\n").unwrap();
 
     // 500-line hunk from completely different codebase
@@ -12353,18 +12370,26 @@ fn test_large_hunk_non_matching_fast_rejection() {
     for i in 0..500 {
         if i == 250 {
             patch_lines.push(format!("-SELECT column_{} FROM database_table_{};", i, i));
-            patch_lines.push(format!("+SELECT column_{} FROM database_table_mod_{};", i, i));
+            patch_lines.push(format!(
+                "+SELECT column_{} FROM database_table_mod_{};",
+                i, i
+            ));
         } else {
             if i == 250 {
                 patch_lines.push(format!("-SELECT column_{} FROM database_table_{};", i, i));
-                patch_lines.push(format!("+SELECT column_{} FROM database_table_mod_{};", i, i));
+                patch_lines.push(format!(
+                    "+SELECT column_{} FROM database_table_mod_{};",
+                    i, i
+                ));
             } else {
                 patch_lines.push(format!(" SELECT column_{} FROM database_table_{};", i, i));
             }
         }
     }
 
-    let patch = mpatch::parse_auto(&patch_lines.join("\n")).unwrap().remove(0);
+    let patch = mpatch::parse_auto(&patch_lines.join("\n"))
+        .unwrap()
+        .remove(0);
     let options = ApplyOptions::new();
 
     let timeout = std::time::Duration::from_secs(5);
@@ -12381,7 +12406,12 @@ fn test_large_hunk_non_matching_fast_rejection() {
 
     let result = rx
         .recv_timeout(timeout)
-        .unwrap_or_else(|_| panic!("test_large_hunk_non_matching_fast_rejection took too long (> {:?})", timeout))
+        .unwrap_or_else(|_| {
+            panic!(
+                "test_large_hunk_non_matching_fast_rejection took too long (> {:?})",
+                timeout
+            )
+        })
         .unwrap();
 
     let elapsed = start_time.elapsed();
