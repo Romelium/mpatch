@@ -383,7 +383,6 @@ impl PyPatch {
     #[pyo3(signature = (target_dir, *, fuzz_factor=0.7, dry_run=false, atomic=false))]
     fn apply_to_file(
         &self,
-        &self,
         py: Python<'_>,
         target_dir: PathBuf,
         fuzz_factor: f32,

@@ -8357,7 +8357,9 @@ mod entropy_and_orphan_guards {
         );
 
         let content = fs::read_to_string(&file_path).unwrap();
-        assert!(content.contains("fn decode_header(&mut self, timeout: Duration) -> Result<Header, DecodeError>;"));
+        assert!(content.contains(
+            "fn decode_header(&mut self, timeout: Duration) -> Result<Header, DecodeError>;"
+        ));
         assert!(content.contains("self.stream.set_timeout(timeout);"));
         assert!(content.contains("pub struct PacketConfig"));
         assert!(content.contains("pub enum DecoderState"));
@@ -9077,7 +9079,9 @@ mod wildcard_and_path_tests {
         assert!(is_plausible_file_path("Makefile"));
         assert!(is_plausible_file_path("Dockerfile"));
         assert!(is_plausible_file_path("Jenkinsfile"));
-        assert!(is_plausible_file_path("src/components/My Component/Button.tsx"));
+        assert!(is_plausible_file_path(
+            "src/components/My Component/Button.tsx"
+        ));
         assert!(is_plausible_file_path("\"src/main.rs\""));
         assert!(is_plausible_file_path("src/main.rs:42:10"));
         assert!(is_plausible_file_path("schema.typescript"));
@@ -9091,14 +9095,64 @@ mod wildcard_and_path_tests {
 
     #[test]
     fn test_extract_file_path_from_line_comprehensive() {
-        assert_eq!(extract_file_path_from_line("Update \"src/config.json\":").unwrap().to_str().unwrap(), "src/config.json");
-        assert_eq!(extract_file_path_from_line("In file 'src/server.ts':").unwrap().to_str().unwrap(), "src/server.ts");
-        assert_eq!(extract_file_path_from_line("See [src/auth.rs](src/auth.rs)").unwrap().to_str().unwrap(), "src/auth.rs");
-        assert_eq!(extract_file_path_from_line("File: `src/models/user.py`").unwrap().to_str().unwrap(), "src/models/user.py");
-        assert_eq!(extract_file_path_from_line("### src/server.ts:42").unwrap().to_str().unwrap(), "src/server.ts");
-        assert_eq!(extract_file_path_from_line("diff --git a/crates/core/src/lib.rs b/crates/core/src/lib.rs").unwrap().to_str().unwrap(), "crates/core/src/lib.rs");
-        assert_eq!(extract_file_path_from_line("1. .gitignore").unwrap().to_str().unwrap(), ".gitignore");
-        assert_eq!(extract_file_path_from_line("To fix this, edit src/utils/math.rs:").unwrap().to_str().unwrap(), "src/utils/math.rs");
+        assert_eq!(
+            extract_file_path_from_line("Update \"src/config.json\":")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "src/config.json"
+        );
+        assert_eq!(
+            extract_file_path_from_line("In file 'src/server.ts':")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "src/server.ts"
+        );
+        assert_eq!(
+            extract_file_path_from_line("See [src/auth.rs](src/auth.rs)")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "src/auth.rs"
+        );
+        assert_eq!(
+            extract_file_path_from_line("File: `src/models/user.py`")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "src/models/user.py"
+        );
+        assert_eq!(
+            extract_file_path_from_line("### src/server.ts:42")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "src/server.ts"
+        );
+        assert_eq!(
+            extract_file_path_from_line(
+                "diff --git a/crates/core/src/lib.rs b/crates/core/src/lib.rs"
+            )
+            .unwrap()
+            .to_str()
+            .unwrap(),
+            "crates/core/src/lib.rs"
+        );
+        assert_eq!(
+            extract_file_path_from_line("1. .gitignore")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            ".gitignore"
+        );
+        assert_eq!(
+            extract_file_path_from_line("To fix this, edit src/utils/math.rs:")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "src/utils/math.rs"
+        );
     }
 
     #[test]
@@ -9331,7 +9385,10 @@ mod wildcard_and_path_tests {
             >>>>>>> REPLACE
         "#};
         let res = patch_content_str(diff, Some(&original), &ApplyOptions::new());
-        assert!(res.is_err(), "Runaway gap spanning 400 lines across function boundaries must be rejected");
+        assert!(
+            res.is_err(),
+            "Runaway gap spanning 400 lines across function boundaries must be rejected"
+        );
     }
 
     #[test]
@@ -9350,7 +9407,10 @@ mod wildcard_and_path_tests {
             >>>>>>> REPLACE
         "#};
         let res = patch_content_str(diff, Some(original), &ApplyOptions::new());
-        assert!(res.is_err(), "Lone bracket anchor across wildcard gap must be rejected");
+        assert!(
+            res.is_err(),
+            "Lone bracket anchor across wildcard gap must be rejected"
+        );
     }
 
     #[test]
@@ -9378,7 +9438,9 @@ mod wildcard_and_path_tests {
     #[test]
     fn test_windows_paths_and_debug_line_formats() {
         assert!(is_plausible_file_path(r"C:\Users\Project\src\main.rs"));
-        assert!(is_plausible_file_path(r"C:\Users\Project\src\main.rs:42:15"));
+        assert!(is_plausible_file_path(
+            r"C:\Users\Project\src\main.rs:42:15"
+        ));
         assert!(is_plausible_file_path("D:/workspace/app/Cargo.toml"));
         assert!(is_plausible_file_path(r".\relative\path\file.rs"));
 
@@ -9409,7 +9471,9 @@ mod wildcard_and_path_tests {
         assert!(is_plausible_file_path("frontend/.prettierrc"));
 
         // Must reject web URLs and sentence abbreviations
-        assert!(!is_plausible_file_path("https://github.com/romelium/mpatch"));
+        assert!(!is_plausible_file_path(
+            "https://github.com/romelium/mpatch"
+        ));
         assert!(!is_plausible_file_path("http://localhost:8080/api"));
         assert!(!is_plausible_file_path("etc."));
         assert!(!is_plausible_file_path("e.g."));
@@ -9511,7 +9575,8 @@ mod wildcard_and_path_tests {
     #[test]
     fn test_wildcard_with_smart_indentation_translation() {
         // Target file uses Tab indentation
-        let original = "def compute():\n\tsetup_state()\n\tprepare_buffers()\n\told_value()\n\tfinalize()\n";
+        let original =
+            "def compute():\n\tsetup_state()\n\tprepare_buffers()\n\told_value()\n\tfinalize()\n";
 
         // Patch uses Space indentation and wildcard ellipsis
         let diff = indoc! {r#"
@@ -9765,7 +9830,6 @@ mod wildcard_and_path_tests {
             "\t...\t",
             "\t\t...\t\t",
             "    ....    ",
-
             // --- Enclosing brackets ---
             "[...]",
             "[ ... ]",
@@ -9783,7 +9847,6 @@ mod wildcard_and_path_tests {
             "< ... >",
             "<…>",
             "< … >",
-
             // --- Bare comment markers with dots ---
             "// ...",
             "// ... ",
@@ -9830,7 +9893,6 @@ mod wildcard_and_path_tests {
             "''' … '''",
             "\"\"\" ... \"\"\"",
             "\"\"\" … \"\"\"",
-
             // --- C / C++ / Rust / Go / Java / C# / JS / TS (// and /* */) ---
             "// ... existing code ...",
             "// ... existing code",
@@ -9882,7 +9944,6 @@ mod wildcard_and_path_tests {
             "/** ... existing code ... */",
             "/** ... unchanged ... */",
             "/** ... rest of method ... */",
-
             // --- Python / Shell / Ruby / YAML (#) ---
             "# ... existing code ...",
             "# ... remaining code ...",
@@ -9909,7 +9970,6 @@ mod wildcard_and_path_tests {
             "## ... existing code ...",
             "### ... existing code ...",
             "# ... existing logic ...",
-
             // --- HTML / XML / Markdown (<!-- -->) ---
             "<!-- ... existing code ... -->",
             "<!-- ... existing template ... -->",
@@ -9924,7 +9984,6 @@ mod wildcard_and_path_tests {
             "<!-- ... snip ... -->",
             "<!-- ... truncated ... -->",
             "<!-- ... code here ... -->",
-
             // --- SQL / Lua / Haskell (--) ---
             "-- ... existing code ...",
             "-- ... existing lua ...",
@@ -9937,7 +9996,6 @@ mod wildcard_and_path_tests {
             "-- ... lines omitted ...",
             "-- ... snip ...",
             "-- ... truncated ...",
-
             // --- Lisp / Assembly / INI (;) ---
             "; ... existing code ...",
             "; ... existing lisp ...",
@@ -9950,7 +10008,6 @@ mod wildcard_and_path_tests {
             ";; ... existing code ...",
             ";; ... rest of function ...",
             ";; ... unchanged ...",
-
             // --- Erlang / LaTeX / MATLAB (%) ---
             "% ... existing code ...",
             "% ... remaining code ...",
@@ -9962,7 +10019,6 @@ mod wildcard_and_path_tests {
             "% ... snip ...",
             "%% ... existing code ...",
             "%% ... unchanged ...",
-
             // --- Windows Batch (REM / rem) ---
             "REM ... existing code ...",
             "REM ... remaining code ...",
@@ -9978,7 +10034,6 @@ mod wildcard_and_path_tests {
             "rem ... rest of script ...",
             "rem ... code omitted ...",
             "rem ... snip ...",
-
             // --- React / JSX ({/* */}) ---
             "{/* ... existing code ... */}",
             "{/* ... existing jsx ... */}",
@@ -9989,7 +10044,6 @@ mod wildcard_and_path_tests {
             "{/* ... code omitted ... */}",
             "{/* ... lines omitted ... */}",
             "{/* ... snip ... */}",
-
             // --- OCaml / Pascal / ML ((* *)) ---
             "(* ... existing code ... *)",
             "(* ... remaining code ... *)",
@@ -9999,7 +10053,6 @@ mod wildcard_and_path_tests {
             "(* ... code omitted ... *)",
             "(* ... lines omitted ... *)",
             "(* ... snip ... *)",
-
             // --- Python Docstrings (''' and """) ---
             "''' ... existing code ... '''",
             "''' ... remaining code ... '''",
@@ -10015,7 +10068,6 @@ mod wildcard_and_path_tests {
             "\"\"\" ... rest of function ... \"\"\"",
             "\"\"\" ... code omitted ... \"\"\"",
             "\"\"\" ... snip ... \"\"\"",
-
             // --- Unicode ellipsis phrases ---
             "// … existing code …",
             "// … rest of function …",
@@ -10048,7 +10100,6 @@ mod wildcard_and_path_tests {
             "\"\"\" … existing code … \"\"\"",
             "REM … existing code …",
             "rem … existing code …",
-
             // --- Indented and tab-padded lines ---
             "    // ... existing code ...",
             "\t// ... existing code ...",
@@ -10318,7 +10369,10 @@ mod wildcard_and_path_tests {
             >>>>>>> REPLACE
         "#};
         let res = patch_content_str(diff, Some(original), &ApplyOptions::new());
-        assert!(res.is_err(), "Anchors appearing in reverse order must be rejected");
+        assert!(
+            res.is_err(),
+            "Anchors appearing in reverse order must be rejected"
+        );
     }
 
     #[test]
@@ -10447,8 +10501,7 @@ mod false_positive_and_negative_tests {
     use indoc::indoc;
     use mpatch::{
         apply_patch_to_file, detect_patch, extract_file_path_from_line, is_ellipsis_line,
-        is_plausible_file_path, parse_auto, patch_content_str, ApplyOptions,
-        PatchFormat,
+        is_plausible_file_path, parse_auto, patch_content_str, ApplyOptions, PatchFormat,
     };
     use std::fs;
     use tempfile::tempdir;
@@ -10650,13 +10703,22 @@ mod false_positive_and_negative_tests {
 
         let conversational_path_lines = [
             ("In src/main.rs, change the function:", "src/main.rs"),
-            ("Update 'config/settings.toml' with the new port:", "config/settings.toml"),
+            (
+                "Update 'config/settings.toml' with the new port:",
+                "config/settings.toml",
+            ),
             ("Check `lib/utils.py` for helper functions", "lib/utils.py"),
-            ("// filepath: internal/auth/token.go", "internal/auth/token.go"),
+            (
+                "// filepath: internal/auth/token.go",
+                "internal/auth/token.go",
+            ),
             ("# filepath: scripts/deploy.py", "scripts/deploy.py"),
             ("Patch for `frontend/src/App.vue`:", "frontend/src/App.vue"),
             ("1. **config/default.toml**:", "config/default.toml"),
-            ("See [Auth Router](src/routes/auth.ts) for details.", "src/routes/auth.ts"),
+            (
+                "See [Auth Router](src/routes/auth.ts) for details.",
+                "src/routes/auth.ts",
+            ),
             ("--- a/crates/core/src/lib.rs", "crates/core/src/lib.rs"),
             ("diff --git a/src/index.ts b/src/index.ts", "src/index.ts"),
         ];
@@ -11261,7 +11323,10 @@ fn test_genuine_ambiguity_multiple_matches_in_interval_must_fail() {
     "#};
 
     let res = patch_content_str(diff, Some(original), &ApplyOptions::new());
-    assert!(res.is_err(), "Must reject with AmbiguousExactMatch when >1 matches exist within the anchor interval");
+    assert!(
+        res.is_err(),
+        "Must reject with AmbiguousExactMatch when >1 matches exist within the anchor interval"
+    );
 }
 
 #[test]
@@ -11334,7 +11399,10 @@ fn test_low_entropy_blocks_in_interval_never_anchored() {
     "#};
 
     let res = patch_content_str(diff, Some(original), &ApplyOptions::exact());
-    assert!(res.is_err(), "Single closing brace must not be anchored or tie-broken without sufficient entropy");
+    assert!(
+        res.is_err(),
+        "Single closing brace must not be anchored or tie-broken without sufficient entropy"
+    );
 }
 
 mod stdin_cli_tests {
@@ -11373,12 +11441,24 @@ mod stdin_cli_tests {
             .spawn()
             .expect("Failed to spawn mpatch binary");
 
-        child.stdin.as_mut().unwrap().write_all(diff.as_bytes()).unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(diff.as_bytes())
+            .unwrap();
         let output = child.wait_with_output().unwrap();
-        assert!(output.status.success(), "mpatch - failed: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "mpatch - failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
 
         let patched = fs::read_to_string(&file_path).unwrap();
-        assert_eq!(patched, "fn main() {\n    println!(\"new from stdin\");\n}\n");
+        assert_eq!(
+            patched,
+            "fn main() {\n    println!(\"new from stdin\");\n}\n"
+        );
     }
 
     #[test]
@@ -11407,7 +11487,12 @@ mod stdin_cli_tests {
             .spawn()
             .expect("Failed to spawn mpatch binary");
 
-        child.stdin.as_mut().unwrap().write_all(diff.as_bytes()).unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(diff.as_bytes())
+            .unwrap();
         let output = child.wait_with_output().unwrap();
         assert!(output.status.success());
 
@@ -11442,7 +11527,12 @@ mod stdin_cli_tests {
             .spawn()
             .expect("Failed to spawn mpatch binary");
 
-        child.stdin.as_mut().unwrap().write_all(diff.as_bytes()).unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(diff.as_bytes())
+            .unwrap();
         let output = child.wait_with_output().unwrap();
         assert!(output.status.success());
 
@@ -11475,7 +11565,12 @@ mod stdin_cli_tests {
             .spawn()
             .expect("Failed to spawn mpatch binary");
 
-        child.stdin.as_mut().unwrap().write_all(aider_diff.as_bytes()).unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(aider_diff.as_bytes())
+            .unwrap();
         let output = child.wait_with_output().unwrap();
         assert!(output.status.success());
 
@@ -11509,7 +11604,12 @@ mod stdin_cli_tests {
             .spawn()
             .expect("Failed to spawn mpatch binary");
 
-        child.stdin.as_mut().unwrap().write_all(md_diff.as_bytes()).unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(md_diff.as_bytes())
+            .unwrap();
         let output = child.wait_with_output().unwrap();
         assert!(output.status.success());
 
@@ -11540,7 +11640,12 @@ mod stdin_cli_tests {
             .spawn()
             .expect("Failed to spawn mpatch binary");
 
-        child.stdin.as_mut().unwrap().write_all(diff.as_bytes()).unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(diff.as_bytes())
+            .unwrap();
         let output = child.wait_with_output().unwrap();
         assert!(output.status.success());
 
@@ -11570,7 +11675,12 @@ mod stdin_cli_tests {
             .spawn()
             .expect("Failed to spawn mpatch binary");
 
-        child.stdin.as_mut().unwrap().write_all(diff.as_bytes()).unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(diff.as_bytes())
+            .unwrap();
         let output = child.wait_with_output().unwrap();
         assert!(output.status.success());
 
@@ -11592,7 +11702,12 @@ mod stdin_cli_tests {
             .spawn()
             .expect("Failed to spawn mpatch binary");
 
-        child.stdin.as_mut().unwrap().write_all(malformed.as_bytes()).unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(malformed.as_bytes())
+            .unwrap();
         let output = child.wait_with_output().unwrap();
         assert!(!output.status.success());
     }
@@ -11850,7 +11965,10 @@ fn test_similar_v3_merge_three_way_clean() {
     let theirs = "alpha\nbeta\ncommon\ngamma_modified\ndelta\n";
     let (merged, is_conflicted) = mpatch::merge_three_way(base, ours, theirs, None);
     assert!(!is_conflicted);
-    assert_eq!(merged, "alpha\nbeta_modified\ncommon\ngamma_modified\ndelta\n");
+    assert_eq!(
+        merged,
+        "alpha\nbeta_modified\ncommon\ngamma_modified\ndelta\n"
+    );
 }
 
 #[test]
@@ -11859,12 +11977,8 @@ fn test_similar_v3_merge_three_way_conflicted() {
     let base = "status = draft\n";
     let ours = "status = review\n";
     let theirs = "status = published\n";
-    let (merged, is_conflicted) = mpatch::merge_three_way(
-        base,
-        ours,
-        theirs,
-        Some(("base", "ours", "theirs")),
-    );
+    let (merged, is_conflicted) =
+        mpatch::merge_three_way(base, ours, theirs, Some(("base", "ours", "theirs")));
     assert!(is_conflicted);
     assert!(merged.contains("<<<<<<< ours"));
     assert!(merged.contains("||||||| base"));
@@ -11881,11 +11995,8 @@ fn test_similar_v3_suggest_close_file_paths() {
     std::fs::write(&f1, "fn service() {}\n").unwrap();
     std::fs::write(&f2, "fn controller() {}\n").unwrap();
 
-    let suggestions = mpatch::suggest_close_file_paths(
-        std::path::Path::new("services.rs"),
-        dir.path(),
-        3,
-    );
+    let suggestions =
+        mpatch::suggest_close_file_paths(std::path::Path::new("services.rs"), dir.path(), 3);
     assert!(!suggestions.is_empty());
     assert_eq!(suggestions[0].to_str().unwrap(), "service.rs");
 }
@@ -11936,7 +12047,10 @@ fn test_similar_v3_merge_three_way_identical_edits() {
     let theirs = "line 1\nline TWO\nline 3\n";
 
     let (merged, is_conflicted) = mpatch::merge_three_way(base, ours, theirs, None);
-    assert!(!is_conflicted, "Identical edits on both branches must not conflict");
+    assert!(
+        !is_conflicted,
+        "Identical edits on both branches must not conflict"
+    );
     assert_eq!(merged, "line 1\nline TWO\nline 3\n");
 }
 
@@ -11985,7 +12099,11 @@ fn test_similar_v3_suggest_close_file_paths_nested_and_exclusions() {
     std::fs::create_dir_all(base.join("node_modules/some_lib")).unwrap();
     std::fs::create_dir_all(base.join(".git/objects")).unwrap();
 
-    std::fs::write(base.join("crates/core/src/parser/engine.rs"), "pub struct Engine;").unwrap();
+    std::fs::write(
+        base.join("crates/core/src/parser/engine.rs"),
+        "pub struct Engine;",
+    )
+    .unwrap();
     std::fs::write(base.join("target/debug/build/engine.rs"), "noise").unwrap();
     std::fs::write(base.join("node_modules/some_lib/engine.rs"), "noise").unwrap();
 
@@ -12118,12 +12236,15 @@ fn test_large_scale_patience_diff_roundtrip() {
     // Insert helper functions every 15 items, and modify step_b calculation every 5 items
     for i in 0..100 {
         if i % 15 == 0 {
-            modified.push_str(&format!("// Added helper for module {}\nfn helper_module_{}() -> bool {{ true }}\n\n", i, i));
+            modified.push_str(&format!(
+                "// Added helper for module {}\nfn helper_module_{}() -> bool {{ true }}\n\n",
+                i, i
+            ));
         }
         modified.push_str(&format!("fn function_{}(val: i32) -> i32 {{\n", i));
         modified.push_str(&format!("    let step_a = val + {};\n", i));
         if i % 5 == 0 {
-            modified.push_str(&format!("    let step_b = step_a * 10 + {};\n",i));
+            modified.push_str(&format!("    let step_b = step_a * 10 + {};\n", i));
         } else {
             modified.push_str("    let step_b = step_a * 2;\n");
         }
@@ -12133,7 +12254,10 @@ fn test_large_scale_patience_diff_roundtrip() {
 
     // Generate patch using Algorithm::Patience
     let patch = mpatch::Patch::from_texts("large.rs", &original, &modified, 3).unwrap();
-    assert!(patch.hunks.len() >= 20, "Should generate dozens of hunks across 1,000 lines");
+    assert!(
+        patch.hunks.len() >= 20,
+        "Should generate dozens of hunks across 1,000 lines"
+    );
 
     // Apply patch to original and verify byte-for-byte equality with modified
     let options = mpatch::ApplyOptions::exact();
@@ -12152,16 +12276,25 @@ fn test_large_scale_three_way_merge_concurrent_disjoint() {
     // 1,000+ line base file containing 200 functions
     let mut base = String::with_capacity(30_000);
     for i in 0..200 {
-        base.push_str(&format!("// Component {}\nfn comp_{}() {{\n    step();\n}}\n\n", i, i));
+        base.push_str(&format!(
+            "// Component {}\nfn comp_{}() {{\n    step();\n}}\n\n",
+            i, i
+        ));
     }
 
     // Branch A (ours) modifies every 4th function (0, 4, 8, ...)
     let mut ours = String::with_capacity(30_000);
     for i in 0..200 {
         if i % 4 == 0 {
-            ours.push_str(&format!("// Component {}\nfn comp_{}() {{\n    ours_step();\n}}\n\n", i, i));
+            ours.push_str(&format!(
+                "// Component {}\nfn comp_{}() {{\n    ours_step();\n}}\n\n",
+                i, i
+            ));
         } else {
-            ours.push_str(&format!("// Component {}\nfn comp_{}() {{\n    step();\n}}\n\n", i, i));
+            ours.push_str(&format!(
+                "// Component {}\nfn comp_{}() {{\n    step();\n}}\n\n",
+                i, i
+            ));
         }
     }
 
@@ -12169,9 +12302,15 @@ fn test_large_scale_three_way_merge_concurrent_disjoint() {
     let mut theirs = String::with_capacity(30_000);
     for i in 0..200 {
         if i % 4 == 2 {
-            theirs.push_str(&format!("// Component {}\nfn comp_{}() {{\n    theirs_step();\n}}\n\n", i, i));
+            theirs.push_str(&format!(
+                "// Component {}\nfn comp_{}() {{\n    theirs_step();\n}}\n\n",
+                i, i
+            ));
         } else {
-            theirs.push_str(&format!("// Component {}\nfn comp_{}() {{\n    step();\n}}\n\n", i, i));
+            theirs.push_str(&format!(
+                "// Component {}\nfn comp_{}() {{\n    step();\n}}\n\n",
+                i, i
+            ));
         }
     }
 
@@ -12215,12 +12354,8 @@ fn test_large_scale_three_way_merge_interleaved_conflicts() {
         }
     }
 
-    let (merged, is_conflicted) = mpatch::merge_three_way(
-        &base,
-        &ours,
-        &theirs,
-        Some(("BASE", "OURS", "THEIRS")),
-    );
+    let (merged, is_conflicted) =
+        mpatch::merge_three_way(&base, &ours, &theirs, Some(("BASE", "OURS", "THEIRS")));
 
     assert!(is_conflicted);
     assert_eq!(merged.matches("<<<<<<< OURS").count(), 25);
@@ -12229,7 +12364,10 @@ fn test_large_scale_three_way_merge_interleaved_conflicts() {
 
     // The 25 odd non-conflicting modules must be merged cleanly without conflict markers
     for i in (1..50).step_by(2) {
-        assert!(merged.contains(&format!("// Module {}\nfn setup_{}() {{}}\nstate = 'clean_theirs'\n\n", i, i)));
+        assert!(merged.contains(&format!(
+            "// Module {}\nfn setup_{}() {{}}\nstate = 'clean_theirs'\n\n",
+            i, i
+        )));
     }
 }
 
@@ -12245,7 +12383,11 @@ fn test_large_scale_suggest_close_file_paths_deep_tree() {
             let dir_path = base.join(format!("src/{}/{}", module, layer));
             std::fs::create_dir_all(&dir_path).unwrap();
             for k in 0..10 {
-                std::fs::write(dir_path.join(format!("handler_{}.rs", k)), "pub struct Handler;").unwrap();
+                std::fs::write(
+                    dir_path.join(format!("handler_{}.rs", k)),
+                    "pub struct Handler;",
+                )
+                .unwrap();
             }
         }
     }
@@ -12270,7 +12412,10 @@ fn test_large_scale_inline_diff_rendering() {
     let mut actual = Vec::with_capacity(100);
 
     for i in 0..100 {
-        expected.push(format!("pub fn handle_event_{}(ctx: &mut Context, id: u32) -> Result<(), Error> {{", i));
+        expected.push(format!(
+            "pub fn handle_event_{}(ctx: &mut Context, id: u32) -> Result<(), Error> {{",
+            i
+        ));
         actual.push(format!("pub fn handle_event_{}(ctx: &mut Context, id: u64, flags: EventFlags) -> Result<(), AppError> {{", i));
     }
 
@@ -12885,7 +13030,9 @@ mod multi_level_fuzzy_weakness_tests {
             "Hunk must apply cleanly via fallback reconciliation despite context delimiter drift"
         );
         assert!(result.new_content.contains("if is_plausible {"));
-        assert!(result.new_content.contains("has_slash || has_valid_extension || is_known_filename\n    }\n    if is_plausible {"));
+        assert!(result.new_content.contains(
+            "has_slash || has_valid_extension || is_known_filename\n    }\n    if is_plausible {"
+        ));
     }
 
     #[test]
@@ -12920,7 +13067,9 @@ mod multi_level_fuzzy_weakness_tests {
             result.report.all_applied_cleanly(),
             "Hunk must apply cleanly via fallback reconciliation despite trailing comma and comment drift"
         );
-        assert!(result.new_content.contains("port: 8080\n        timeout: 30,\n    };"));
+        assert!(result
+            .new_content
+            .contains("port: 8080\n        timeout: 30,\n    };"));
     }
 
     #[test]

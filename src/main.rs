@@ -202,10 +202,17 @@ fn run(args: Args) -> Result<()> {
             }
             Err(e) => {
                 if let mpatch::PatchError::TargetNotFound(missing_path) = e {
-                    let suggestions = mpatch::suggest_close_file_paths(missing_path, &actual_target_dir, 3);
+                    let suggestions =
+                        mpatch::suggest_close_file_paths(missing_path, &actual_target_dir, 3);
                     if !suggestions.is_empty() {
-                        let formatted: Vec<String> = suggestions.iter().map(|p| format!("'{}'", p.display())).collect();
-                        warn!("  Target file not found. Did you mean: {}?", formatted.join(", "));
+                        let formatted: Vec<String> = suggestions
+                            .iter()
+                            .map(|p| format!("'{}'", p.display()))
+                            .collect();
+                        warn!(
+                            "  Target file not found. Did you mean: {}?",
+                            formatted.join(", ")
+                        );
                     }
                 }
                 // A "hard" error occurred (e.g., I/O error, path traversal).
@@ -801,11 +808,12 @@ fn write_report_footer(
                     } else {
                         let original_norm = format_normalized_patch(original_patch);
                         let recreated_norm = format_normalized_patch(&recreated_patch);
-                        let diff_text = similar::TextDiff::from_lines(&original_norm, &recreated_norm)
-                            .unified_diff()
-                            .context_radius(3)
-                            .header("Original Input Patch", "Regenerated Patch")
-                            .to_string();
+                        let diff_text =
+                            similar::TextDiff::from_lines(&original_norm, &recreated_norm)
+                                .unified_diff()
+                                .context_radius(3)
+                                .header("Original Input Patch", "Regenerated Patch")
+                                .to_string();
 
                         let _ = writeln!(file, "\n- **Result:** <span style='color:red;'>FAILURE</span>\n- **Details:** The regenerated patch does not match the input patch. This may indicate an issue with how a fuzzy match was applied.");
                         let _ = writeln!(file, "\n**Diff (Original vs. Regenerated):**");

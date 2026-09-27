@@ -416,7 +416,10 @@ fn similar_v3_benches(c: &mut Criterion) {
     let mut expected_lines = Vec::with_capacity(100);
     let mut actual_lines = Vec::with_capacity(100);
     for i in 0..100 {
-        expected_lines.push(format!("pub fn handle_event_{}(ctx: &mut Context, id: u32) -> Result<(), Error> {{", i));
+        expected_lines.push(format!(
+            "pub fn handle_event_{}(ctx: &mut Context, id: u32) -> Result<(), Error> {{",
+            i
+        ));
         actual_lines.push(format!("pub fn handle_event_{}(ctx: &mut Context, id: u64, flags: EventFlags) -> Result<(), AppError> {{", i));
     }
     let exp_refs: Vec<&str> = expected_lines.iter().map(|s| s.as_str()).collect();
@@ -434,25 +437,32 @@ fn similar_v3_benches(c: &mut Criterion) {
     let mut orig_text = String::with_capacity(25_000);
     let mut mod_text = String::with_capacity(25_000);
     for i in 0..100 {
-        orig_text.push_str(&format!("fn task_{}() {{\n    compute_a();\n    compute_b();\n}}\n\n", i));
+        orig_text.push_str(&format!(
+            "fn task_{}() {{\n    compute_a();\n    compute_b();\n}}\n\n",
+            i
+        ));
         if i % 10 == 0 {
             mod_text.push_str(&format!("fn injected_helper_{}() {{}}\n\n", i));
         }
         if i % 4 == 0 {
-            mod_text.push_str(&format!("fn task_{}() {{\n    compute_a_fast();\n    compute_b();\n}}\n\n", i));
+            mod_text.push_str(&format!(
+                "fn task_{}() {{\n    compute_a_fast();\n    compute_b();\n}}\n\n",
+                i
+            ));
         } else {
-            mod_text.push_str(&format!("fn task_{}() {{\n    compute_a();\n    compute_b();\n}}\n\n", i));
+            mod_text.push_str(&format!(
+                "fn task_{}() {{\n    compute_a();\n    compute_b();\n}}\n\n",
+                i
+            ));
         }
     }
 
     group.bench_function("patience_diff_generation_1000_lines", |b| {
         b.iter(|| {
-            black_box(Patch::from_texts(
-                "bench.rs",
-                black_box(&orig_text),
-                black_box(&mod_text),
-                3,
-            ).unwrap())
+            black_box(
+                Patch::from_texts("bench.rs", black_box(&orig_text), black_box(&mod_text), 3)
+                    .unwrap(),
+            )
         });
     });
 
