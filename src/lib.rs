@@ -271,7 +271,8 @@
 //!   directly on a slice of lines, avoiding string allocations.
 //!
 //! Each of these also has a "strict" `try_` variant (e.g., [`try_apply_patch_to_file()`],
-//! [`try_apply_patch_to_file_atomic()`], [`try_apply_patches_to_dir()`], and
+//! [`try_apply_patch_to_file_atomic()`], [`try_apply_patch_to_content()`],
+//! [`try_apply_patch_to_lines()`], [`try_apply_patches_to_dir()`], and
 //! [`try_apply_patches_to_dir_atomic()`]) that treats partial applications as an error,
 //! simplifying the common apply-or-fail workflow.
 //!

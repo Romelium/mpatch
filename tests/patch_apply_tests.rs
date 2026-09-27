@@ -13982,12 +13982,14 @@ mod readme_examples_tests {
             math.py
             <<<<<<< SEARCH
             def compute(x):
+                ...
                 res = x * 2
             =======
             def compute(x):
-        res = x * 4
-    >>>>>>> REPLACE
-"#};
+                ...
+                res = x * 4
+            >>>>>>> REPLACE
+        "#};
 
         let options = ApplyOptions::new();
         let new_code = patch_content_str(aider_diff, Some(original), &options)?;
@@ -14047,15 +14049,16 @@ mod readme_examples_tests {
         fs::write(&file_path, "fn main() {\n    println!(\"Hello\");\n}\n").unwrap();
 
         let diff_content = indoc! {r#"
-    ```diff
-    --- a/main.rs
-    +++ b/main.rs
-    @@ -1,3 +1,3 @@
-     fn main() {
-    -    println!("Hello");
-    +    println!("World");
-    ```
-"#};
+            ```diff
+            --- a/main.rs
+            +++ b/main.rs
+            @@ -1,3 +1,3 @@
+             fn main() {
+            -    println!("Hello");
+            +    println!("World");
+             }
+            ```
+        "#};
         let diff_file = dir.path().join("changes.md");
         fs::write(&diff_file, diff_content).unwrap();
 
@@ -14123,14 +14126,14 @@ mod readme_examples_tests {
 
         // 1. Pipe into mpatch: `git diff | mpatch - ./src`
         let diff = indoc! {r#"
-    --- a/main.rs
-    +++ b/main.rs
-    @@ -1,3 +1,3 @@
-     fn main() {
-    -    println!("alpha");
-    +    println!("beta");
-     }
-"#};
+            --- a/main.rs
+            +++ b/main.rs
+            @@ -1,3 +1,3 @@
+             fn main() {
+            -    println!("alpha");
+            +    println!("beta");
+             }
+        "#};
 
         let mut child = std::process::Command::new(bin)
             .arg("-")

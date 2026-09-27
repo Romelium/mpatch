@@ -1415,6 +1415,8 @@ def test_python_readme_tour_inline_diff_and_utilities(tmp_path: Path):
     assert mpatch.is_ellipsis_line("// ... existing code ...") is True
     assert mpatch.is_ellipsis_line("const copy = [...items];") is False
 
-    path = mpatch.extract_file_path_from_line("In `src/server.ts`, replace the handler:")
+    path = mpatch.extract_file_path_from_line(
+        "In `src/server.ts`, replace the handler:"
+    )
     assert Path(path).as_posix() == "src/server.ts"
     assert mpatch.is_plausible_file_path("src/server.ts") is True

@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/crates/l/mpatch)](https://opensource.org/licenses/MIT)
 [![Downloads](https://img.shields.io/crates/d/mpatch?style=flat-square)](https://crates.io/crates/mpatch)
 
-`mpatch` is a contextual patching program/library tailored towards the "messy" world of modern software development. Different from standard `patch` and `git apply`, which require line number/context to be exact matches, `mpatch` utilizes **fuzzy matching**, looking for patches based on the context around the change in the code.
+`mpatch` is a contextual patching program/library tailored towards the "messy" world of modern software development. Unlike standard `patch` and `git apply`, which require line numbers and context to be exact byte-for-byte matches, `mpatch` utilizes **fuzzy matching**, looking for patches based on the context around the change in the code.
 
 This tool was created to easily apply diffs produced by **LLMs (ChatGPT, Gemini, Claude, Copilot)**, since they tend to hallucinate the exact line numbers or the context around the patch.
 
@@ -205,15 +205,14 @@ mpatch = "1.6.4"
 ### 1. Simple One-Shot (String to String)
 Ideal for processing text in memory.
 
-```rust
+````rust
 use mpatch::{patch_content_str, ApplyOptions};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let original_code = "fn main() { println!(\"Old\"); }\n";
 
-    // Input can be Markdown, Raw Diff, or Conflict Markers
-    let patch_text = r#"
-    ```diff
+    // Input can be Markdown, Raw Diff, Aider blocks, or Conflict Markers
+    let patch_text = r#"```diff
     --- a/main.rs
     +++ b/main.rs
     @@ -1 +1 @@
@@ -228,18 +227,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(new_code, "fn main() { println!(\"New\"); }\n");
     Ok(())
 }
-```
+````
 
 ### 2. Batch Application (File System)
 Ideal for CLI tools applying multi-file patches.
 
-```rust
+````rust
 use mpatch::{parse_auto, apply_patches_to_dir, ApplyOptions};
 use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let diff_content = r#"
-    ```diff
+    let diff_content = r#"```diff
     --- a/file1.txt
     +++ b/file1.txt
     @@ -1 +1 @@
@@ -272,29 +270,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
-```
+````
 
 ### 3. Reversing Patches
 Programmatically invert patches (additions become deletions and vice versa).
 
 ```rust
-use mpatch::{parse_auto, invert_patches};
+use mpatch::{invert_patches, parse_auto};
 
-let diff_content = "--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new";
-let patches = parse_auto(diff_content)?;
-let reversed = invert_patches(&patches);
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let diff_content = "--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new\n";
+    let patches = parse_auto(diff_content)?;
+    let reversed = invert_patches(&patches);
 
-// Now apply `reversed` to undo changes
+    // Now apply `reversed` to undo changes
+    assert_eq!(reversed.len(), 1);
+    Ok(())
+}
 ```
 
 ### 4. Deduplicating and Merging Patches
 Consolidate multiple patch sections or blocks targeting the same file into unified `Patch` objects with combined hunks:
 
 ```rust
-use mpatch::merge_patches;
+use mpatch::{merge_patches, parse_auto};
 
-// Automatically merges patches targeting the same file in O(N) time
-let consolidated = merge_patches(patches);
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let diff1 = "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old1\n+new1\n";
+    let diff2 = "--- a/file.txt\n+++ b/file.txt\n@@ -10 +10 @@\n-old2\n+new2\n";
+    let mut patches = parse_auto(diff1)?;
+    patches.extend(parse_auto(diff2)?);
+
+    // Automatically merges patches targeting the same file in O(N) time
+    let consolidated = merge_patches(patches);
+    assert_eq!(consolidated.len(), 1);
+    assert_eq!(consolidated[0].hunks.len(), 2);
+    Ok(())
+}
 ```
 
 ### 5. Strict Apply-or-Fail Workflow
@@ -303,19 +315,24 @@ If you want to treat partial applications (where some hunks fail) as an error, u
 ```rust
 use mpatch::{parse_single_patch, try_apply_patch_to_content, ApplyOptions, StrictApplyError};
 
-let original_content = "fn main() { println!(\"Old\"); }\n";
-let diff_content = "--- a/main.rs\n+++ b/main.rs\n@@ -1 +1 @@\n-fn main() { println!(\"Old\"); }\n+fn main() { println!(\"New\"); }\n";
 
-let patch = parse_single_patch(diff_content)?;
-let options = ApplyOptions::exact();
 
-// Returns an Err if any hunk fails to apply
-match try_apply_patch_to_content(&patch, Some(original_content), &options) {
-    Ok(result) => println!("Success: {}", result.new_content),
-    Err(StrictApplyError::PartialApply { report }) => {
-        eprintln!("Patch partially applied. {} hunks failed.", report.failure_count());
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let original_content = "fn main() { println!(\"Old\"); }\n";
+    let diff_content = "--- a/main.rs\n+++ b/main.rs\n@@ -1 +1 @@\n-fn main() { println!(\"Old\"); }\n+fn main() { println!(\"New\"); }\n";
+
+    let patch = parse_single_patch(diff_content)?;
+    let options = ApplyOptions::exact();
+
+    // Returns an Err if any hunk fails to apply
+    match try_apply_patch_to_content(&patch, Some(original_content), &options) {
+        Ok(result) => println!("Success: {}", result.new_content),
+        Err(StrictApplyError::PartialApply { report }) => {
+            eprintln!("Patch partially applied. {} hunks failed.", report.failure_count());
+        }
+        Err(e) => eprintln!("Hard error: {}", e),
     }
-    Err(e) => eprintln!("Hard error: {}", e),
+    Ok(())
 }
 ```
 
@@ -325,13 +342,16 @@ You can also use `mpatch` to generate patches by comparing two strings.
 ```rust
 use mpatch::Patch;
 
-let old_text = "fn main() { println!(\"Old\"); }";
-let new_text = "fn main() { println!(\"New\"); }";
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let old_text = "fn main() { println!(\"Old\"); }";
+    let new_text = "fn main() { println!(\"New\"); }";
 
-// Create a patch with 3 lines of context
-let patch = Patch::from_texts("src/main.rs", old_text, new_text, 3).unwrap();
+    // Create a patch with 3 lines of context
+    let patch = Patch::from_texts("src/main.rs", old_text, new_text, 3)?;
 
-println!("{}", patch);
+    println!("{}", patch);
+    Ok(())
+}
 ```
 
 ### 7. Atomic (All-or-Nothing) Batch Application
@@ -366,8 +386,7 @@ use mpatch::{patch_content_str, ApplyOptions};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let original = "def compute(x):\n    setup()\n    res = x * 2\n    teardown()\n    return res\n";
-    let aider_diff = r#"
-math.py
+    let aider_diff = r#"math.py
 <<<<<<< SEARCH
 def compute(x):
     ...
@@ -395,13 +414,15 @@ Perform line-level 3-way merges backed by `similar::TextMerge`, automatically ge
 ```rust
 use mpatch::merge_three_way;
 
-let base   = "Apples\nBananas\nCherries\nDates\n";
-let ours   = "Apples\nBlueberries\nCherries\nDates\n";
-let theirs = "Apples\nBananas\nCherries\nDragonfruit\n";
+fn main() {
+    let base   = "Apples\nBananas\nCherries\nDates\n";
+    let ours   = "Apples\nBlueberries\nCherries\nDates\n";
+    let theirs = "Apples\nBananas\nCherries\nDragonfruit\n";
 
-let (merged, is_conflicted) = merge_three_way(base, ours, theirs, None);
-assert!(!is_conflicted);
-assert_eq!(merged, "Apples\nBlueberries\nCherries\nDragonfruit\n");
+    let (merged, is_conflicted) = merge_three_way(base, ours, theirs, None);
+    assert!(!is_conflicted);
+    assert_eq!(merged, "Apples\nBlueberries\nCherries\nDragonfruit\n");
+}
 ```
 
 ### 10. Inline Word Diffs & Path Suggestions
@@ -412,15 +433,19 @@ use mpatch::{format_inline_diff, suggest_close_file_paths};
 use std::path::Path;
 
 // Highlight sub-line word additions and deletions
-let expected = vec!["fn compute(x: i32) -> i32 {"];
-let actual = vec!["fn compute(x: i64) -> i32 {"];
-let diff_view = format_inline_diff(&expected, &actual);
-println!("{}", diff_view);
+fn main() {
+    // Highlight sub-line word additions and deletions
+    let expected = vec!["fn compute(x: i32) -> i32 {"];
+    let actual = vec!["fn compute(x: i64) -> i32 {"];
+    let diff_view = format_inline_diff(&expected, &actual);
+    println!("{}", diff_view);
 
 // Find close file path candidates when a patch targets a misspelled path
-let suggestions = suggest_close_file_paths(Path::new("calculate.rs"), Path::new("./src"), 3);
-for candidate in suggestions {
-    println!("Did you mean: {}", candidate.display());
+    // Find close file path candidates when a patch targets a misspelled path
+    let suggestions = suggest_close_file_paths(Path::new("calculate.rs"), Path::new("./src"), 3);
+    for candidate in suggestions {
+        println!("Did you mean: {}", candidate.display());
+    }
 }
 ```
 
@@ -433,13 +458,13 @@ Though supported by `mpatch`, this file format (`<<<<`, `====`, `>>>>`) **does n
 *   **Using `mpatch` from CLI:** If the provided file contains only conflict markers, `mpatch` will try to patch a file called `patch_target`.
 *   **Using `mpatch` as a library:** The format can be used by the `patch_content_str` function if your target file content is stored in memory.
 
-In case of a multiple file patching or using `mpatch` from CLI, it is recommended to use the **Unified Diffs** format (with `---` and `+++`).
+In case of multiple file patching or using `mpatch` from the CLI, it is recommended to use the **Unified Diffs** format (with `---` and `+++`) or **Aider Search/Replace** blocks.
 
 ---
 
 ## Performance
 
-Fuzzy match is $O(N \times M)$ operation. To ensure speed on large files:
+Fuzzy matching is an $O(N \times M)$ operation. To ensure speed on large files:
 1.  **Heuristics:** Before doing a fuzzy match, `mpatch` tries to find both exact and "whitespace-insensitive" exact matches.
 2.  **Anchoring:** `mpatch` tries to look for unique lines in the patch file to shrink the match range.
 3.  **Parallelism:** If a full scan is required, it uses [Rayon](https://github.com/rayon-rs/rayon) to parallelize the workload.

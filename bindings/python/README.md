@@ -175,9 +175,13 @@ if result.report.has_failures:
         # If it was a fuzzy match that didn't meet the threshold:
         if failure.error_type == "FuzzyMatchBelowThreshold":
             print(f"Best score was {failure.best_score}, needed {failure.threshold}")
-            print(
-                f"Near-miss candidate located at lines {failure.location_start}..{failure.location_start + failure.location_length}"
-            )
+            if (
+                failure.location_start is not None
+                and failure.location_length is not None
+            ):
+                print(
+                    f"Near-miss candidate located at lines {failure.location_start + 1}..{failure.location_start + failure.location_length}"
+                )
 ```
 
 ### 5. Dry Runs & Fuzz Factor
@@ -367,7 +371,7 @@ assert mpatch.is_ellipsis_line("const copy = [...items];") is False
 
 # Conversational path extraction:
 path = mpatch.extract_file_path_from_line("In `src/server.ts`, replace the handler:")
-assert str(path) == "src/server.ts"
+assert path is not None and path.as_posix() == "src/server.ts"
 assert mpatch.is_plausible_file_path("src/server.ts") is True
 ```
 
