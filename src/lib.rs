@@ -2065,6 +2065,92 @@ impl ApplyResult {
             .all(|r| !matches!(r, HunkApplyStatus::Failed(_)))
     }
 
+    /// Checks if any hunk in the patch failed to apply.
+    ///
+    /// This is the logical opposite of [`all_applied_cleanly`](ApplyResult::all_applied_cleanly).
+    ///
+    /// # Returns
+    ///
+    /// `true` if any hunk failed to apply, `false` otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use mpatch::{ApplyResult, HunkApplyStatus, HunkApplyError, HunkLocation, MatchType};
+    /// let failed_result = ApplyResult {
+    ///     hunk_results: vec![
+    ///         HunkApplyStatus::Applied { location: HunkLocation { start_index: 0, length: 1 }, match_type: MatchType::Exact, replaced_lines: vec!["old".to_string()] },
+    ///         HunkApplyStatus::Failed(HunkApplyError::ContextNotFound),
+    ///     ],
+    /// };
+    /// assert!(failed_result.has_failures());
+    ///
+    /// let successful_result = ApplyResult {
+    ///     hunk_results: vec![ HunkApplyStatus::SkippedNoChanges ],
+    /// };
+    /// assert!(!successful_result.has_failures());
+    /// ```
+    pub fn has_failures(&self) -> bool {
+        self.hunk_results
+            .iter()
+            .any(|r| matches!(r, HunkApplyStatus::Failed(_)))
+    }
+
+    /// Returns the number of hunks that failed to apply.
+    ///
+    /// This is a convenience method that counts how many hunks in the `hunk_results`
+    /// list have a status of [`HunkApplyStatus::Failed`].
+    ///
+    /// # Returns
+    ///
+    /// The number of failed hunks.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use mpatch::{ApplyResult, HunkApplyStatus, HunkApplyError, HunkLocation, MatchType};
+    /// let result = ApplyResult {
+    ///     hunk_results: vec![
+    ///         HunkApplyStatus::Applied { location: HunkLocation { start_index: 0, length: 1 }, match_type: MatchType::Exact, replaced_lines: vec!["old".to_string()] },
+    ///         HunkApplyStatus::Failed(HunkApplyError::ContextNotFound),
+    ///         HunkApplyStatus::Failed(HunkApplyError::AmbiguousExactMatch(vec![])),
+    ///     ],
+    /// };
+    /// assert_eq!(result.failure_count(), 2);
+    /// ```
+    pub fn failure_count(&self) -> usize {
+        self.hunk_results
+            .iter()
+            .filter(|r| matches!(r, HunkApplyStatus::Failed(_)))
+            .count()
+    }
+
+    /// Returns the number of hunks that were applied successfully or skipped.
+    ///
+    /// This method counts how many hunks in the `hunk_results` list have a status
+    /// of either [`HunkApplyStatus::Applied`] or [`HunkApplyStatus::SkippedNoChanges`].
+    ///
+    /// # Returns
+    ///
+    /// The number of successful or skipped hunks.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use mpatch::{ApplyResult, HunkApplyStatus, HunkApplyError, HunkLocation, MatchType};
+    /// let result = ApplyResult {
+    ///     hunk_results: vec![
+    ///         HunkApplyStatus::Applied { location: HunkLocation { start_index: 0, length: 1 }, match_type: MatchType::Exact, replaced_lines: vec!["old".to_string()] },
+    ///         HunkApplyStatus::SkippedNoChanges,
+    ///         HunkApplyStatus::Failed(HunkApplyError::ContextNotFound),
+    ///     ],
+    /// };
+    /// assert_eq!(result.success_count(), 2);
+    /// ```
+    pub fn success_count(&self) -> usize {
+        self.hunk_results.len() - self.failure_count()
+    }
+
     /// Returns a list of all hunks that failed to apply, along with their index.
     ///
     /// This provides a more convenient way to inspect failures than iterating
@@ -2317,94 +2403,6 @@ impl BatchResult {
     /// ```
     pub fn has_failures(&self) -> bool {
         !self.all_applied_cleanly()
-    }
-}
-
-impl ApplyResult {
-    /// Checks if any hunk in the patch failed to apply.
-    ///
-    /// This is the logical opposite of [`all_applied_cleanly`](ApplyResult::all_applied_cleanly).
-    ///
-    /// # Returns
-    ///
-    /// `true` if any hunk failed to apply, `false` otherwise.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use mpatch::{ApplyResult, HunkApplyStatus, HunkApplyError, HunkLocation, MatchType};
-    /// let failed_result = ApplyResult {
-    ///     hunk_results: vec![
-    ///         HunkApplyStatus::Applied { location: HunkLocation { start_index: 0, length: 1 }, match_type: MatchType::Exact, replaced_lines: vec!["old".to_string()] },
-    ///         HunkApplyStatus::Failed(HunkApplyError::ContextNotFound),
-    ///     ],
-    /// };
-    /// assert!(failed_result.has_failures());
-    ///
-    /// let successful_result = ApplyResult {
-    ///     hunk_results: vec![ HunkApplyStatus::SkippedNoChanges ],
-    /// };
-    /// assert!(!successful_result.has_failures());
-    /// ```
-    pub fn has_failures(&self) -> bool {
-        self.hunk_results
-            .iter()
-            .any(|r| matches!(r, HunkApplyStatus::Failed(_)))
-    }
-
-    /// Returns the number of hunks that failed to apply.
-    ///
-    /// This is a convenience method that counts how many hunks in the `hunk_results`
-    /// list have a status of [`HunkApplyStatus::Failed`].
-    ///
-    /// # Returns
-    ///
-    /// The number of failed hunks.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use mpatch::{ApplyResult, HunkApplyStatus, HunkApplyError, HunkLocation, MatchType};
-    /// let result = ApplyResult {
-    ///     hunk_results: vec![
-    ///         HunkApplyStatus::Applied { location: HunkLocation { start_index: 0, length: 1 }, match_type: MatchType::Exact, replaced_lines: vec!["old".to_string()] },
-    ///         HunkApplyStatus::Failed(HunkApplyError::ContextNotFound),
-    ///         HunkApplyStatus::Failed(HunkApplyError::AmbiguousExactMatch(vec![])),
-    ///     ],
-    /// };
-    /// assert_eq!(result.failure_count(), 2);
-    /// ```
-    pub fn failure_count(&self) -> usize {
-        self.hunk_results
-            .iter()
-            .filter(|r| matches!(r, HunkApplyStatus::Failed(_)))
-            .count()
-    }
-
-    /// Returns the number of hunks that were applied successfully or skipped.
-    ///
-    /// This method counts how many hunks in the `hunk_results` list have a status
-    /// of either [`HunkApplyStatus::Applied`] or [`HunkApplyStatus::SkippedNoChanges`].
-    ///
-    /// # Returns
-    ///
-    /// The number of successful or skipped hunks.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use mpatch::{ApplyResult, HunkApplyStatus, HunkApplyError, HunkLocation, MatchType};
-    /// let result = ApplyResult {
-    ///     hunk_results: vec![
-    ///         HunkApplyStatus::Applied { location: HunkLocation { start_index: 0, length: 1 }, match_type: MatchType::Exact, replaced_lines: vec!["old".to_string()] },
-    ///         HunkApplyStatus::SkippedNoChanges,
-    ///         HunkApplyStatus::Failed(HunkApplyError::ContextNotFound),
-    ///     ],
-    /// };
-    /// assert_eq!(result.success_count(), 2);
-    /// ```
-    pub fn success_count(&self) -> usize {
-        self.hunk_results.len() - self.failure_count()
     }
 }
 
