@@ -11544,7 +11544,7 @@ struct ScoredWindow {
 /// let lengths: Vec<usize> = WindowLengthIter::new(7, 5, 10).collect();
 /// assert_eq!(lengths, vec![7, 6, 8, 5, 9, 10]);
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowLengthIter {
     nominal: usize,
     min_len: usize,

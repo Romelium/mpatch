@@ -13415,7 +13415,7 @@ mod window_length_iter_tests {
     #[test]
     fn test_window_lengths_helper_and_fused() {
         let mut iter = window_lengths(6, 5, 7);
-        assert_eq!(iter.collect::<Vec<_>>(), vec![6, 5, 7]);
+        assert_eq!(iter.by_ref().collect::<Vec<_>>(), vec![6, 5, 7]);
         assert_eq!(iter.next(), None);
         assert_eq!(iter.next(), None);
     }
