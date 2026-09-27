@@ -7518,7 +7518,7 @@ pub fn try_apply_patch_to_file(
 ///
 /// # Examples
 ///
-/// ```rust
+/// ````rust
 /// # use mpatch::{parse_single_patch, apply_patch_to_file_atomic, ApplyOptions};
 /// # use std::fs;
 /// # use tempfile::tempdir;
@@ -7550,7 +7550,7 @@ pub fn try_apply_patch_to_file(
 /// assert_eq!(fs::read_to_string(&file_path)?, "line 1\nline 2\n");
 /// # Ok(())
 /// # }
-/// ```
+/// ````
 pub fn apply_patch_to_file_atomic(
     patch: &Patch,
     target_dir: &Path,
