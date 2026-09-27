@@ -110,6 +110,17 @@ for i, hunk in enumerate(patch):
     print(f"Hunk {i + 1} changes:")
     print(f"  Removed: {hunk.removed_lines}")
     print(f"  Added:   {hunk.added_lines}")
+    print(f"  Required match span: {hunk.required_match_span} lines")
+```
+
+To parse a diff that is expected to contain exactly one patch:
+
+```python
+try:
+    patch = mpatch.parse_single_patch(single_diff_str)
+    print(f"Parsed single patch targeting: {patch.file_path}")
+except mpatch.ParseError as e:
+    print(f"Expected single patch, but failed: {e}")
 ```
 
 ### 3. Applying to the Filesystem (Batch Processing)
@@ -142,6 +153,10 @@ if not batch_result.all_succeeded:
     # Inspect hard failures (e.g., IO errors, Permission denied, Path traversal)
     for path, error_msg in batch_result.hard_failures:
         print(f"Critical error on {path}: {error_msg}")
+
+if batch_result.has_failures:
+    print("One or more patches or hunks failed to apply cleanly.")
+    # Dedicated atomic function also available: mpatch.apply_patches_to_dir_atomic(...)
 ```
 
 ### 4. Detailed Reporting & Error Handling
@@ -153,13 +168,16 @@ result = patch.apply_to_file("./my_project")
 
 if result.report.has_failures:
     print(f"Patch partially failed. {result.report.failure_count} hunks failed.")
-    
+
     for failure in result.report.failures:
         print(f"Hunk {failure.hunk_index} failed due to: {failure.error_type}")
-        
+
         # If it was a fuzzy match that didn't meet the threshold:
         if failure.error_type == "FuzzyMatchBelowThreshold":
             print(f"Best score was {failure.best_score}, needed {failure.threshold}")
+            print(
+                f"Near-miss candidate located at lines {failure.location_start}..{failure.location_start + failure.location_length}"
+            )
 ```
 
 ### 5. Dry Runs & Fuzz Factor
@@ -305,6 +323,38 @@ import mpatch
 
 fmt = mpatch.detect_patch(diff_string)
 # Returns: 'Markdown', 'Unified', 'Aider', 'Conflict', or 'Unknown'
+```
+
+### 12. Path Validation & Missing Target Suggestions
+Suggest close matching files in the target directory when a patch specifies an unknown or misspelled file path:
+
+```python
+import mpatch
+from pathlib import Path
+
+# Suggest close matches in ./src for a misspelled filename:
+suggestions = mpatch.suggest_close_file_paths("calculate.rs", Path("./src"), limit=3)
+for candidate in suggestions:
+    print(f"Did you mean: {candidate}?")
+
+# Validate that a target path remains safely inside the base directory:
+safe_path = mpatch.ensure_path_is_safe("./src", "utils/helpers.py")
+```
+
+### 13. Wildcard Ellipsis & Path Utilities
+Check for wildcard ellipsis lines or extract file paths from conversational prose:
+
+```python
+import mpatch
+
+# Ellipsis checking:
+assert mpatch.is_ellipsis_line("// ... existing code ...") is True
+assert mpatch.is_ellipsis_line("const copy = [...items];") is False
+
+# Conversational path extraction:
+path = mpatch.extract_file_path_from_line("In `src/server.ts`, replace the handler:")
+assert str(path) == "src/server.ts"
+assert mpatch.is_plausible_file_path("src/server.ts") is True
 ```
 
 ---

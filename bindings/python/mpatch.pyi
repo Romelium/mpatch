@@ -82,8 +82,29 @@ class Hunk:
         deletions).
         """
         ...
+    @property
+    def required_match_span(self) -> int:
+        """Returns the minimum span (in lines of match_block) between the first and last edit site in this hunk."""
+        ...
     def invert(self) -> Hunk:
         """Creates a new Hunk that reverses the changes in this one."""
+        ...
+    def find_location(
+        self,
+        target_content: str,
+        *,
+        fuzz_factor: float = 0.7,
+    ) -> tuple[int, int, str]:
+        """
+        Finds the location to apply this hunk to a given text content.
+
+        Args:
+            target_content (str): The content to search within.
+            fuzz_factor (float, optional): Similarity threshold (0.0 to 1.0). Default is 0.7.
+
+        Returns:
+            tuple[int, int, str]: (start_line_index, replaced_length, match_type)
+        """
         ...
     def __len__(self) -> int: ...
     @overload
@@ -152,9 +173,17 @@ class Patch:
     def hunks(self) -> list[Hunk]:
         """A list of hunks to be applied to the file."""
         ...
+    @hunks.setter
+    def hunks(self, hunks: list[Hunk]) -> None:
+        """Sets the list of hunks to be applied to the file."""
+        ...
     @property
     def ends_with_newline(self) -> bool:
         """Indicates whether the file should end with a newline."""
+        ...
+    @ends_with_newline.setter
+    def ends_with_newline(self, ends_with_newline: bool) -> None:
+        """Sets whether the file should end with a newline."""
         ...
     @property
     def is_creation(self) -> bool:
@@ -183,6 +212,29 @@ class Patch:
             fuzz_factor (float, optional): Similarity threshold (0.0 to 1.0). Default is 0.7.
             dry_run (bool, optional): If True, previews changes without writing to disk. Default is False.
             atomic (bool, optional): If True, only writes changes to disk if all hunks apply cleanly. Default is False.
+
+        Returns:
+            PatchResult: The result of the application.
+
+        Raises:
+            PathTraversalError: If the patch targets a file outside target_dir.
+            ApplyError: If reading or writing the file fails due to an I/O or permission issue.
+        """
+        ...
+    def apply_to_file_atomic(
+        self,
+        target_dir: str | os.PathLike[Any],
+        *,
+        fuzz_factor: float = 0.7,
+        dry_run: bool = False,
+    ) -> PatchResult:
+        """
+        Applies the patch to a file on disk atomically.
+
+        Args:
+            target_dir (str | os.PathLike): The base directory to apply the patch.
+            fuzz_factor (float, optional): Similarity threshold (0.0 to 1.0). Default is 0.7.
+            dry_run (bool, optional): If True, previews changes without writing to disk. Default is False.
 
         Returns:
             PatchResult: The result of the application.
@@ -245,6 +297,14 @@ class HunkFailure:
     @property
     def threshold(self) -> float | None:
         """The threshold that was not met, if the error was a fuzzy match failure."""
+        ...
+    @property
+    def location_start(self) -> int | None:
+        """The starting line index of the near-miss location, if the error was a fuzzy match failure."""
+        ...
+    @property
+    def location_length(self) -> int | None:
+        """The window length of the near-miss location, if the error was a fuzzy match failure."""
         ...
     @property
     def ambiguous_matches(self) -> list[int] | None:
@@ -352,6 +412,10 @@ class BatchResult:
         """True if all patches in the batch succeeded and all hunks applied cleanly."""
         ...
     @property
+    def has_failures(self) -> bool:
+        """True if any patch in the batch had a hard error or any hunk failed to apply."""
+        ...
+    @property
     def hard_failures(self) -> list[tuple[str, str]]:
         """A list of operations that resulted in a hard error."""
         ...
@@ -389,6 +453,21 @@ def parse_auto(diff: str) -> list[Patch]:
 
     Raises:
         ParseError: If parsing diff headers or hunk syntax fails.
+    """
+    ...
+
+def parse_single_patch(diff: str) -> Patch:
+    """
+    Parses a string containing a diff and returns a single Patch object.
+
+    Args:
+        diff (str): The patch content (Markdown, Unified, Aider, or Conflict Markers).
+
+    Returns:
+        Patch: The single parsed patch.
+
+    Raises:
+        ParseError: If parsing fails, or if zero or multiple patches are found.
     """
     ...
 
@@ -632,6 +711,30 @@ def apply_patch_to_file(
         PathTraversalError: If the patch targets a file outside target_dir.
         ApplyError: If reading or writing the file fails due to an I/O or permission issue.
     """
+
+def apply_patch_to_file_atomic(
+    patch: Patch,
+    target_dir: str | os.PathLike[Any],
+    *,
+    fuzz_factor: float = 0.7,
+    dry_run: bool = False,
+) -> PatchResult:
+    """
+    Applies a Patch object to a file on disk atomically.
+
+    Args:
+        patch (Patch): The patch to apply.
+        target_dir (str | os.PathLike): The base directory to apply the patch.
+        fuzz_factor (float, optional): Similarity threshold (0.0 to 1.0). Default is 0.7.
+        dry_run (bool, optional): If True, previews changes without writing to disk. Default is False.
+
+    Returns:
+        PatchResult: The result of the application.
+
+    Raises:
+        PathTraversalError: If the target path resolves outside target_dir.
+        ApplyError: If reading or writing the file fails due to an I/O error or permission issue.
+    """
     ...
 
 def apply_patches_to_dir(
@@ -654,5 +757,123 @@ def apply_patches_to_dir(
 
     Returns:
         BatchResult: The aggregated results of the applications.
+    """
+    ...
+
+def apply_patches_to_dir_atomic(
+    patches: list[Patch],
+    target_dir: str | os.PathLike[Any],
+    *,
+    fuzz_factor: float = 0.7,
+    dry_run: bool = False,
+) -> BatchResult:
+    """
+    Applies a list of patches to a directory on disk atomically.
+
+    Args:
+        patches (list[Patch]): The patches to apply.
+        target_dir (str | os.PathLike): The base directory to apply the patches.
+        fuzz_factor (float, optional): Similarity threshold (0.0 to 1.0). Default is 0.7.
+        dry_run (bool, optional): If True, previews changes without writing to disk. Default is False.
+
+    Returns:
+        BatchResult: The aggregated results of the applications.
+    """
+    ...
+
+def suggest_close_file_paths(
+    missing_path: str | os.PathLike[Any],
+    target_dir: str | os.PathLike[Any],
+    *,
+    limit: int = 3,
+) -> list[pathlib.Path]:
+    """
+    Finds close matching file paths in a target directory when a patch specifies a missing file.
+
+    Args:
+        missing_path (str | os.PathLike): The path of the missing target file.
+        target_dir (str | os.PathLike): The base directory to search within.
+        limit (int, optional): Maximum number of suggestions to return. Defaults to 3.
+
+    Returns:
+        list[pathlib.Path]: List of candidate file paths relative to target_dir.
+    """
+    ...
+
+def is_ellipsis_line(line: str) -> bool:
+    """
+    Determines whether a line represents an ellipsis / wildcard indicating omitted code.
+
+    Args:
+        line (str): The line to evaluate.
+
+    Returns:
+        bool: True if the line represents an ellipsis or omitted code wildcard, False otherwise.
+    """
+    ...
+
+def is_plausible_file_path(path: str) -> bool:
+    """
+    Determines whether a string looks like a plausible file path rather than conversational prose.
+
+    Args:
+        path (str): The candidate string to check.
+
+    Returns:
+        bool: True if plausible file path, False otherwise.
+    """
+    ...
+
+def extract_file_path_from_line(line: str) -> pathlib.Path | None:
+    """
+    Extracts a plausible file path from a conversational heading or line preceding a patch block.
+
+    Args:
+        line (str): The line to extract from.
+
+    Returns:
+        pathlib.Path | None: The extracted path if found, or None.
+    """
+    ...
+
+def ensure_path_is_safe(
+    target_dir: str | os.PathLike[Any],
+    relative_path: str | os.PathLike[Any],
+) -> pathlib.Path:
+    """
+    Validates that a relative path does not escape the target base directory.
+
+    Args:
+        target_dir (str | os.PathLike): The base directory.
+        relative_path (str | os.PathLike): The relative path to check.
+
+    Returns:
+        pathlib.Path: The safe canonical path.
+
+    Raises:
+        PathTraversalError: If the relative path escapes target_dir.
+        ApplyError: If an I/O error occurs during canonicalization.
+    """
+    ...
+
+def find_hunk_location(
+    hunk: Hunk,
+    target_content: str,
+    *,
+    fuzz_factor: float = 0.7,
+) -> tuple[int, int, str]:
+    """
+    Finds the location to apply a hunk to a given text content without modifying it.
+
+    Args:
+        hunk (Hunk): The hunk to locate.
+        target_content (str): The content to search within.
+        fuzz_factor (float, optional): Similarity threshold (0.0 to 1.0). Default is 0.7.
+
+    Returns:
+        tuple[int, int, str]: (start_line_index, replaced_length, match_type)
+
+    Raises:
+        ApplyError: If no suitable location could be found.
     """
     ...

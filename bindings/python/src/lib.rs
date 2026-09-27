@@ -182,6 +182,29 @@ impl PyHunk {
         self.inner.has_changes()
     }
 
+    #[getter]
+    /// Returns the minimum span (in lines of match_block) between the first and last edit site in this hunk.
+    fn required_match_span(&self) -> usize {
+        self.inner.required_match_span()
+    }
+
+    /// Finds the location to apply this hunk to a given text content.
+    ///
+    /// Args:
+    ///     target_content (str): The content to search within.
+    ///     fuzz_factor (float, optional): Similarity threshold (0.0 to 1.0). Default is 0.7.
+    ///
+    /// Returns:
+    ///     tuple[int, int, str]: (start_line_index, replaced_length, match_type)
+    #[pyo3(signature = (target_content, *, fuzz_factor=0.7))]
+    fn find_location(
+        &self,
+        target_content: &str,
+        fuzz_factor: f32,
+    ) -> PyResult<(usize, usize, String)> {
+        find_hunk_location(self, target_content, fuzz_factor)
+    }
+
     /// Creates a new Hunk that reverses the changes in this one.
     fn invert(&self) -> Self {
         Self {
@@ -331,6 +354,18 @@ impl PyPatch {
         self.inner.file_path = path;
     }
 
+    #[setter]
+    /// Sets the list of hunks in the patch.
+    fn set_hunks(&mut self, hunks: Vec<PyHunk>) {
+        self.inner.hunks = hunks.into_iter().map(|h| h.inner).collect();
+    }
+
+    #[setter]
+    /// Sets whether the file should end with a newline.
+    fn set_ends_with_newline(&mut self, ends_with_newline: bool) {
+        self.inner.ends_with_newline = ends_with_newline;
+    }
+
     #[getter]
     /// A list of hunks to be applied to the file.
     fn hunks(&self) -> Vec<PyHunk> {
@@ -390,6 +425,30 @@ impl PyPatch {
         atomic: bool,
     ) -> PyResult<PyPatchResult> {
         apply_patch_to_file(py, self, target_dir, fuzz_factor, dry_run, atomic)
+    }
+
+    /// Applies the patch to a file on disk atomically.
+    ///
+    /// Args:
+    ///     target_dir (str | os.PathLike): The base directory to apply the patch.
+    ///     fuzz_factor (float, optional): Similarity threshold (0.0 to 1.0). Default is 0.7.
+    ///     dry_run (bool, optional): If True, previews changes without writing to disk. Default is False.
+    ///
+    /// Returns:
+    ///     PatchResult: The result of the application.
+    ///
+    /// Raises:
+    ///     PathTraversalError: If the target file path resolves outside target_dir.
+    ///     ApplyError: If reading or writing the file fails due to an I/O error or permission issue.
+    #[pyo3(signature = (target_dir, *, fuzz_factor=0.7, dry_run=false))]
+    fn apply_to_file_atomic(
+        &self,
+        py: Python<'_>,
+        target_dir: PathBuf,
+        fuzz_factor: f32,
+        dry_run: bool,
+    ) -> PyResult<PyPatchResult> {
+        apply_patch_to_file(py, self, target_dir, fuzz_factor, dry_run, true)
     }
 
     /// Applies the patch to a string in memory.
@@ -530,6 +589,30 @@ impl PyHunkFailure {
         {
             // Round to 4 decimal places to hide f32 -> f64 conversion artifacts in Python
             Some((*threshold as f64 * 10000.0).round() / 10000.0)
+        } else {
+            None
+        }
+    }
+
+    #[getter]
+    /// The starting line index of the near-miss location, if the error was a fuzzy match failure.
+    fn location_start(&self) -> Option<usize> {
+        if let ::mpatch::HunkApplyError::FuzzyMatchBelowThreshold { location, .. } =
+            &self.inner.reason
+        {
+            Some(location.start_index)
+        } else {
+            None
+        }
+    }
+
+    #[getter]
+    /// The window length of the near-miss location, if the error was a fuzzy match failure.
+    fn location_length(&self) -> Option<usize> {
+        if let ::mpatch::HunkApplyError::FuzzyMatchBelowThreshold { location, .. } =
+            &self.inner.reason
+        {
+            Some(location.length)
         } else {
             None
         }
@@ -804,6 +887,12 @@ impl PyBatchResult {
     }
 
     #[getter]
+    /// True if any patch in the batch had a hard error or any hunk failed to apply.
+    fn has_failures(&self) -> bool {
+        self.inner.has_failures()
+    }
+
+    #[getter]
     /// A list of operations that resulted in a hard error.
     fn hard_failures(&self) -> Vec<(String, String)> {
         self.inner
@@ -851,8 +940,9 @@ impl PyBatchResult {
         key: &str,
     ) -> PyResult<pyo3::Bound<'py, pyo3::PyAny>> {
         let target = PathBuf::from(key);
+        let target_norm = key.replace('\\', "/");
         for (path, res) in &self.inner.results {
-            if path == &target {
+            if path == &target || path.to_string_lossy().replace('\\', "/") == target_norm {
                 match res {
                     Ok(patch_res) => {
                         return PyPatchResult {
@@ -871,12 +961,16 @@ impl PyBatchResult {
 
     fn __contains__(&self, key: &str) -> bool {
         let target = PathBuf::from(key);
-        self.inner.results.iter().any(|(path, _)| path == &target)
+        let target_norm = key.replace('\\', "/");
+        self.inner.results.iter().any(|(path, _)| {
+            path == &target || path.to_string_lossy().replace('\\', "/") == target_norm
+        })
     }
 
     fn __repr__(&self) -> String {
         format!(
-            "<BatchResult all_succeeded={} hard_failures={}>",
+            "<BatchResult all_applied_cleanly={} all_succeeded={} hard_failures={}>",
+            self.inner.all_applied_cleanly(),
             self.inner.all_succeeded(),
             self.inner.hard_failures().len()
         )
@@ -923,6 +1017,27 @@ fn parse_auto(py: Python<'_>, diff: &str) -> PyResult<Vec<PyPatch>> {
         ::mpatch::parse_auto(&diff_str)
             .map_err(map_parse_err)
             .map(|patches| patches.into_iter().map(|p| PyPatch { inner: p }).collect())
+    })
+}
+
+#[pyfunction]
+#[pyo3(signature = (diff))]
+/// Parses a string containing a diff and returns a single Patch object.
+///
+/// Args:
+///     diff (str): The patch content (Markdown, Unified, Aider, or Conflict Markers).
+///
+/// Returns:
+///     Patch: The single parsed patch.
+///
+/// Raises:
+///     ParseError: If parsing fails, or if zero or multiple patches are found.
+fn parse_single_patch(py: Python<'_>, diff: &str) -> PyResult<PyPatch> {
+    let diff_str = diff.to_string();
+    py.detach(move || {
+        ::mpatch::parse_single_patch(&diff_str)
+            .map_err(|e| ParseError::new_err(e.to_string()))
+            .map(|p| PyPatch { inner: p })
     })
 }
 
@@ -1224,6 +1339,32 @@ fn apply_patch_to_file(
 }
 
 #[pyfunction]
+#[pyo3(signature = (patch, target_dir, *, fuzz_factor=0.7, dry_run=false))]
+/// Applies a Patch object to a file on disk atomically.
+///
+/// Args:
+///     patch (Patch): The patch to apply.
+///     target_dir (str | os.PathLike): The base directory to apply the patch.
+///     fuzz_factor (float, optional): Similarity threshold (0.0 to 1.0). Default is 0.7.
+///     dry_run (bool, optional): If True, previews changes without writing to disk. Default is False.
+///
+/// Returns:
+///     PatchResult: The result of the application.
+///
+/// Raises:
+///     PathTraversalError: If the target path resolves outside target_dir.
+///     ApplyError: If reading or writing the file fails due to an I/O error or permission issue.
+fn apply_patch_to_file_atomic(
+    py: Python<'_>,
+    patch: &PyPatch,
+    target_dir: PathBuf,
+    fuzz_factor: f32,
+    dry_run: bool,
+) -> PyResult<PyPatchResult> {
+    apply_patch_to_file(py, patch, target_dir, fuzz_factor, dry_run, true)
+}
+
+#[pyfunction]
 #[pyo3(signature = (patches, target_dir, *, fuzz_factor=0.7, dry_run=false, atomic=false))]
 /// Applies a list of patches to a directory on disk.
 ///
@@ -1257,6 +1398,141 @@ fn apply_patches_to_dir(
     });
 
     PyBatchResult { inner: result }
+}
+
+#[pyfunction]
+#[pyo3(signature = (patches, target_dir, *, fuzz_factor=0.7, dry_run=false))]
+/// Applies a list of patches to a directory on disk atomically.
+///
+/// Args:
+///     patches (list[Patch]): The patches to apply.
+///     target_dir (str | os.PathLike): The base directory to apply the patches.
+///     fuzz_factor (float, optional): Similarity threshold (0.0 to 1.0). Default is 0.7.
+///     dry_run (bool, optional): If True, previews changes without writing to disk. Default is False.
+///
+/// Returns:
+///     BatchResult: The aggregated results of the applications.
+fn apply_patches_to_dir_atomic(
+    py: Python<'_>,
+    patches: Vec<PyPatch>,
+    target_dir: PathBuf,
+    fuzz_factor: f32,
+    dry_run: bool,
+) -> PyBatchResult {
+    apply_patches_to_dir(py, patches, target_dir, fuzz_factor, dry_run, true)
+}
+
+#[pyfunction]
+#[pyo3(signature = (missing_path, target_dir, *, limit=3))]
+/// Finds close matching file paths in a target directory when a patch specifies a missing file.
+///
+/// Args:
+///     missing_path (str | os.PathLike): The path of the missing target file.
+///     target_dir (str | os.PathLike): The base directory to search within.
+///     limit (int, optional): Maximum number of suggestions to return. Defaults to 3.
+///
+/// Returns:
+///     list[pathlib.Path]: List of candidate file paths relative to target_dir.
+fn suggest_close_file_paths(
+    py: Python<'_>,
+    missing_path: PathBuf,
+    target_dir: PathBuf,
+    limit: usize,
+) -> Vec<PathBuf> {
+    py.detach(move || ::mpatch::suggest_close_file_paths(&missing_path, &target_dir, limit))
+}
+
+#[pyfunction]
+#[pyo3(signature = (line))]
+/// Determines whether a line represents an ellipsis / wildcard indicating omitted code.
+///
+/// Args:
+///     line (str): The line to evaluate.
+///
+/// Returns:
+///     bool: True if the line represents an ellipsis or omitted code wildcard, False otherwise.
+fn is_ellipsis_line(line: &str) -> bool {
+    ::mpatch::is_ellipsis_line(line)
+}
+
+#[pyfunction]
+#[pyo3(signature = (path))]
+/// Determines whether a string looks like a plausible file path rather than conversational prose.
+///
+/// Args:
+///     path (str): The candidate string to check.
+///
+/// Returns:
+///     bool: True if plausible file path, False otherwise.
+fn is_plausible_file_path(path: &str) -> bool {
+    ::mpatch::is_plausible_file_path(path)
+}
+
+#[pyfunction]
+#[pyo3(signature = (line))]
+/// Extracts a plausible file path from a conversational heading or line preceding a patch block.
+///
+/// Args:
+///     line (str): The line to extract from.
+///
+/// Returns:
+///     pathlib.Path | None: The extracted path if found, or None.
+fn extract_file_path_from_line(line: &str) -> Option<PathBuf> {
+    ::mpatch::extract_file_path_from_line(line)
+}
+
+#[pyfunction]
+#[pyo3(signature = (target_dir, relative_path))]
+/// Validates that a relative path does not escape the target base directory.
+///
+/// Args:
+///     target_dir (str | os.PathLike): The base directory.
+///     relative_path (str | os.PathLike): The relative path to check.
+///
+/// Returns:
+///     pathlib.Path: The safe canonical path.
+///
+/// Raises:
+///     PathTraversalError: If the relative path escapes target_dir.
+///     ApplyError: If an I/O error occurs during canonicalization.
+fn ensure_path_is_safe(target_dir: PathBuf, relative_path: PathBuf) -> PyResult<PathBuf> {
+    ::mpatch::ensure_path_is_safe(&target_dir, &relative_path).map_err(|e| match e {
+        ::mpatch::PatchError::PathTraversal(_) => PathTraversalError::new_err(e.to_string()),
+        _ => ApplyError::new_err(e.to_string()),
+    })
+}
+
+#[pyfunction]
+#[pyo3(signature = (hunk, target_content, *, fuzz_factor=0.7))]
+/// Finds the location to apply a hunk to a given text content without modifying it.
+///
+/// Args:
+///     hunk (Hunk): The hunk to locate.
+///     target_content (str): The content to search within.
+///     fuzz_factor (float, optional): Similarity threshold (0.0 to 1.0). Default is 0.7.
+///
+/// Returns:
+///     tuple[int, int, str]: (start_line_index, replaced_length, match_type)
+///
+/// Raises:
+///     ApplyError: If no suitable location could be found.
+fn find_hunk_location(
+    hunk: &PyHunk,
+    target_content: &str,
+    fuzz_factor: f32,
+) -> PyResult<(usize, usize, String)> {
+    let options = build_apply_options(fuzz_factor, false);
+    match ::mpatch::find_hunk_location(&hunk.inner, target_content, &options) {
+        Ok((loc, mtype)) => {
+            let m_str = match mtype {
+                ::mpatch::MatchType::Exact => "Exact",
+                ::mpatch::MatchType::ExactIgnoringWhitespace => "ExactIgnoringWhitespace",
+                ::mpatch::MatchType::Fuzzy { .. } => "Fuzzy",
+            };
+            Ok((loc.start_index, loc.length, m_str.to_string()))
+        }
+        Err(e) => Err(ApplyError::new_err(e.to_string())),
+    }
 }
 
 #[pyfunction]
@@ -1315,6 +1591,7 @@ fn mpatch(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(patch_content, m)?)?;
     m.add_function(wrap_pyfunction!(apply_directory, m)?)?;
     m.add_function(wrap_pyfunction!(detect_patch, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_single_patch, m)?)?;
     m.add_function(wrap_pyfunction!(parse_auto, m)?)?;
     m.add_function(wrap_pyfunction!(parse_diffs, m)?)?;
     m.add_function(wrap_pyfunction!(parse_patches, m)?)?;
@@ -1324,7 +1601,15 @@ fn mpatch(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(create_unified_diff, m)?)?;
     m.add_function(wrap_pyfunction!(apply_patch_to_content, m)?)?;
     m.add_function(wrap_pyfunction!(apply_patch_to_file, m)?)?;
+    m.add_function(wrap_pyfunction!(apply_patch_to_file_atomic, m)?)?;
     m.add_function(wrap_pyfunction!(apply_patches_to_dir, m)?)?;
+    m.add_function(wrap_pyfunction!(apply_patches_to_dir_atomic, m)?)?;
+    m.add_function(wrap_pyfunction!(suggest_close_file_paths, m)?)?;
+    m.add_function(wrap_pyfunction!(is_ellipsis_line, m)?)?;
+    m.add_function(wrap_pyfunction!(is_plausible_file_path, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_file_path_from_line, m)?)?;
+    m.add_function(wrap_pyfunction!(ensure_path_is_safe, m)?)?;
+    m.add_function(wrap_pyfunction!(find_hunk_location, m)?)?;
     m.add_function(wrap_pyfunction!(format_inline_diff, m)?)?;
     m.add_function(wrap_pyfunction!(merge_three_way, m)?)?;
 

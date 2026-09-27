@@ -41,8 +41,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Python Bindings (`mpatch`)
 - **Aider Parsing:** Exposed `mpatch.parse_aider` and updated `detect_patch` and type stubs (`mpatch.pyi`) for Aider search/replace blocks.
-- **Atomic Operations:** Added the `atomic: bool = False` keyword parameter to `apply_directory`, `apply_patches_to_dir`, `apply_patch_to_file`, and `Patch.apply_to_file`, alongside the `BatchResult.all_applied_cleanly` property.
+- **Atomic Operations:** Added the `atomic: bool = False` keyword parameter to `apply_directory`, `apply_patches_to_dir`, `apply_patch_to_file`, and `Patch.apply_to_file`, alongside dedicated `apply_patch_to_file_atomic`, `apply_patches_to_dir_atomic`, and `Patch.apply_to_file_atomic` functions.
+- **Batch Outcome Inspection:** Added `BatchResult.has_failures` and normalized cross-platform path lookups in `BatchResult`.
 - **Merge & Inline Functions:** Exposed `mpatch.merge_three_way` and `mpatch.format_inline_diff` with comprehensive type annotations (`mpatch.pyi`).
+- **API Expansion:** Exposed `mpatch.parse_single_patch`, `mpatch.suggest_close_file_paths`, `mpatch.find_hunk_location`, `Hunk.find_location`, `Hunk.required_match_span`, and `mpatch.ensure_path_is_safe`.
+- **Path & Wildcard Inspection Utilities:** Exposed `mpatch.is_ellipsis_line`, `mpatch.is_plausible_file_path`, and `mpatch.extract_file_path_from_line`.
+- **Near-Miss Diagnostics:** Added `HunkFailure.location_start` and `HunkFailure.location_length` to inspect rejected fuzzy near-miss match coordinates.
 
 #### Tooling & Release Automation
 - **Release Automation:** Added `scripts/release.py` featuring interactive pre-flight toolchain diagnostics, automated testing across Rust and Python, lockfile synchronization, atomic git commit/tagging, and optional Crates.io publishing.

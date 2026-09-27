@@ -108,6 +108,32 @@ def test_parse_errors():
         mpatch.parse_patches(malformed_diff)
 
 
+def test_parse_single_patch():
+    patch = mpatch.parse_single_patch(MD_DIFF)
+    assert Path(patch.file_path).as_posix() == "file.txt"
+    assert len(patch.hunks) == 1
+
+    # Zero patches
+    with pytest.raises(mpatch.ParseError, match="No patches were found"):
+        mpatch.parse_single_patch("plain text with no patches")
+
+    # Multiple patches in one diff
+    multi = textwrap.dedent("""\
+        --- a/f1.txt
+        +++ b/f1.txt
+        @@ -1 +1 @@
+        -a
+        +b
+        --- a/f2.txt
+        +++ b/f2.txt
+        @@ -1 +1 @@
+        -c
+        +d
+    """)
+    with pytest.raises(mpatch.ParseError, match="multiple files"):
+        mpatch.parse_single_patch(multi)
+
+
 # --- Pythonic API and Dunder Method Tests ---
 
 
@@ -260,6 +286,8 @@ def test_apply_patch_to_content_detailed_report():
     assert failures[0].error_type == "FuzzyMatchBelowThreshold"
     assert failures[0].best_score is not None
     assert failures[0].threshold == 0.7
+    assert failures[0].location_start is not None
+    assert failures[0].location_length is not None
     assert failures[0].ambiguous_matches is None
 
     # Assert new hunk statuses properties
@@ -276,6 +304,16 @@ def test_hunk_match_replace_blocks():
     # Should accurately isolate what will be matched vs replacing content
     assert hunk.match_block == ["line 1", "line 2", "line 3"]
     assert hunk.replace_block == ["line 1", "line two", "line 3"]
+
+
+def test_hunk_required_match_span():
+    patch = mpatch.parse_auto(MD_DIFF)[0]
+    hunk = patch[0]
+    assert hunk.required_match_span >= 1
+
+    empty_hunk = mpatch.Hunk([" line 1", " line 2"])
+    assert empty_hunk.has_changes is False
+    assert empty_hunk.required_match_span == 0
 
 
 # --- Filesystem Patching Tests ---
@@ -347,6 +385,7 @@ def test_apply_patches_to_dir_detailed(tmp_path: Path):
 
     batch_result = mpatch.apply_patches_to_dir(patches, tmp_path)
     assert batch_result.all_succeeded is True
+    assert batch_result.has_failures is False
     assert bool(batch_result) is True
     assert len(batch_result.hard_failures) == 0
 
@@ -362,6 +401,9 @@ def test_apply_patches_to_dir_detailed(tmp_path: Path):
     # Validate Pythonic Mapping functionality
     assert len(batch_result) == 1
     assert file_key in batch_result
+    # Normalization should handle forward slashes
+    assert "file.txt" in batch_result
+    assert isinstance(batch_result["file.txt"], mpatch.PatchResult)
     assert isinstance(batch_result[file_key], mpatch.PatchResult)
 
 
@@ -413,6 +455,18 @@ def test_create_and_invert_patch():
 
     assert Path(patch.file_path).as_posix() == "src/main.rs"
     assert len(patch.hunks) == 1
+
+    # Test setters for hunks and ends_with_newline
+    patch.ends_with_newline = False
+    assert patch.ends_with_newline is False
+    patch.ends_with_newline = True
+    assert patch.ends_with_newline is True
+
+    new_hunk = mpatch.Hunk(["-old", "+new"])
+    patch.hunks = [new_hunk]
+    assert len(patch.hunks) == 1
+    assert patch.hunks[0].added_lines == ["new"]
+
     assert patch.hunks[0].removed_lines == ['    println!("old");']
     assert patch.hunks[0].added_lines == ['    println!("new");']
 
@@ -576,7 +630,9 @@ def test_python_wildcard_file_apply(tmp_path: Path):
     patches = mpatch.parse_auto(diff)
     res = mpatch.apply_patch_to_file(patches[0], tmp_path)
     assert res.report.all_applied_cleanly is True
-    assert target.read_text() == "def main():\n    init()\n    new_logic()\n    exit()\n"
+    assert (
+        target.read_text() == "def main():\n    init()\n    new_logic()\n    exit()\n"
+    )
 
 
 def test_python_wildcard_runaway_gap_rejected():
@@ -699,7 +755,7 @@ def test_python_wildcard_similar_functions_no_false_positive():
     patched = mpatch.patch_content(diff, original=original)
     assert "audit_admin_access(req)" in patched
     assert (
-        "def handle_user(req):\n    log(\"request\")\n    verify_token(req)\n    return format_response(req)"
+        'def handle_user(req):\n    log("request")\n    verify_token(req)\n    return format_response(req)'
         in patched
     )
 
@@ -746,7 +802,9 @@ def test_python_atomic_single_patch_success(tmp_path: Path):
     assert target.read_text() == "line 1\nline two\n"
 
 
-def test_python_atomic_single_patch_partial_failure_leaves_disk_untouched(tmp_path: Path):
+def test_python_atomic_single_patch_partial_failure_leaves_disk_untouched(
+    tmp_path: Path,
+):
     target = tmp_path / "partial.txt"
     original = "line 1\nline 2\nline 3\n"
     target.write_text(original)
@@ -790,6 +848,7 @@ def test_python_atomic_multi_file_failure_discards_all(tmp_path: Path):
     patches = mpatch.parse_auto(diff)
     batch_res = mpatch.apply_patches_to_dir(patches, tmp_path, atomic=True)
     assert batch_res.all_applied_cleanly is False
+    assert batch_res.has_failures is True
 
     # Neither file should have been modified
     assert f1.read_text() == "foo\n"
@@ -800,6 +859,18 @@ def test_python_atomic_multi_file_failure_discards_all(tmp_path: Path):
     assert success is False
     assert f1.read_text() == "foo\n"
     assert f2.read_text() == "bar\n"
+
+    # Dedicated atomic batch function
+    batch_res2 = mpatch.apply_patches_to_dir_atomic(patches, tmp_path)
+    assert batch_res2.all_applied_cleanly is False
+    assert batch_res2.has_failures is True
+
+    # Dedicated single patch atomic function on valid patch
+    valid_diff = "--- a/f1.txt\n+++ b/f1.txt\n@@ -1 +1 @@\n-foo\n+foo_ok\n"
+    valid_patch = mpatch.parse_auto(valid_diff)[0]
+    res = mpatch.apply_patch_to_file_atomic(valid_patch, tmp_path)
+    assert res.report.all_applied_cleanly is True
+    assert f1.read_text() == "foo_ok\n"
 
 
 # --- Similar v3.2.0 Integration Tests ---
@@ -965,3 +1036,56 @@ def test_python_orphan_addition_rejected_during_fuzzy_match(tmp_path: Path):
     assert result.report.has_failures is True
     assert result.report.failures[0].error_type == "ContextNotFound"
     assert target_file.read_text() == original
+
+
+def test_python_suggest_close_file_paths(tmp_path: Path):
+    target_dir = tmp_path / "src"
+    target_dir.mkdir()
+    (target_dir / "calculator.py").write_text("def add(): pass\n")
+    (target_dir / "controller.py").write_text("def run(): pass\n")
+
+    suggestions = mpatch.suggest_close_file_paths("calculate.py", target_dir, limit=3)
+    assert len(suggestions) >= 1
+    assert "calculator.py" in Path(suggestions[0]).as_posix()
+
+
+def test_python_path_and_ellipsis_inspection():
+    # is_ellipsis_line
+    assert mpatch.is_ellipsis_line("...") is True
+    assert mpatch.is_ellipsis_line("    // ... existing code ...") is True
+    assert mpatch.is_ellipsis_line("# ... rest of function ...") is True
+    assert mpatch.is_ellipsis_line("const copy = [...items];") is False
+
+    # is_plausible_file_path
+    assert mpatch.is_plausible_file_path("src/core/main.rs") is True
+    assert mpatch.is_plausible_file_path("components/Button.tsx") is True
+    assert mpatch.is_plausible_file_path(".gitignore") is True
+    assert mpatch.is_plausible_file_path("Please check the following:") is False
+
+    # extract_file_path_from_line
+    extracted = mpatch.extract_file_path_from_line(
+        "In file `src/routes/auth.py`, update handler:"
+    )
+    assert extracted is not None
+    assert Path(extracted).as_posix() == "src/routes/auth.py"
+    assert mpatch.extract_file_path_from_line("No path here.") is None
+
+
+def test_python_ensure_path_is_safe(tmp_path: Path):
+    safe_child = mpatch.ensure_path_is_safe(tmp_path, "sub/file.txt")
+    assert Path(safe_child).is_absolute()
+
+    with pytest.raises(mpatch.PathTraversalError):
+        mpatch.ensure_path_is_safe(tmp_path, "../outside.txt")
+
+
+def test_python_find_hunk_location():
+    patch = mpatch.parse_auto(RAW_DIFF)[0]
+    hunk = patch[0]
+    start, length, match_type = mpatch.find_hunk_location(hunk, "old\n")
+    assert start == 0
+    assert length == 1
+    assert match_type == "Exact"
+
+    # Test via Hunk method
+    assert hunk.find_location("old\n") == (0, 1, "Exact")
