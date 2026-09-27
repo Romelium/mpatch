@@ -11431,208 +11431,17 @@ struct ScoredWindow {
 /// # Returns
 ///
 /// A vector of [`ScoredWindow`] objects representing all evaluated windows.
-#[cfg(feature = "parallel")]
-fn compute_scored_windows(
-    search_ranges: &[(usize, usize)],
-    pre: &TargetPrecomputed<'_>,
-    target_refs: &[&str],
-    match_pre: &MatchPrecomputed<'_>,
+/// Context and precomputed indexing tables for scoring candidate sliding windows.
+#[derive(Clone, Copy)]
+struct WindowScorer<'a, 't, 'm> {
+    pre: &'a TargetPrecomputed<'t>,
+    target_refs: &'a [&'t str],
+    match_pre: &'a MatchPrecomputed<'m>,
+    match_ps: &'a [u32],
+    loose_ps: &'a [u32],
     min_len: usize,
     max_len: usize,
     threshold: f64,
-) -> Vec<ScoredWindow> {
-    let total_candidates: usize = search_ranges
-        .iter()
-        .map(|&(start, end)| {
-            let t_len = end.saturating_sub(start);
-            (min_len..=max_len)
-                .map(|w_len| if w_len <= t_len { t_len - w_len + 1 } else { 0 })
-                .sum::<usize>()
-        })
-        .sum();
-
-    debug!(
-        "      compute_scored_windows (parallel): evaluating {} candidate window(s) across {} range(s) (window lengths {}..={})",
-        total_candidates,
-        search_ranges.len(),
-        min_len,
-        max_len
-    );
-    trace!(
-        "        Match block length: {}, Target line count: {}, Search ranges: {:?}",
-        match_pre.len,
-        target_refs.len(),
-        search_ranges
-    );
-
-    let n = target_refs.len();
-    let mut match_prefix_sum = Vec::with_capacity(n + 1);
-    let mut loose_match_prefix_sum = Vec::with_capacity(n + 1);
-    match_prefix_sum.push(0u32);
-    loose_match_prefix_sum.push(0u32);
-
-    let mut cur_match = 0u32;
-    let mut cur_loose = 0u32;
-    for (&stripped, &loose) in target_refs.iter().zip(&pre.target_loose_refs) {
-        if match_pre.hunk_hashes.contains(&hash_str_fast(stripped)) {
-            cur_match += 1;
-        }
-        if match_pre.loose_hunk_hashes.contains(&hash_str_fast(loose)) {
-            cur_loose += 1;
-        }
-        match_prefix_sum.push(cur_match);
-        loose_match_prefix_sum.push(cur_loose);
-    }
-
-    let m = match_pre.len;
-    let c_m = match_pre.no_ws_chars;
-
-    let windows: Vec<ScoredWindow> = search_ranges
-        .par_iter()
-        .flat_map(|&(range_start, range_end)| {
-            let target_len = range_end.saturating_sub(range_start);
-            let match_ps = &match_prefix_sum;
-            let loose_ps = &loose_match_prefix_sum;
-            (0..=target_len.saturating_sub(min_len))
-                .into_par_iter()
-                .flat_map(move |i| {
-                    let start_index = range_start + i;
-                    let actual_max_len = max_len.min(target_len - i);
-                    let mut local_windows = Vec::new();
-
-                    if actual_max_len < min_len {
-                        return local_windows;
-                    }
-
-                    if m > 10 {
-                        let max_match_count =
-                            match_ps[start_index + actual_max_len] - match_ps[start_index];
-                        let max_loose_count =
-                            loose_ps[start_index + actual_max_len] - loose_ps[start_index];
-                        let max_count = max_match_count.max(max_loose_count) as f64;
-                        if m > 30 && (max_count / m as f64) < threshold {
-                            return local_windows;
-                        }
-                        let max_ub_lines = (2.0 * max_count) / (min_len + m) as f64;
-                        let max_ub_loose = (2.0 * max_count) / (min_len + m) as f64;
-                        if max_ub_lines.max(max_ub_loose) < 0.20 {
-                            return local_windows;
-                        }
-                    }
-
-                    let nominal_len = m.clamp(min_len, actual_max_len);
-                    let mut lengths = Vec::with_capacity(actual_max_len - min_len + 1);
-                    lengths.push(nominal_len);
-                    for d in 1..=(actual_max_len - min_len + 1) {
-                        if nominal_len >= min_len + d {
-                            lengths.push(nominal_len - d);
-                        }
-                        if nominal_len + d <= actual_max_len {
-                            lengths.push(nominal_len + d);
-                        }
-                    }
-
-                    let mut best_local_score = 0.0;
-                    for window_len in lengths {
-                        let w_match_count =
-                            match_ps[start_index + window_len] - match_ps[start_index];
-                        let w_loose_count =
-                            loose_ps[start_index + window_len] - loose_ps[start_index];
-                        let w_ub_lines =
-                            (2 * w_match_count as usize) as f64 / (window_len + m) as f64;
-                        let w_ub_loose =
-                            (2 * w_loose_count as usize) as f64 / (window_len + m) as f64;
-                        let w_scale = if window_len > m && m > 0 {
-                            let raw = (window_len + m) as f64 / (2.0 * m as f64);
-                            let expansion_ratio = (window_len - m) as f64 / m as f64;
-                            let penalty = (1.0 - 0.05 * expansion_ratio).max(0.60);
-                            (raw * penalty).min(raw)
-                        } else {
-                            1.0
-                        };
-                        let w_ub_line_score =
-                            ((w_ub_lines * w_scale).max(w_ub_loose * w_scale)).min(1.0);
-                        let w_theoretical_max = if m > 30 {
-                            w_ub_line_score
-                        } else {
-                            let max_word_bonus = if m > 10 { 0.25 } else { 0.70 };
-                            let w_max_strict =
-                                0.3 * w_ub_lines + 0.7 * (w_ub_lines + max_word_bonus).min(1.0);
-                            let w_max_loose =
-                                0.3 * w_ub_loose + 0.7 * (w_ub_loose + max_word_bonus).min(1.0);
-                            let w_c_w = pre.no_ws_line_ends[start_index + window_len - 1]
-                                - pre.no_ws_line_starts[start_index];
-                            let w_ub_no_ws = if w_c_w == 0 && c_m == 0 {
-                                1.0
-                            } else if w_c_w == 0 || c_m == 0 {
-                                0.0
-                            } else {
-                                2.0 * (w_c_w.min(c_m) as f64) / ((w_c_w + c_m) as f64)
-                            };
-                            let w_ub_very_loose = if c_m <= 500 {
-                                0.1 * w_ub_lines + 0.9 * w_ub_no_ws
-                            } else {
-                                0.0
-                            };
-                            w_ub_line_score
-                                .max(w_max_strict)
-                                .max(w_max_loose)
-                                .max(w_ub_very_loose)
-                        };
-                        if w_theoretical_max < threshold
-                            || (m > 30
-                                && best_local_score >= threshold
-                                && w_theoretical_max <= best_local_score)
-                        {
-                            local_windows.push(ScoredWindow {
-                                score: w_theoretical_max,
-                                ratio: w_theoretical_max,
-                                ratio_lines: w_ub_lines,
-                                ratio_words: 0.0,
-                                start_index,
-                                window_len,
-                            });
-                            continue;
-                        }
-                        let window = pre.window_data(target_refs, start_index, window_len);
-                        let (score, ratio, ratio_lines, ratio_words) =
-                            score_window(&window, match_pre, threshold);
-                        if score > best_local_score {
-                            best_local_score = score;
-                        }
-                        local_windows.push(ScoredWindow {
-                            score,
-                            ratio,
-                            ratio_lines,
-                            ratio_words,
-                            start_index,
-                            window_len,
-                        });
-                    }
-                    local_windows
-                })
-        })
-        .collect();
-
-    let (best_score, best_start, best_len) = windows
-        .iter()
-        .max_by(|a, b| {
-            a.score
-                .partial_cmp(&b.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .map(|w| (w.score, w.start_index, w.window_len))
-        .unwrap_or((-1.0, 0, 0));
-
-    debug!(
-        "      compute_scored_windows (parallel) complete: scored {} window(s). Best candidate score={:.3} at line {} (len={}).",
-        windows.len(),
-        best_score,
-        best_start + 1,
-        best_len
-    );
-
-    windows
 }
 
 /// Evaluates and scores candidate sliding windows across the provided search ranges sequentially.
@@ -11649,7 +11458,148 @@ fn compute_scored_windows(
 /// # Returns
 ///
 /// A vector of [`ScoredWindow`] objects representing all evaluated windows.
-#[cfg(not(feature = "parallel"))]
+impl WindowScorer<'_, '_, '_> {
+    fn score_candidate(
+        &self,
+        range_start: usize,
+        i: usize,
+        target_len: usize,
+    ) -> Vec<ScoredWindow> {
+        let start_index = range_start + i;
+        let actual_max_len = self.max_len.min(target_len - i);
+        let mut local_windows = Vec::new();
+
+        if actual_max_len < self.min_len {
+            return local_windows;
+        }
+
+        let m = self.match_pre.len;
+        let c_m = self.match_pre.no_ws_chars;
+
+        if m > 10 {
+            let max_match_count =
+                self.match_ps[start_index + actual_max_len] - self.match_ps[start_index];
+            let max_loose_count =
+                self.loose_ps[start_index + actual_max_len] - self.loose_ps[start_index];
+            let max_count = max_match_count.max(max_loose_count) as f64;
+            if m > 30 && (max_count / m as f64) < self.threshold {
+                return local_windows;
+            }
+            let max_ub_lines = (2.0 * max_count) / (self.min_len + m) as f64;
+            let max_ub_loose = (2.0 * max_count) / (self.min_len + m) as f64;
+            if max_ub_lines.max(max_ub_loose) < 0.20 {
+                return local_windows;
+            }
+        }
+
+        let nominal_len = m.clamp(self.min_len, actual_max_len);
+        let mut lengths = Vec::with_capacity(actual_max_len - self.min_len + 1);
+        lengths.push(nominal_len);
+        for d in 1..=(actual_max_len - self.min_len + 1) {
+            if nominal_len >= self.min_len + d {
+                lengths.push(nominal_len - d);
+            }
+            if nominal_len + d <= actual_max_len {
+                lengths.push(nominal_len + d);
+            }
+        }
+
+        let mut best_local_score = 0.0;
+        for window_len in lengths {
+            let w_match_count =
+                self.match_ps[start_index + window_len] - self.match_ps[start_index];
+            let w_loose_count =
+                self.loose_ps[start_index + window_len] - self.loose_ps[start_index];
+            let w_ub_lines = (2 * w_match_count as usize) as f64 / (window_len + m) as f64;
+            let w_ub_loose = (2 * w_loose_count as usize) as f64 / (window_len + m) as f64;
+            let w_scale = if window_len > m && m > 0 {
+                let raw = (window_len + m) as f64 / (2.0 * m as f64);
+                let expansion_ratio = (window_len - m) as f64 / m as f64;
+                let penalty = (1.0 - 0.05 * expansion_ratio).max(0.60);
+                (raw * penalty).min(raw)
+            } else {
+                1.0
+            };
+            let w_ub_line_score = ((w_ub_lines * w_scale).max(w_ub_loose * w_scale)).min(1.0);
+            let w_theoretical_max = if m > 30 {
+                w_ub_line_score
+            } else {
+                let max_word_bonus = if m > 10 { 0.25 } else { 0.70 };
+                let w_max_strict = 0.3 * w_ub_lines + 0.7 * (w_ub_lines + max_word_bonus).min(1.0);
+                let w_max_loose = 0.3 * w_ub_loose + 0.7 * (w_ub_loose + max_word_bonus).min(1.0);
+                let w_c_w = self.pre.no_ws_line_ends[start_index + window_len - 1]
+                    - self.pre.no_ws_line_starts[start_index];
+                let w_ub_no_ws = if w_c_w == 0 && c_m == 0 {
+                    1.0
+                } else if w_c_w == 0 || c_m == 0 {
+                    0.0
+                } else {
+                    2.0 * (w_c_w.min(c_m) as f64) / ((w_c_w + c_m) as f64)
+                };
+                let w_ub_very_loose = if c_m <= 500 {
+                    0.1 * w_ub_lines + 0.9 * w_ub_no_ws
+                } else {
+                    0.0
+                };
+                w_ub_line_score
+                    .max(w_max_strict)
+                    .max(w_max_loose)
+                    .max(w_ub_very_loose)
+            };
+            if w_theoretical_max < self.threshold
+                || (m > 30
+                    && best_local_score >= self.threshold
+                    && w_theoretical_max <= best_local_score)
+            {
+                local_windows.push(ScoredWindow {
+                    score: w_theoretical_max,
+                    ratio: w_theoretical_max,
+                    ratio_lines: w_ub_lines,
+                    ratio_words: 0.0,
+                    start_index,
+                    window_len,
+                });
+                continue;
+            }
+            let window = self
+                .pre
+                .window_data(self.target_refs, start_index, window_len);
+            let (score, ratio, ratio_lines, ratio_words) =
+                score_window(&window, self.match_pre, self.threshold);
+            if score > best_local_score {
+                best_local_score = score;
+            }
+            local_windows.push(ScoredWindow {
+                score,
+                ratio,
+                ratio_lines,
+                ratio_words,
+                start_index,
+                window_len,
+            });
+        }
+        local_windows
+    }
+}
+
+/// Evaluates and scores candidate sliding windows across the provided search ranges.
+///
+/// When the `parallel` feature is enabled, evaluations are performed concurrently across
+/// threads using Rayon; otherwise, search ranges are processed sequentially.
+///
+/// # Arguments
+///
+/// * `search_ranges` - Slice of `(start, end)` line intervals to search within.
+/// * `pre` - Precomputed buffers and line boundary indices for the target file.
+/// * `target_refs` - Slice of trimmed target line string references.
+/// * `match_pre` - Precomputed representation of the hunk's match block.
+/// * `min_len` - Minimum candidate window line count.
+/// * `max_len` - Maximum candidate window line count.
+/// * `threshold` - Minimum similarity threshold for candidate acceptance.
+///
+/// # Returns
+///
+/// A vector of [`ScoredWindow`] objects representing all evaluated windows.
 fn compute_scored_windows(
     search_ranges: &[(usize, usize)],
     pre: &TargetPrecomputed<'_>,
@@ -11669,8 +11619,15 @@ fn compute_scored_windows(
         })
         .sum();
 
+    let mode = if cfg!(feature = "parallel") {
+        "parallel"
+    } else {
+        "sequential"
+    };
+
     debug!(
-        "      compute_scored_windows (sequential): evaluating {} candidate window(s) across {} range(s) (window lengths {}..={})",
+        "      compute_scored_windows ({}): evaluating {} candidate window(s) across {} range(s) (window lengths {}..={})",
+        mode,
         total_candidates,
         search_ranges.len(),
         min_len,
@@ -11702,127 +11659,35 @@ fn compute_scored_windows(
         loose_match_prefix_sum.push(cur_loose);
     }
 
-    let m = match_pre.len;
-    let c_m = match_pre.no_ws_chars;
+    let scorer = WindowScorer {
+        pre,
+        target_refs,
+        match_pre,
+        match_ps: &match_prefix_sum,
+        loose_ps: &loose_match_prefix_sum,
+        min_len,
+        max_len,
+        threshold,
+    };
 
+    #[cfg(feature = "parallel")]
+    let windows: Vec<ScoredWindow> = search_ranges
+        .par_iter()
+        .flat_map(|&(range_start, range_end)| {
+            let target_len = range_end.saturating_sub(range_start);
+            (0..=target_len.saturating_sub(min_len))
+                .into_par_iter()
+                .flat_map(move |i| scorer.score_candidate(range_start, i, target_len))
+        })
+        .collect();
+
+    #[cfg(not(feature = "parallel"))]
     let windows: Vec<ScoredWindow> = search_ranges
         .iter()
         .flat_map(|&(range_start, range_end)| {
             let target_len = range_end.saturating_sub(range_start);
-            let match_ps = &match_prefix_sum;
-            let loose_ps = &loose_match_prefix_sum;
-            (0..=target_len.saturating_sub(min_len)).flat_map(move |i| {
-                let start_index = range_start + i;
-                let actual_max_len = max_len.min(target_len - i);
-                let mut local_windows = Vec::new();
-
-                if actual_max_len < min_len {
-                    return local_windows;
-                }
-
-                if m > 10 {
-                    let max_match_count =
-                        match_ps[start_index + actual_max_len] - match_ps[start_index];
-                    let max_loose_count =
-                        loose_ps[start_index + actual_max_len] - loose_ps[start_index];
-                    let max_count = max_match_count.max(max_loose_count) as f64;
-                    if m > 30 && (max_count / m as f64) < threshold {
-                        return local_windows;
-                    }
-                    let max_ub_lines = (2.0 * max_count) / (min_len + m) as f64;
-                    let max_ub_loose = (2.0 * max_count) / (min_len + m) as f64;
-                    if max_ub_lines.max(max_ub_loose) < 0.20 {
-                        return local_windows;
-                    }
-                }
-
-                let nominal_len = m.clamp(min_len, actual_max_len);
-                let mut lengths = Vec::with_capacity(actual_max_len - min_len + 1);
-                lengths.push(nominal_len);
-                for d in 1..=(actual_max_len - min_len + 1) {
-                    if nominal_len >= min_len + d {
-                        lengths.push(nominal_len - d);
-                    }
-                    if nominal_len + d <= actual_max_len {
-                        lengths.push(nominal_len + d);
-                    }
-                }
-
-                let mut best_local_score = 0.0;
-                for window_len in lengths {
-                    let w_match_count = match_ps[start_index + window_len] - match_ps[start_index];
-                    let w_loose_count = loose_ps[start_index + window_len] - loose_ps[start_index];
-                    let w_ub_lines = (2 * w_match_count as usize) as f64 / (window_len + m) as f64;
-                    let w_ub_loose = (2 * w_loose_count as usize) as f64 / (window_len + m) as f64;
-                    let w_scale = if window_len > m && m > 0 {
-                        let raw = (window_len + m) as f64 / (2.0 * m as f64);
-                        let expansion_ratio = (window_len - m) as f64 / m as f64;
-                        let penalty = (1.0 - 0.05 * expansion_ratio).max(0.60);
-                        (raw * penalty).min(raw)
-                    } else {
-                        1.0
-                    };
-                    let w_ub_line_score =
-                        ((w_ub_lines * w_scale).max(w_ub_loose * w_scale)).min(1.0);
-                    let w_theoretical_max = if m > 30 {
-                        w_ub_line_score
-                    } else {
-                        let max_word_bonus = if m > 10 { 0.25 } else { 0.70 };
-                        let w_max_strict =
-                            0.3 * w_ub_lines + 0.7 * (w_ub_lines + max_word_bonus).min(1.0);
-                        let w_max_loose =
-                            0.3 * w_ub_loose + 0.7 * (w_ub_loose + max_word_bonus).min(1.0);
-                        let w_c_w = pre.no_ws_line_ends[start_index + window_len - 1]
-                            - pre.no_ws_line_starts[start_index];
-                        let w_ub_no_ws = if w_c_w == 0 && c_m == 0 {
-                            1.0
-                        } else if w_c_w == 0 || c_m == 0 {
-                            0.0
-                        } else {
-                            2.0 * (w_c_w.min(c_m) as f64) / ((w_c_w + c_m) as f64)
-                        };
-                        let w_ub_very_loose = if c_m <= 500 {
-                            0.1 * w_ub_lines + 0.9 * w_ub_no_ws
-                        } else {
-                            0.0
-                        };
-                        w_ub_line_score
-                            .max(w_max_strict)
-                            .max(w_max_loose)
-                            .max(w_ub_very_loose)
-                    };
-                    if w_theoretical_max < threshold
-                        || (m > 30
-                            && best_local_score >= threshold
-                            && w_theoretical_max <= best_local_score)
-                    {
-                        local_windows.push(ScoredWindow {
-                            score: w_theoretical_max,
-                            ratio: w_theoretical_max,
-                            ratio_lines: w_ub_lines,
-                            ratio_words: 0.0,
-                            start_index,
-                            window_len,
-                        });
-                        continue;
-                    }
-                    let window = pre.window_data(target_refs, start_index, window_len);
-                    let (score, ratio, ratio_lines, ratio_words) =
-                        score_window(&window, match_pre, threshold);
-                    if score > best_local_score {
-                        best_local_score = score;
-                    }
-                    local_windows.push(ScoredWindow {
-                        score,
-                        ratio,
-                        ratio_lines,
-                        ratio_words,
-                        start_index,
-                        window_len,
-                    });
-                }
-                local_windows
-            })
+            (0..=target_len.saturating_sub(min_len))
+                .flat_map(move |i| scorer.score_candidate(range_start, i, target_len))
         })
         .collect();
 
@@ -11837,7 +11702,8 @@ fn compute_scored_windows(
         .unwrap_or((-1.0, 0, 0));
 
     debug!(
-        "      compute_scored_windows (sequential) complete: scored {} window(s). Best candidate score={:.3} at line {} (len={}).",
+        "      compute_scored_windows ({}) complete: scored {} window(s). Best candidate score={:.3} at line {} (len={}).",
+        mode,
         windows.len(),
         best_score,
         best_start + 1,
