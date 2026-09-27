@@ -5264,6 +5264,66 @@ fn test_aider_unclosed_block_at_eof() {
 }
 
 #[test]
+fn test_consecutive_code_blocks_inherit_file_path() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let content = indoc! {r#"
+        ### File: `src/lib.rs`
+
+        ```rust
+        <<<<<<< SEARCH
+        fn one() { 1 }
+        =======
+        fn one() { 10 }
+        >>>>>>> REPLACE
+        ```
+
+        ```rust
+        <<<<<<< SEARCH
+        fn two() { 2 }
+        =======
+        fn two() { 20 }
+        >>>>>>> REPLACE
+        ```
+    "#};
+
+    let patches = parse_diffs(content).unwrap();
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].file_path.to_str(), Some("src/lib.rs"));
+    assert_eq!(patches[0].hunks.len(), 2);
+}
+
+#[test]
+fn test_nested_indented_aider_fences_inside_replacement_block() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let content = [
+        "### File: `tests/mock.rs`",
+        "",
+        "```rust",
+        "<<<<<<< SEARCH",
+        "fn test_sample() {}",
+        "=======",
+        "fn test_sample() {",
+        "    let diff = indoc! {r#\"",
+        "        alu.v",
+        "        <<<<<<< SEARCH",
+        "        endmodule",
+        "        =======",
+        "        endmodule",
+        "        >>>>>>> REPLACE",
+        "    \"#};",
+        "}",
+        ">>>>>>> REPLACE",
+        "```",
+    ]
+    .join("\n");
+
+    let patches = parse_diffs(&content).unwrap();
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].file_path.to_str(), Some("tests/mock.rs"));
+    assert!(patches[0].hunks[0].added_lines().iter().any(|l| l.contains("alu.v")));
+}
+
+#[test]
 fn test_detect_markdown_with_language_hint() {
     let _ = env_logger::builder().is_test(true).try_init();
     let content = indoc! {r#"
@@ -14178,15 +14238,93 @@ mod readme_examples_tests {
             "fn main() {\n    println!(\"alpha\");\n}\n"
         );
     }
+
+    #[test]
+    fn test_cli_debug_report_no_deadlock() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("main.rs");
+        std::fs::write(&file_path, "fn main() {\n    println!(\"hello\");\n}\n").unwrap();
+
+        let diff = indoc! {r#"
+            ```diff
+            --- a/main.rs
+            +++ b/main.rs
+            @@ -1,3 +1,3 @@
+             fn main() {
+            -    println!("hello");
+            +    println!("world");
+             }
+            ```
+        "#};
+        let patch_file = dir.path().join("patch.md");
+        std::fs::write(&patch_file, diff).unwrap();
+
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_mpatch"))
+            .arg("-vvvv")
+            .arg(&patch_file)
+            .arg(dir.path())
+            .current_dir(dir.path())
+            .output()
+            .expect("Failed to execute mpatch with -vvvv");
+
+        assert!(
+            output.status.success(),
+            "mpatch -vvvv failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let mut found_report = false;
+        for entry in std::fs::read_dir(dir.path()).unwrap() {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            if name.starts_with("mpatch-debug-report-") && name.ends_with(".md") {
+                found_report = true;
+                let report_content = std::fs::read_to_string(dir.path().join(&name)).unwrap();
+                assert!(report_content.contains("## Discrepancy Check"));
+                assert!(report_content.contains("SUCCESS"));
+                break;
+            }
+        }
+        assert!(found_report, "Expected mpatch-debug-report-*.md to be created");
+    }
+
+    #[test]
+    fn test_parse_diffs_multiple_blocks_inherit_file_path_without_repeating_heading() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let content = indoc! {r#"
+            ### File: `src/utils.rs`
+
+            ```rust
+            <<<<<<< SEARCH
+            fn one() { 1 }
+            =======
+            fn one() { 10 }
+            >>>>>>> REPLACE
+            ```
+
+            ```rust
+            <<<<<<< SEARCH
+            fn two() { 2 }
+            =======
+            fn two() { 20 }
+            >>>>>>> REPLACE
+            ```
+        "#};
+
+        let patches = parse_diffs(content).unwrap();
+        assert_eq!(patches.len(), 1, "Consecutive blocks should inherit file path and be merged into one patch");
+        assert_eq!(patches[0].file_path.to_str().unwrap(), "src/utils.rs");
+        assert_eq!(patches[0].hunks.len(), 2);
+        assert_eq!(patches[0].hunks[0].added_lines(), vec!["fn one() { 10 }"]);
+        assert_eq!(patches[0].hunks[1].added_lines(), vec!["fn two() { 20 }"]);
+    }
 }
 
 
 mod polyglot_language_support_tests {
-    use super::*;
     use indoc::indoc;
     use mpatch::{
         apply_patch_to_file, is_ellipsis_line, is_plausible_file_path, parse_auto,
-        patch_content_str, ApplyOptions, HunkApplyError, HunkApplyStatus,
+        patch_content_str, ApplyOptions,
     };
     use std::fs;
     use tempfile::tempdir;

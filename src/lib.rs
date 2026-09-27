@@ -5203,6 +5203,7 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
     let mut all_patches = Vec::new();
     let mut lines = content.lines().enumerate().peekable();
     let mut preceding_lines: Vec<&str> = Vec::new();
+    let mut last_seen_file_path: Option<PathBuf> = None;
 
     while let Some((line_index, line_text)) = lines.next() {
         let trimmed = line_text.trim_start();
@@ -5247,10 +5248,15 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
                     "Parsing diff block starting on line {}.",
                     diff_block_start_line
                 );
-                let default_file_path = preceding_lines
+                let detected_path = preceding_lines
                     .iter()
                     .rev()
                     .find_map(|l| extract_file_path_from_line(l));
+                if let Some(ref path) = detected_path {
+                    last_seen_file_path = Some(path.clone());
+                }
+                let default_file_path = detected_path.or_else(|| last_seen_file_path.clone());
+
                 if let Some(ref path) = default_file_path {
                     trace!(
                         "  Inferred target file path for block from preceding text: '{}'",
@@ -5264,6 +5270,11 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
                     diff_block_start_line,
                     default_file_path,
                 )?;
+                for p in &block_patches {
+                    if p.file_path != Path::new("patch_target") {
+                        last_seen_file_path = Some(p.file_path.clone());
+                    }
+                }
                 debug!(
                     "  Extracted {} patch(es) from block starting on line {}.",
                     block_patches.len(),
@@ -5278,7 +5289,7 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
             }
             preceding_lines.clear();
         } else {
-            if preceding_lines.len() >= 5 {
+            if preceding_lines.len() >= 15 {
                 preceding_lines.remove(0);
             }
             preceding_lines.push(line_text);
@@ -5662,51 +5673,75 @@ where
         InReplace,
     }
     let mut state = State::Outside;
+    let mut fence_indent = 0;
     let mut search_lines: Vec<String> = Vec::new();
     let mut replace_lines: Vec<String> = Vec::new();
 
     for line in lines {
         let trimmed = line.trim_start();
+        let indent = line.len() - trimmed.len();
 
-        if is_aider_search_fence(trimmed) {
-            let path_on_fence = extract_file_path_from_search_fence(trimmed);
-            let target_file = path_on_fence
-                .or_else(|| pending_file_path.take())
-                .or_else(|| active_file_path.clone())
-                .unwrap_or_else(|| PathBuf::from("patch_target"));
+        match state {
+            State::Outside => {
+                if is_aider_search_fence(trimmed) {
+                    fence_indent = indent;
+                    let path_on_fence = extract_file_path_from_search_fence(trimmed);
+                    let target_file = path_on_fence
+                        .or_else(|| pending_file_path.take())
+                        .or_else(|| active_file_path.clone())
+                        .unwrap_or_else(|| PathBuf::from("patch_target"));
 
-            debug!(
-                "  Aider parser: starting SEARCH block for '{}' (fence: '{}')",
-                target_file.display(),
-                trimmed
-            );
-            active_file_path = Some(target_file.clone());
+                    debug!(
+                        "  Aider parser: starting SEARCH block for '{}' (fence: '{}', indent: {})",
+                        target_file.display(),
+                        trimmed,
+                        indent
+                    );
+                    active_file_path = Some(target_file.clone());
 
-            search_lines.clear();
-            replace_lines.clear();
-            state = State::InSearch;
-            continue;
-        }
+                    search_lines.clear();
+                    replace_lines.clear();
+                    state = State::InSearch;
+                    continue;
+                }
 
-        if is_aider_divide_fence(trimmed) && matches!(state, State::InSearch) {
-            debug!(
-                "  Aider parser: transitioned to REPLACE block ({} search lines collected)",
-                search_lines.len()
-            );
-            state = State::InReplace;
-            continue;
-        }
-
-        if is_aider_replace_fence(trimmed) && matches!(state, State::InReplace) {
-            debug!(
-                "  Aider parser: ending REPLACE block ({} replace lines collected) for '{}'",
-                replace_lines.len(),
-                active_file_path
-                    .as_deref()
-                    .unwrap_or(Path::new("patch_target"))
-                    .display()
-            );
-            state = State::Outside;
+                if let Some(path) = extract_file_path_from_line(line) {
+                    pending_file_path = Some(path);
+                }
+            }
+            State::InSearch => {
+                if is_aider_divide_fence(trimmed) && indent <= fence_indent {
+                    debug!(
+                        "  Aider parser: transitioned to REPLACE block ({} search lines collected)",
+                        search_lines.len()
+                    );
+                    state = State::InReplace;
+                    continue;
+                } else if is_aider_search_fence(trimmed) && indent <= fence_indent {
+                    fence_indent = indent;
+                    let path_on_fence = extract_file_path_from_search_fence(trimmed);
+                    let target_file = path_on_fence
+                        .or_else(|| pending_file_path.take())
+                        .or_else(|| active_file_path.clone())
+                        .unwrap_or_else(|| PathBuf::from("patch_target"));
+                    active_file_path = Some(target_file);
+                    search_lines.clear();
+                    replace_lines.clear();
+                    continue;
+                }
+                search_lines.push(line.to_string());
+            }
+            State::InReplace => {
+                if is_aider_replace_fence(trimmed) && indent <= fence_indent {
+                    debug!(
+                        "  Aider parser: ending REPLACE block ({} replace lines collected) for '{}'",
+                        replace_lines.len(),
+                        active_file_path
+                            .as_deref()
+                            .unwrap_or(Path::new("patch_target"))
+                            .display()
+                    );
+                    state = State::Outside;
 
             let file_path = active_file_path
                 .clone()
@@ -5794,18 +5829,7 @@ where
             search_lines.clear();
             replace_lines.clear();
             continue;
-        }
-
-        match state {
-            State::Outside => {
-                if let Some(path) = extract_file_path_from_line(line) {
-                    pending_file_path = Some(path);
                 }
-            }
-            State::InSearch => {
-                search_lines.push(line.to_string());
-            }
-            State::InReplace => {
                 replace_lines.push(line.to_string());
             }
         }

@@ -9,6 +9,7 @@ use std::fmt::Write as FmtWrite;
 use std::fs::{self, File};
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -143,8 +144,8 @@ fn run(args: Args) -> Result<()> {
 
     // This closure will be called at the end of the function to finalize the report.
     let finalize_report = |batch_result: Option<&mpatch::BatchResult>| {
-        if let Some((arc, contents, anon)) = &report_arc {
-            write_report_footer(arc, &args, &all_patches, batch_result, contents, anon);
+        if let Some(report) = &report_arc {
+            write_report_footer(report, &args, &all_patches, batch_result);
         }
     };
     // --- Core Patching Logic ---
@@ -366,8 +367,13 @@ impl Anonymizer {
     }
 }
 
-/// A tuple containing the shared handle to the report file, a map of original file contents, and the anonymizer.
-type ReportData = (Arc<Mutex<File>>, HashMap<PathBuf, String>, Anonymizer);
+/// A struct containing the shared handle to the report file, original file contents, anonymizer, and logging flag.
+struct ReportData {
+    file: Arc<Mutex<File>>,
+    original_contents: HashMap<PathBuf, String>,
+    anonymizer: Anonymizer,
+    file_logging_enabled: Arc<AtomicBool>,
+}
 
 /// Logs the reasons why hunks failed to apply.
 ///
@@ -480,24 +486,34 @@ struct TeeWriter {
     file: Arc<Mutex<File>>,
     /// Path anonymizer applied to stream content before writing to the report file.
     anonymizer: Anonymizer,
+    /// Flag controlling whether log messages are forwarded to the report file.
+    file_logging_enabled: Arc<AtomicBool>,
 }
 
 impl Write for TeeWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         // Write to standard error first.
         io::stderr().write_all(buf)?;
-        // Then write to the locked file.
-        if let Ok(s) = std::str::from_utf8(buf) {
-            let anonymized = self.anonymizer.anonymize(s);
-            self.file.lock().unwrap().write_all(anonymized.as_bytes())?;
-        } else {
-            self.file.lock().unwrap().write_all(buf)?;
+        // Then write to the locked file only while file logging is enabled.
+        if self.file_logging_enabled.load(Ordering::SeqCst) {
+            if let Ok(s) = std::str::from_utf8(buf) {
+                let anonymized = self.anonymizer.anonymize(s);
+                if let Ok(mut file) = self.file.lock() {
+                    let _ = file.write_all(anonymized.as_bytes());
+                }
+            } else if let Ok(mut file) = self.file.lock() {
+                let _ = file.write_all(buf);
+            }
         }
         Ok(buf.len())
     }
     fn flush(&mut self) -> io::Result<()> {
         io::stderr().flush()?;
-        self.file.lock().unwrap().flush()?;
+        if self.file_logging_enabled.load(Ordering::SeqCst) {
+            if let Ok(mut file) = self.file.lock() {
+                let _ = file.flush();
+            }
+        }
         Ok(())
     }
 }
@@ -528,14 +544,22 @@ fn setup_logging_and_reporting(
         // --- Create and Write Report Header ---
         let (file_arc, original_contents) =
             create_report_file(args, patch_content, patches, &anonymizer)?;
+        let file_logging_enabled = Arc::new(AtomicBool::new(true));
+
         // --- Configure Logger to Tee to the Report File ---
         builder
             .filter_level(LevelFilter::Trace) // Max verbosity for the report
             .target(env_logger::Target::Pipe(Box::new(TeeWriter {
                 file: file_arc.clone(),
                 anonymizer: anonymizer.clone(),
+                file_logging_enabled: file_logging_enabled.clone(),
             })));
-        Some((file_arc, original_contents, anonymizer))
+        Some(ReportData {
+            file: file_arc,
+            original_contents,
+            anonymizer,
+            file_logging_enabled,
+        })
     } else {
         // --- Configure Standard Logger ---
         let log_level = match args.verbose {
@@ -672,25 +696,32 @@ fn create_report_file(
 /// * `original_contents` - Map of original target file contents prior to patching.
 /// * `anonymizer` - Path anonymizer used to redact sensitive paths.
 fn write_report_footer(
-    file_arc: &Arc<Mutex<File>>,
+    report_data: &ReportData,
     args: &Args,
     all_patches: &[Patch],
     batch_result: Option<&mpatch::BatchResult>,
-    original_contents: &HashMap<PathBuf, String>,
-    anonymizer: &Anonymizer,
 ) {
     // Use a static bool to ensure this only runs once.
-    use std::sync::atomic::{AtomicBool, Ordering};
     static IS_FINALIZED: AtomicBool = AtomicBool::new(false);
     if IS_FINALIZED.swap(true, Ordering::SeqCst) {
         return;
     }
 
+    // 1. Flush any pending logs from the execution phase
     log::logger().flush();
+
+    // 2. Disable file logging in TeeWriter so no subsequent logs
+    // (from discrepancy checks, diff generation, etc.) touch the file mutex
+    // or leak into the markdown report outside the log block.
+    report_data.file_logging_enabled.store(false, Ordering::SeqCst);
+
+    let file_arc = &report_data.file;
+    let original_contents = &report_data.original_contents;
+    let anonymizer = &report_data.anonymizer;
 
     // Scope 1: Write initial headers and final file states
     {
-        let mut file = file_arc.lock().unwrap();
+        let Ok(mut file) = file_arc.lock() else { return; };
 
         // Use `let _ = ...` to ignore potential write errors during cleanup.
         let _ = writeln!(file, "````"); // Close the log block
@@ -760,7 +791,7 @@ fn write_report_footer(
     } // Lock released here
 
     let Some(batch_result) = batch_result else {
-        let mut file = file_arc.lock().unwrap();
+        let Ok(mut file) = file_arc.lock() else { return; };
         let _ = writeln!(
             file,
             "*Discrepancy check was skipped as patch application did not complete.*"
@@ -769,17 +800,15 @@ fn write_report_footer(
     };
 
     for (original_patch, (path, result)) in all_patches.iter().zip(batch_result.results.iter()) {
-        // Scope 2: Write file header
-        {
-            let mut file = file_arc.lock().unwrap();
-            let _ = writeln!(file, "### File: `{}`", path.display());
-        } // Lock released
+        let mut section_output = format!("### File: `{}`\n", path.display());
 
         match result {
             Ok(_) => {
                 let Some(old_content) = original_contents.get(path) else {
-                    let mut file = file_arc.lock().unwrap();
-                    let _ = writeln!(file, "\n- **Result:** <span style='color:orange;'>SKIPPED</span> (Could not read original file content for comparison).");
+                    section_output.push_str("\n- **Result:** <span style='color:orange;'>SKIPPED</span> (Could not read original file content for comparison).\n\n");
+                    if let Ok(mut file) = file_arc.lock() {
+                        let _ = file.write_all(section_output.as_bytes());
+                    }
                     continue;
                 };
 
@@ -789,60 +818,73 @@ fn write_report_footer(
                     Ok(content) => content,
                     Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
                     Err(_) => {
-                        let mut file = file_arc.lock().unwrap();
-                        let _ = writeln!(file, "\n- **Result:** <span style='color:orange;'>SKIPPED</span> (Could not read new file content after patching).");
+                        section_output.push_str("\n- **Result:** <span style='color:orange;'>SKIPPED</span> (Could not read new file content after patching).\n\n");
+                        if let Ok(mut file) = file_arc.lock() {
+                            let _ = file.write_all(section_output.as_bytes());
+                        }
                         continue;
                     }
                 };
 
                 // Re-create a patch from the before/after state.
-                // NO LOCK HELD HERE - Prevents deadlock if from_texts logs anything
-                let recreated_patch =
-                    Patch::from_texts(path, old_content, &new_content, 3).unwrap();
-
-                // Scope 3: Write result
-                {
-                    let mut file = file_arc.lock().unwrap();
-                    if compare_patches(original_patch, &recreated_patch) {
-                        let _ = writeln!(file, "\n- **Result:** <span style='color:green;'>SUCCESS</span>\n- **Details:** The regenerated patch is identical to the input patch (ignoring context lines).");
-                    } else {
-                        let original_norm = format_normalized_patch(original_patch);
-                        let recreated_norm = format_normalized_patch(&recreated_patch);
-                        let diff_text =
-                            similar::TextDiff::from_lines(&original_norm, &recreated_norm)
-                                .unified_diff()
-                                .context_radius(3)
-                                .header("Original Input Patch", "Regenerated Patch")
-                                .to_string();
-
-                        let _ = writeln!(file, "\n- **Result:** <span style='color:red;'>FAILURE</span>\n- **Details:** The regenerated patch does not match the input patch. This may indicate an issue with how a fuzzy match was applied.");
-                        let _ = writeln!(file, "\n**Diff (Original vs. Regenerated):**");
-                        let _ = writeln!(
-                            file,
-                            "```diff\n{}```",
-                            anonymizer.anonymize(&diff_text.to_string())
-                        );
-                        let _ = writeln!(file, "\n<details><summary>Click to see full original and regenerated patches</summary>\n");
-                        let _ = writeln!(file, "**Original Input Patch:**");
-                        let _ = writeln!(
-                            file,
-                            "```diff\n{}```",
-                            anonymizer.anonymize(&original_patch.to_string())
-                        );
-                        let _ = writeln!(file, "\n**Regenerated Patch (from file changes):**");
-                        let _ = writeln!(
-                            file,
-                            "```diff\n{}```",
-                            anonymizer.anonymize(&recreated_patch.to_string())
-                        );
-                        let _ = writeln!(file, "</details>\n");
+                let recreated_patch = match Patch::from_texts(path, old_content, &new_content, 3) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let msg = format!("\n- **Result:** <span style='color:red;'>FAILURE</span> (Failed to generate regenerated patch: {})\n\n", e);
+                        section_output.push_str(&msg);
+                        if let Ok(mut file) = file_arc.lock() {
+                            let _ = file.write_all(section_output.as_bytes());
+                        }
+                        continue;
                     }
+                };
+
+                // Compare patches completely OUTSIDE the lock
+                if compare_patches(original_patch, &recreated_patch) {
+                    section_output.push_str("\n- **Result:** <span style='color:green;'>SUCCESS</span>\n- **Details:** The regenerated patch is identical to the input patch (ignoring context lines).\n\n");
+                } else {
+                    let original_norm = format_normalized_patch(original_patch);
+                    let recreated_norm = format_normalized_patch(&recreated_patch);
+                    let diff_text =
+                        similar::TextDiff::from_lines(&original_norm, &recreated_norm)
+                            .unified_diff()
+                            .context_radius(3)
+                            .header("Original Input Patch", "Regenerated Patch")
+                            .to_string();
+
+                    section_output.push_str("\n- **Result:** <span style='color:red;'>FAILURE</span>\n- **Details:** The regenerated patch does not match the input patch. This may indicate an issue with how a fuzzy match was applied.\n\n");
+                    section_output.push_str("**Diff (Original vs. Regenerated):**\n");
+                    let _ = writeln!(
+                        section_output,
+                        "```diff\n{}```\n",
+                        anonymizer.anonymize(&diff_text)
+                    );
+                    section_output.push_str("<details><summary>Click to see full original and regenerated patches</summary>\n\n");
+                    section_output.push_str("**Original Input Patch:**\n");
+                    let _ = writeln!(
+                        section_output,
+                        "```diff\n{}```\n",
+                        anonymizer.anonymize(&original_patch.to_string())
+                    );
+                    section_output.push_str("**Regenerated Patch (from file changes):**\n");
+                    let _ = writeln!(
+                        section_output,
+                        "```diff\n{}```\n",
+                        anonymizer.anonymize(&recreated_patch.to_string())
+                    );
+                    section_output.push_str("</details>\n\n");
+                }
+
+                if let Ok(mut file) = file_arc.lock() {
+                    let _ = file.write_all(section_output.as_bytes());
                 }
             }
             Err(e) => {
-                let mut file = file_arc.lock().unwrap();
                 let msg = format!("\n- **Result:** <span style='color:orange;'>SKIPPED</span> (Patch application failed with a hard error: {}).", e);
-                let _ = writeln!(file, "{}", anonymizer.anonymize(&msg));
+                section_output.push_str(&anonymizer.anonymize(&msg));
+                if let Ok(mut file) = file_arc.lock() {
+                    let _ = file.write_all(section_output.as_bytes());
+                }
             }
         }
     }
