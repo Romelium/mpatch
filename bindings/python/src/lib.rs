@@ -1593,9 +1593,12 @@ fn merge_three_way(
     base: &str,
     ours: &str,
     theirs: &str,
-    labels: Option<(&str, &str, &str)>,
+    labels: Option<(String, String, String)>,
 ) -> (String, bool) {
-    ::mpatch::merge_three_way(base, ours, theirs, labels)
+    let labels_ref = labels
+        .as_ref()
+        .map(|(b, o, t)| (b.as_str(), o.as_str(), t.as_str()));
+    ::mpatch::merge_three_way(base, ours, theirs, labels_ref)
 }
 
 #[pymodule]
