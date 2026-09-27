@@ -33,27 +33,30 @@ You ask an AI to modify some code. You get the diff. Except, the comment inside 
 
 1.  **Code Blocks in Markdown:** The default output format for language models. Uses either ` ```diff `, ` ```rust `, or other code blocks if they have diff headers.
 2.  **Unified Diff:** Default `git diff` or `diff -u` format.
-3.  **Aider Search/Replace Blocks:** Search and replace blocks with `<<<<<<< ORIGINAL`, `=======`, and `>>>>>>> UPDATED` (including `SEARCH`/`REPLACE` variants). File paths are extracted automatically from the block header or preceding text.
-4.  **Conflict Marker:** Git-like conflict markers with `<<<<`, `====`, and `>>>>`. **Reminder:** They lack file paths and are suitable for patching strings in memory.
+3.  **Aider Search/Replace Blocks:** Search and replace blocks with `<<<<<<< SEARCH` (or `ORIGINAL`), `=======`, and `>>>>>>> REPLACE` (or `UPDATED`). File paths are extracted automatically from the block header, preceding markdown text, or code comments. Supports wildcard ellipsis matching (`...`) to preserve intermediate code.
+4.  **Conflict Markers:** Git-like conflict markers with `<<<<`, `====`, and `>>>>`. Defaults to `patch_target` on the filesystem, or patches strings directly in memory.
 
 ---
 
 ## Features
 
-*   **🧠 Fuzzy Matching:** Runs a similarity algorithm to find the most suitable place to apply a patch if no exact matching is found. It supports stale context, whitespaces changes, and minor code differences.
+*   **🧠 Fuzzy Matching:** Runs a similarity algorithm to find the most suitable place to apply a patch if no exact matching is found. It supports stale context, whitespace changes, and minor code differences.
+*   **🔒 Atomic (All-or-Nothing) Mode:** Pass `-a` / `--atomic` (or `--all-or-nothing`) to guarantee that changes are only written to disk if every single patch and hunk succeeds cleanly. If any hunk fails, the filesystem remains completely untouched.
 *   **🤖 Format Independent:** Automatically recognizes and processes:
     *   **Markdown** diff code blocks (standard chat output format).
-    *   **Atomic (All-or-Nothing) Mode:** With `-a` / `--atomic`, changes are only applied to disk if every single patch and hunk succeeds cleanly.
+    *   **Unified Diff** (output from `git diff` or `diff -u` command).
     *   **Aider Search/Replace** blocks (popularized by Aider and LLM coding assistants).
-    *   **Wildcard / Ellipsis Matching:** Supports `...` and comment-wrapped ellipsis lines (`// ... existing code ...`) in search/replace blocks, preserving unchanged gaps.
-    *   **Unified Diff** (output from `git diff` command).
-*   **📥 Standard Input (Stdin):** Pipe diffs directly from `git diff`, `cat`, or `curl` using `-` (e.g., `git diff | mpatch - ./src`).
+    *   **Conflict Markers** (`<<<<`, `====`, `>>>>`).
+*   **🔍 Wildcard / Ellipsis Matching:** Supports `...`, `…`, and comment-wrapped ellipsis lines (`// ... existing code ...`, `<!-- ... -->`, etc.) in search/replace blocks, preserving untouched code gaps while strictly preventing runaway gaps across functions.
+*   **🔀 Three-Way Line Merge:** Built-in line-level 3-way merge engine (`merge_three_way`) with standard Diff3 conflict markers.
+*   **💡 Sub-Line & Near-Miss Diagnostics:** Inline word-level diff visualization (`format_inline_diff`) for failed hunks and fuzzy file path suggestions (`suggest_close_file_paths`) when a target file is missing.
+*   **📥 Standard Input (Stdin):** Pipe diffs directly from `git diff`, `cat`, or `curl` using `-` (e.g., `git diff | mpatch - ./src` or `cat patch.diff | mpatch -`).
 *   **📋 Clipboard Support:** Input directly from your clipboard with `-c` or `--clipboard`.
-*   **✨ Smarter Indentation:** Automatically indents added lines to be consistent with the target file. It perfectly applies the patch files that were initially indented in Markdown lists or use another tab/space indentation style.
+*   **✨ Smarter Indentation:** Automatically indents added lines to be consistent with the target file. It translates tabs/spaces dynamically and preserves the target file's indentation style.
 *   **🗑️ File Deletion:** Automatically removes the target file if the output becomes empty after patching.
-*   **🛡️ Secure:** Path traversal is automatically prevented, which means that no evil patch files can overwrite anything outside the target directory.
-*   **⚡ Fast:** As fuzzy searching takes time, `mpatch` searches for matches using every CPU core via `rayon`.
-*   **🔍 Dry Run:** Preview what the tool would do with `--dry-run`.
+*   **🛡️ Secure:** Path traversal is automatically prevented, ensuring no patch files can access or overwrite files outside the target directory.
+*   **⚡ Fast & Concurrent:** Parallelizes fuzzy matching across all CPU cores via `rayon`, using histogram-based word diffing and mathematical upper-bound pruning for rapid search.
+*   **🔍 Dry Run:** Preview what the tool would do without modifying any files using `--dry-run`.
 
 ---
 
@@ -113,10 +116,13 @@ cargo install mpatch
 ## CLI Usage
 
 ### Basic Application
-Apply a patch file (Markdown, Diff, or Conflict markers) to a target directory.
+Apply a patch file (Markdown, Diff, or Conflict markers) to a target directory (defaults to current directory `.` if omitted).
 
 ```bash
 mpatch changes.md ./src
+
+# Target directory defaults to '.' when omitted:
+mpatch changes.md
 ```
 
 ### Atomic (All-or-Nothing) Mode
@@ -303,6 +309,96 @@ let new_text = "fn main() { println!(\"New\"); }";
 let patch = Patch::from_texts("src/main.rs", old_text, new_text, 3).unwrap();
 
 println!("{}", patch);
+```
+
+### 6. Atomic (All-or-Nothing) Batch Application
+Stage all changes in memory and commit to disk if and only if all hunks across all patches apply cleanly:
+
+```rust
+use mpatch::{parse_auto, apply_patches_to_dir_atomic, ApplyOptions};
+use std::path::Path;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let diff_content = "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n";
+    let patches = parse_auto(diff_content)?;
+    let target_dir = Path::new("./src");
+    let options = ApplyOptions::exact();
+
+    // Changes are only written to disk if ALL patches and hunks succeed
+    let batch = apply_patches_to_dir_atomic(&patches, target_dir, options);
+    if batch.all_applied_cleanly() {
+        println!("All files updated cleanly on disk!");
+    } else {
+        eprintln!("Atomic batch failed: zero files on disk were modified.");
+    }
+    Ok(())
+}
+```
+
+### 7. Aider Search/Replace with Wildcard Ellipsis Matching
+Apply Aider search/replace blocks containing wildcard ellipsis lines (`...`) that match and preserve multi-line code gaps:
+
+```rust
+use mpatch::{patch_content_str, ApplyOptions};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let original = "def compute(x):\n    setup()\n    res = x * 2\n    teardown()\n    return res\n";
+    let aider_diff = r#"
+math.py
+<<<<<<< SEARCH
+def compute(x):
+    ...
+    res = x * 2
+=======
+def compute(x):
+    ...
+    res = x * 4
+>>>>>>> REPLACE
+"#;
+
+    let options = ApplyOptions::new();
+    let new_code = patch_content_str(aider_diff, Some(original), &options)?;
+
+    assert!(new_code.contains("res = x * 4"));
+    assert!(new_code.contains("setup()"));
+    assert!(new_code.contains("teardown()"));
+    Ok(())
+}
+```
+
+### 8. Three-Way Line Merging
+Perform line-level 3-way merges backed by `similar::TextMerge`, automatically generating Diff3 conflict markers on conflicts:
+
+```rust
+use mpatch::merge_three_way;
+
+let base   = "Apples\nBananas\nCherries\n";
+let ours   = "Apples\nBlueberries\nCherries\n";
+let theirs = "Apples\nBananas\nCranberries\n";
+
+let (merged, is_conflicted) = merge_three_way(base, ours, theirs, None);
+assert!(!is_conflicted);
+assert_eq!(merged, "Apples\nBlueberries\nCranberries\n");
+```
+
+### 9. Inline Word Diffs & Path Suggestions
+Visualize sub-line changes with word-level highlights and suggest close matching file paths when a target is not found:
+
+```rust
+use mpatch::{format_inline_diff, suggest_close_file_paths};
+use std::path::Path;
+
+// Highlight sub-line word additions and deletions
+let expected = vec!["fn compute(x: i32) -> i32 {"];
+let actual = vec!["fn compute(x: i64) -> i32 {"];
+let diff_view = format_inline_diff(&expected, &actual);
+println!("{}", diff_view);
+
+// Find close file path candidates when a patch targets a misspelled path
+let suggestions = suggest_close_file_paths(Path::new("calculate.rs"), Path::new("./src"), 3);
+for candidate in suggestions {
+    println!("Did you mean: {}", candidate.display());
+}
 ```
 
 ---

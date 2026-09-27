@@ -521,7 +521,17 @@ def merge_three_way(
     labels: tuple[str, str, str] | None = None,
 ) -> tuple[str, bool]:
     """
-    Performs a 3-way line merge among base, ours, and theirs. Returns (merged_content, is_conflicted).
+    Performs a 3-way line merge among a common ancestor (base), current content (ours),
+    and incoming changes (theirs).
+
+    Args:
+        base (str): The common ancestor content.
+        ours (str): Current local content.
+        theirs (str): Incoming changes.
+        labels (tuple[str, str, str] | None, optional): Labels for conflict markers (base, ours, theirs).
+
+    Returns:
+        tuple[str, bool]: (merged_content, is_conflicted)
     """
     ...
 

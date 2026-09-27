@@ -40,7 +40,7 @@
 //! `mpatch` automatically recognizes and parses four diff and patch formats:
 //!
 //! 1. **Markdown Blocks:** Standard chat/assistant output fenced in code blocks
-//!    (```` ```diff ````, ``` `patch ````, or language-tagged blocks with diff headers).
+//!    (```` ```diff ````, ```` ```patch ````, or language-tagged blocks with diff headers).
 //! 2. **Unified Diffs:** Standard `git diff` or `diff -u` patches with `--- a/file` and `+++ b/file` headers.
 //! 3. **Aider Search/Replace Blocks:** Search and replace blocks with `<<<<<<< SEARCH` (or `ORIGINAL`),
 //!    `=======`, and `>>>>>>> REPLACE` (or `UPDATED`). Target file paths are inferred automatically

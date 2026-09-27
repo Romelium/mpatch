@@ -27,6 +27,8 @@ When an AI tries to edit a file that has been modified locally since the AI last
 - **🔒 Atomic (All-or-Nothing) Mode:** Pass `atomic=True` to only write changes to disk if all patches and hunks succeed cleanly.
 - **🤖 Format Independent:** Automatically recognizes Unified Diffs, Markdown code blocks (` ```diff `), Aider Search/Replace blocks (`<<<<<<< ORIGINAL` `=======` `>>>>>>> UPDATED` and variants), and Conflict Markers (`<<<<` `====` `>>>>`).
 - **🔍 Wildcard & Ellipsis Support:** Supports `...` and comment-wrapped ellipsis lines (e.g. `// ... existing code ...`) in search/replace blocks, preserving unchanged code gaps.
+- **🔀 Three-Way Line Merge:** Built-in line-level 3-way merge via `mpatch.merge_three_way` with Diff3 conflict markers.
+- **💡 Sub-Line Word Diffs:** Highlighting word-level additions/deletions via `mpatch.format_inline_diff`.
 - **✨ Smart Indentation:** Automatically translates tabs/spaces and aligns injected code to match the target file perfectly.
 - **🛡️ Secure:** Built-in protection against directory traversal attacks (e.g., `--- a/../../../etc/passwd`).
 - **⚡ Blazing Fast & Concurrent:** Written in Rust. It heavily optimizes the diffing algorithms and releases the GIL during patching, allowing true multithreading in Python.
@@ -209,6 +211,100 @@ print(diff_str)
 # 2. Generate a Patch object directly for programmatic manipulation
 patch = mpatch.Patch.from_texts("fruits.txt", old_text, new_text)
 print(patch[0].removed_lines)  # ['banana']
+```
+
+### 8. Aider Search/Replace Blocks with Wildcards
+Apply Aider-style search/replace blocks directly. The parser automatically detects file paths and supports wildcard ellipsis lines (`...`) to preserve intermediate code gaps.
+
+```python
+import mpatch
+
+original_code = """\
+def process_data(data):
+    validate(data)
+    # Step 1: Normalize
+    normalized = [x.strip() for x in data]
+    # Step 2: Transform
+    transformed = [x.upper() for x in normalized]
+    # Step 3: Output
+    return transformed
+"""
+
+diff = """\
+process.py
+<<<<<<< SEARCH
+def process_data(data):
+    ...
+    # Step 2: Transform
+    transformed = [x.upper() for x in normalized]
+=======
+def process_data(data):
+    ...
+    # Step 2: Transform
+    transformed = [x.lower() for x in normalized]
+>>>>>>> REPLACE
+"""
+
+result = mpatch.patch_content(diff, original=original_code)
+# Normalization and output steps are preserved; Step 2 is updated!
+```
+
+### 9. Three-Way Line Merging
+Perform line-level 3-way merges between an ancestor (`base`), local code (`ours`), and incoming changes (`theirs`):
+
+```python
+import mpatch
+
+base = "Apples\nBananas\nCherries\n"
+ours = "Apples\nBlueberries\nCherries\n"
+theirs = "Apples\nBananas\nCranberries\n"
+
+merged, is_conflicted = mpatch.merge_three_way(base, ours, theirs)
+assert not is_conflicted
+print(merged)
+# Apples
+# Blueberries
+# Cranberries
+
+# If there is a conflict, standard Diff3 markers are inserted:
+conflict_merged, is_conflicted = mpatch.merge_three_way(
+    "val = 1\n",
+    "val = 2\n",
+    "val = 3\n",
+    labels=("base", "ours", "theirs"),
+)
+assert is_conflicted
+print(conflict_merged)
+# <<<<<<< ours
+# val = 2
+# ||||||| base
+# val = 1
+# =======
+# val = 3
+# >>>>>>> theirs
+```
+
+### 10. Sub-Line Word Diff Visualization
+Format near-miss comparisons or word-level diffs with highlighted changes:
+
+```python
+import mpatch
+
+expected = ["def calculate(val: int, factor: float = 1.0) -> float:"]
+actual = ["def calculate(val: int, factor: float = 2.5) -> float:"]
+
+diff_view = mpatch.format_inline_diff(expected, actual)
+print(diff_view)
+```
+
+### 11. Format Detection
+Inspect the format of an incoming patch string before processing:
+
+```python
+import mpatch
+
+fmt = mpatch.detect_patch(diff_string)
+# Returns: 'Markdown', 'Unified', 'Aider', 'Conflict', or 'Unknown'
 ```
 
 ---

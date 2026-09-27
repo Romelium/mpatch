@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Dependencies & Similar v3.2.0:** Upgraded `similar` from `2.7.0` to `3.2.0` with `inline` feature enabled.
 - **CLI & Diagnostics:** Added Aider search/replace format detection to CLI diagnostics and benchmark suites.
 - **Diagnostics:** Added comprehensive trace and debug instrumentation across parsing, path plausibility validation, topological anchoring, candidate backtracking, sliding window scoring, and atomic patch application pipelines.
+- **Documentation:** Expanded root and Python READMEs with detailed guides and code examples for atomic batch application, Aider search/replace blocks with wildcard ellipsis matching, three-way line merges, inline word diffs, and path suggestions.
 
 ### Performance
 - **Fuzzy Matching:** Switched word-level sequence comparisons in `score_window`, `find_statement_match_in_block`, and `try_apply_hunk_at_location` to `similar::Algorithm::Histogram`, eliminating quadratic Myers degradations on repetitive code.
