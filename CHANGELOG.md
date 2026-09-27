@@ -7,57 +7,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Overview
+
+1. **Format-Agnostic LLM Ingestion & Wildcards:** Native parsing for Aider search/replace blocks with automatic path inference and multi-line wildcard ellipsis (`...`) matching that safely bridges omitted code gaps.
+2. **Transaction-Grade Atomicity:** All-or-nothing filesystem guarantees via `-a` / `--atomic` across CLI, Rust API, and Python bindings, staging edits in-memory and rolling back cleanly on any failure.
+3. **Three-Way Merging & Sub-Line Diagnostics:** Built-in 3-way line merges with Diff3 conflict markers (`merge_three_way`), sub-line word-level diff visualization (`format_inline_diff`), and fuzzy file path suggestions (`suggest_close_file_paths`) for missing targets.
+4. **Unix & Stdin Composability:** First-class standard input piping (`git diff | mpatch - ./src`), implicit piping, and automated fallback to the current directory (`.`).
+5. **$O(N + M)$ Scalability & Performance:** Single-pass inverted index anchor discovery, Histogram-based sequence comparisons, admissible upper-bound diff pruning, and zero-allocation precomputations eliminating quadratic bottlenecks on files with >10,000 lines.
+6. **Anti-Hallucination & Scope Protection:** Strict boundary validation including orphan addition guards, head/tail context preservation, primary identifier consistency, and topological anchor relaxation for unnumbered hunks.
+
 ### Added
-- **Parser & Formats:** Added native support for Aider search/replace blocks (`<<<<<<< SEARCH`, `=======`, `>>>>>>> REPLACE`, and `ORIGINAL`/`UPDATED` variants) via `parse_aider`, `PatchFormat::Aider`, and automatic format detection in `detect_patch`, `parse_auto`, and `parse_diffs`.
-- **Parser & Formats:** Implemented heuristic target file path detection from preceding markdown lines, code comments, backticks, or search fence headers for blocks lacking unified diff headers.
-- **Fuzzy Matching & Wildcards:** Introduced wildcard ellipsis matching (`...`, `…`, `// ... existing code ...`, `<!-- ... -->`, etc.) across single and multi-segment hunks, reconstructing multi-line code gaps while preserving untouched code and guarding against runaway gaps or syntax false positives.
-- **Core API & Atomicity:** Added atomic disk application via `apply_patches_to_dir_atomic`, `try_apply_patches_to_dir_atomic`, `apply_patch_to_file_atomic`, and `try_apply_patch_to_file_atomic`. Operations are staged in-memory and committed to disk if and only if all hunks across all patches succeed, with automatic rollback on commit failure.
-- **CLI & Atomicity:** Added `-a` / `--atomic` (aliased as `--all-or-nothing`) flag to guarantee that changes are only written to disk if all patches and hunks apply cleanly. If any hunk fails or encounters an error, the filesystem remains completely untouched.
-- **CLI & Stdin:** Added first-class Standard Input (stdin) piping support via `-` (e.g., `cat patch.diff | mpatch - ./src`, `git diff | mpatch -R - ./src`, `curl -s https://example.com/fix.patch | mpatch - ./src`), including implicit piping and automatic fallback to the current directory (`.`) when a target path is omitted.
-- **Core API & 3-Way Merge:** Added `mpatch::merge_three_way` backed by `similar::TextMerge` to perform 3-way line merges with Diff3 conflict markers.
-- **Diagnostics & Inline Diffs:** Added `mpatch::format_inline_diff` for sub-line word-level diff visualization. CLI failed hunk diagnostics now display near-miss comparisons with highlighted word differences on `FuzzyMatchBelowThreshold` errors.
-- **CLI & Path Suggestions:** Added `mpatch::suggest_close_file_paths` powered by `similar::get_close_matches` to suggest existing file candidates when a patch targets a nonexistent path (`TargetNotFound`).
-- **Core API:** Added `BatchResult::all_applied_cleanly()`, `BatchResult::has_failures()`, and `StrictBatchApplyError` for granular batch outcome inspection.
-- **Python Bindings:** Exposed `mpatch.parse_aider` and updated format detection and type stubs (`mpatch.pyi`) for Aider search/replace blocks.
-- **Python Bindings:** Added `atomic: bool = False` parameter to `apply_directory`, `apply_patches_to_dir`, `apply_patch_to_file`, and `Patch.apply_to_file`, along with the `BatchResult.all_applied_cleanly` property.
-- **Python Bindings:** Exposed `mpatch.format_inline_diff` and `mpatch.merge_three_way` with full type stubs (`mpatch.pyi`).
-- **Dependencies & Similar v3.2.0:** Upgraded `similar` from `2.7.0` to `3.2.0` with `inline` feature enabled.
-- **CLI & Diagnostics:** Added Aider search/replace format detection to CLI diagnostics and benchmark suites.
-- **Diagnostics:** Added comprehensive trace and debug instrumentation across parsing, path plausibility validation, topological anchoring, candidate backtracking, sliding window scoring, and atomic patch application pipelines.
-- **Documentation:** Expanded root and Python READMEs with detailed guides and code examples for atomic batch application, Aider search/replace blocks with wildcard ellipsis matching, three-way line merges, inline word diffs, and path suggestions.
+
+#### Parser & Formats
+- **Aider Search/Replace Blocks:** Added native support for Aider search/replace blocks (`<<<<<<< SEARCH`, `=======`, `>>>>>>> REPLACE` along with `ORIGINAL` and `UPDATED` syntax variants) via `mpatch::parse_aider`, `mpatch::parse_aider_from_lines`, and `PatchFormat::Aider`.
+- **Automatic Format Detection:** Updated `detect_patch`, `parse_auto`, and `parse_diffs` to recognize and parse Aider search/replace blocks alongside unified diffs, markdown code fences, and conflict markers.
+- **Heuristic Target File Path Detection:** Implemented `extract_file_path_from_line`, `is_plausible_file_path`, and `normalize_candidate_path` to infer target file paths from preceding markdown text, headings, code comments (`// filepath:`), backticks, and search fence headers for blocks lacking unified diff headers.
+- **Wildcard & Ellipsis Matching:** Added support for wildcard ellipsis lines (`...`, `…`, `// ... existing code ...`, `<!-- ... -->`, `# ... rest of function ...`, etc.) across single and multi-segment hunks via `is_ellipsis_line`. Multi-line code gaps between anchors are accurately preserved while strictly guarding against runaway gaps or syntax false positives.
+
+#### Transactional Atomicity
+- **Core Atomic APIs:** Added atomic filesystem application via `apply_patches_to_dir_atomic`, `try_apply_patches_to_dir_atomic`, `apply_patch_to_file_atomic`, and `try_apply_patch_to_file_atomic`. File operations are staged in-memory and committed to disk if and only if all hunks across all patches apply cleanly, with automatic rollback of written files upon commit failure.
+- **Batch Outcome Inspection:** Added `BatchResult::all_applied_cleanly()`, `BatchResult::has_failures()`, and `StrictBatchApplyError` for granular programmatic inspection of batch patch outcomes.
+- **CLI Atomic Flag:** Introduced the `-a` / `--atomic` (aliased as `--all-or-nothing`) command-line flag to ensure that changes are only written to disk if every patch and hunk succeeds.
+
+#### Three-Way Merging & Diagnostics
+- **3-Way Line Merge:** Added `mpatch::merge_three_way` backed by `similar::TextMerge` to perform 3-way line merges between an ancestor (`base`), local code (`ours`), and incoming changes (`theirs`), with configurable Diff3 conflict marker labels.
+- **Inline Word-Level Diffs:** Added `mpatch::format_inline_diff` powered by `similar`'s `inline` feature to format sub-line word additions and deletions with colored terminal highlights.
+- **CLI Near-Miss Diagnostics:** Failed hunk diagnostics in the CLI now render sub-line near-miss comparisons with highlighted word differences when encountering `FuzzyMatchBelowThreshold` errors (`-vv`).
+- **CLI Path Suggestions:** Added `mpatch::suggest_close_file_paths` powered by `similar::get_close_matches` to suggest close matching file paths in the target directory when a patch specifies a missing target (`TargetNotFound`).
+
+#### CLI & Unix Composability
+- **Standard Input (Stdin) Piping:** Added first-class support for piping patches via `-` (e.g., `cat patch.diff | mpatch - ./src`, `git diff | mpatch -R - ./src`, `curl -s https://example.com/fix.patch | mpatch - ./src`), including implicit piping and automatic fallback to the current directory (`.`) when the target directory argument is omitted.
+- **Benchmark Suites:** Added comprehensive Criterion benchmarks covering Aider format detection and parsing, 1,000-line 3-way merges, sub-line inline diff rendering, and Patience diff generation (`benches/mpatch_bench.rs`).
+
+#### Python Bindings (`mpatch`)
+- **Aider Parsing:** Exposed `mpatch.parse_aider` and updated `detect_patch` and type stubs (`mpatch.pyi`) for Aider search/replace blocks.
+- **Atomic Operations:** Added the `atomic: bool = False` keyword parameter to `apply_directory`, `apply_patches_to_dir`, `apply_patch_to_file`, and `Patch.apply_to_file`, alongside the `BatchResult.all_applied_cleanly` property.
+- **Merge & Inline Functions:** Exposed `mpatch.merge_three_way` and `mpatch.format_inline_diff` with comprehensive type annotations (`mpatch.pyi`).
+
+#### Tooling & Release Automation
+- **Release Automation:** Added `scripts/release.py` featuring interactive pre-flight toolchain diagnostics, automated testing across Rust and Python, lockfile synchronization, atomic git commit/tagging, and optional Crates.io publishing.
+
+### Changed
+
+- **Diff Engine & Dependencies:** Upgraded `similar` from `2.7.0` to `3.2.0` with the `inline` feature enabled.
+- **Error Handling & Styling Dependencies:** Upgraded `thiserror` to `2.0.21` and `colored` to `3.1.1`.
+- **Patch Generation Algorithm:** Switched `Patch::from_texts` and internal search/replace hunk alignment to `similar::Algorithm::Patience` for cleaner, semantically aligned hunk boundaries across refactored functions and moved blocks.
+- **Documentation:** Extensively updated root and Python `README.md` files with guides and examples for atomic application, Aider search/replace with wildcard ellipsis matching, 3-way merges, inline word diffs, and stdin piping.
 
 ### Performance
-- **Fuzzy Matching:** Switched word-level sequence comparisons in `score_window`, `find_statement_match_in_block`, and `try_apply_hunk_at_location` to `similar::Algorithm::Histogram`, eliminating quadratic Myers degradations on repetitive code.
-- **Fuzzy Matching:** Optimized word-level diff evaluation in `score_window` by short-circuiting Myers comparisons when line-level similarity bounds show word diffs cannot exceed the active score.
-- **Fuzzy Matching:** Added mathematical upper-bound pruning and lazy metric evaluation in `score_window` to skip expensive character- and word-level Myers diffs when line-level similarity reaches 1.0 or non-whitespace bounds cannot alter the window's score.
-- **Fuzzy Matching on Large Files:** Implemented $O(N + M)$ single-pass inverted indexing for candidate anchor discovery, evaluating up to 100 high-entropy lines across hunks in $O(1)$ lookups instead of repetitive $O(N)$ linear scans.
-- **Fuzzy Matching on Large Hunks:** Added threshold-aware admissible upper-bound pruning in `score_window` to skip expensive multi-thousand-word and character Myers diffs whenever line- and character-count upper bounds cannot reach the fuzz threshold.
-- **Fuzzy Matching Resilience:** Introduced a tiered fallback search architecture that evaluates narrow anchored ranges first and seamlessly cascades to full-file search if an anchor collision fails to reach the threshold, eliminating multi-second freezes on large hunks (>500 lines) in large files (>10,000 lines).
-- **Fuzzy Matching:** Precomputed contiguous target slices and character indices in `find_hunk_location_internal` to eliminate four heap allocations per candidate window.
-- **Fuzzy Matching:** Short-circuited anchor occurrence search in `find_search_ranges` as soon as the maximum occurrence threshold is exceeded, avoiding full linear scans and unbounded vector allocations on repetitive target files.
-- **Patch Generation:** Switched `Patch::from_texts` and `parse_aider` to `similar::Algorithm::Patience` for cleaner, semantically aligned hunk boundaries across refactored functions and moved blocks.
-- **Patch Application:** Eliminated redundant target slice cloning and heap string allocations in `try_apply_hunk_at_location` by referencing `target_lines` directly and borrowing hunk addition slices.
-- **Patch Application:** Eliminated redundant `target_lines.clone()` during candidate window backtracking in `apply_hunk_to_lines`.
-- **Parser & Core:** Replaced dynamic `format!` allocations with pre-allocated buffer pushes in `Patch::from_texts`, `Hunk::invert`, `Hunk::required_match_span`, and conflict marker parsing.
-- **Diagnostics & Results:** Optimized `ApplyResult::failure_count()`, `success_count()`, and `has_failures()` to count in-place with zero heap allocations or error cloning.
-- **CLI Diagnostics:** Replaced $O(N^2)$ multiset subtraction in `format_normalized_patch` with a sorted $O(N)$ two-pointer pass.
-- **Python Bindings:** Optimized `ApplyResult.__getitem__` to convert individual hunk status items on demand rather than translating the entire status vector per indexed lookup.
+
+- **Histogram Sequence Comparisons:** Switched word-level sequence comparisons in `score_window`, `find_statement_match_in_block`, and `try_apply_hunk_at_location` to `similar::Algorithm::Histogram`, eliminating quadratic Myers degradation on repetitive code.
+- **$O(N + M)$ Single-Pass Inverted Indexing:** Implemented single-pass inverted indexing for candidate anchor discovery, evaluating up to 100 high-entropy lines across hunks in $O(1)$ lookups instead of repetitive $O(N)$ linear scans.
+- **Admissible Upper-Bound Pruning:** Added mathematical upper-bound pruning and lazy metric evaluation in `score_window` to skip expensive character- and word-level diff evaluations when line-level similarity bounds show the candidate window cannot reach the fuzz threshold.
+- **Tiered Fallback Search Architecture:** Introduced a tiered fallback search architecture that evaluates narrow anchored ranges first and cascades to full-file search only if an anchor collision fails to reach the threshold, eliminating multi-second freezes on large hunks (>500 lines) in large files (>10,000 lines).
+- **Zero-Allocation Target Precomputations:** Precomputed contiguous target slices, stripped string references, and character byte offsets in `precompute_target` and `precompute_match`, eliminating four heap allocations per candidate window.
+- **Short-Circuited Anchor Search:** Short-circuited anchor occurrence search in `find_search_ranges` as soon as the maximum occurrence threshold is exceeded, avoiding full linear scans and unbounded vector allocations on repetitive target files.
+- **Zero-Copy Memory Reuse:** Eliminated redundant target slice cloning and heap string allocations in `try_apply_hunk_at_location` by referencing `target_lines` directly and borrowing hunk addition slices.
+- **Backtracking Allocation Elimination:** Eliminated redundant `target_lines.clone()` calls during candidate window backtracking in `apply_hunk_to_lines`.
+- **Buffer Pre-allocations:** Replaced dynamic `format!` allocations with pre-allocated buffer pushes in `Patch::from_texts`, `Hunk::invert`, `Hunk::required_match_span`, and conflict marker parsing.
+- **In-Place Result Counting:** Optimized `ApplyResult::failure_count()`, `success_count()`, and `has_failures()` to count in-place with zero heap allocations or error cloning.
+- **Linear-Time Discrepancy Check:** Replaced $O(N^2)$ multiset subtraction in `format_normalized_patch` with a sorted $O(N)$ two-pointer pass.
+- **Lazy Python Indexing:** Optimized `ApplyResult.__getitem__` to convert individual hunk status items on demand rather than translating the entire status vector per indexed lookup.
+
+### Security
+
+- **Orphan Addition Guard:** Fixed a critical bug in fuzzy reconstruction where additions attached to unchanged context lines that were missing or unaligned in the target file window (`DiffOp::Delete` and `DiffOp::Replace`) were blindly injected into preceding code. The applier now aborts with `ContextNotFound` to prevent syntax corruption.
+- **Head & Tail Context Preservation:** Enforced head and tail context line preservation in fuzzy reconstruction, rejecting candidate windows with chopped outer context (`ContextNotFound`) to prevent additions or modifications from being injected into wrong or unauthenticated functions.
+- **Scope Delimiter Protection:** Enforced primary identifier matching (`extract_primary_identifier`) and definition status consistency (`is_definition`) in statement and replacement matching (raising the statement threshold to 0.80), preventing fuzzy matches from crossing function boundaries or hijacking unrelated API calls.
+- **Low-Entropy Ambiguity Rejection:** Fixed a bug where hunks with low-entropy match blocks (such as a single closing brace `}`) were incorrectly tie-broken using line-number hints across multiple ambiguous locations. Ambiguous low-entropy contexts are now cleanly rejected.
 
 ### Fixed
-- **Patch Application:** Fixed a bug in fuzzy reconstruction where additions attached to unchanged context lines that were missing or unaligned in the target file window (`DiffOp::Delete` and `DiffOp::Replace`) were blindly injected into preceding code. The applier now aborts with `ContextNotFound` to prevent syntax corruption.
-- **Patch Testing & Isolation:** Updated `test_orphaned_addition_rejected_during_fuzzy_match` with adequate intervening comment separation (60 lines) so widened multi-anchor expansion bounds do not encompass secondary functions intended to verify orphan addition guards.
-- **Patch Application & Security:** Enforced head and tail context line preservation in fuzzy reconstruction, rejecting candidate windows with chopped outer context (`ContextNotFound`) to prevent additions or modifications from being injected into wrong or unauthenticated functions.
-- **Patch Application:** Enforced primary identifier matching (`extract_primary_identifier`) and definition status consistency (`is_definition`) in statement and replacement matching, and raised statement matching threshold to 0.80, preventing fuzzy matches from hijacking unrelated API calls across scope boundaries.
-- **Patch Application:** Implemented two-pass candidate location application in `apply_hunk_to_lines`, testing all candidates strictly before falling back to lenient trailing delimiter reconciliation (`normalize_line_delimiters`), and re-anchoring additions on missing blank context lines.
-- **Fuzzy Matching:** Enhanced candidate anchor ranking in `find_search_ranges` by entropy and distinctiveness, bounded anchor search radius up to 120 lines, and aligned search window boundaries with maximum hunk expansion lengths.
-- **Patch Application:** Fixed a bug where hunks with low-entropy match blocks (such as a single closing brace `}`) were incorrectly tie-broken using line-number hints across multiple ambiguous locations, which could overwrite unrelated block delimiters. Ambiguous low-entropy contexts are now cleanly rejected.
-- **Patch Application:** Implemented topological anchor interval bounding and cascading relaxation (`resolve_hunk_line_hints`) for patches lacking explicit line numbers (such as Aider search/replace blocks). Unambiguous hunks act as spatial anchors to soundly disambiguate intermediate hunks containing identical or repetitive code, while maintaining genuine ambiguity rejection.
-- **Patch Application:** Added position-aware cumulative delta tracking in `HunkApplier` to ensure earlier hunk line additions or deletions only shift line numbers for subsequent hunks located downstream in the original file, correctly handling out-of-order or non-monotonic hunk applications.
-- **Patch Application:** Implemented candidate location backtracking in `apply_hunk_to_lines`. If the highest-scoring candidate window fails during reconstruction (e.g., due to the orphan addition guard), the applier now backtracks and attempts remaining candidate windows instead of failing immediately.
-- **Patch Application:** Added semantic statement matching across line breaks (`find_statement_match_in_block`) and `required_match_span` validation, allowing hunks with multi-line signatures or formatted statements to cleanly match single-line targets (and vice-versa) while pruning candidate windows too short to contain all edits.
--   **Patch Application & API:** Fixed file creation discrimination in `Patch::is_creation()`. It now strictly requires `old_start_line == Some(0)` or an unnumbered addition hunk on an empty target, preventing zero-context additions into existing files from being falsely flagged as file creations (which caused spurious `TargetNotFound` errors).
-- **Fuzzy Matching:** Expanded fuzzy search window expansion bounds and incorporated line-based similarity ratios (`ratio_lines` and `ratio_loose_lines`) to reliably match multi-anchor hunks spanning across newly inserted documentation comments or code blocks without word-dilution score penalties.
-- **CLI:** Trimmed whitespace during patch normalization in `format_normalized_patch` to prevent smart-indentation adjustments from triggering false-positive failures in the debug report discrepancy check (`-vvvv`).
+
+- **Topological Anchor Interval Bounding:** Implemented topological anchor interval bounding and cascading relaxation (`resolve_hunk_line_hints`) for patches lacking explicit line numbers (such as Aider search/replace blocks). Unambiguous hunks act as spatial anchors to soundly disambiguate intermediate hunks containing identical or repetitive code.
+- **Candidate Backtracking & Lenient Reconciliation:** Implemented candidate location backtracking in `apply_hunk_to_lines`, testing all candidate windows strictly before falling back to lenient trailing delimiter reconciliation (`normalize_line_delimiters`) and re-anchoring additions on missing blank context lines.
+- **Semantic Statement Matching Across Line Breaks:** Added statement matching across line breaks (`find_statement_match_in_block`) and `required_match_span` validation, allowing hunks with multi-line signatures or formatted statements to cleanly match single-line targets (and vice-versa) while pruning candidate windows too short to contain all edits.
+- **Position-Aware Cumulative Delta Tracking:** Added position-aware cumulative delta tracking in `HunkApplier` to ensure earlier hunk line additions or deletions only shift line numbers for subsequent hunks located downstream in the original file, correctly handling out-of-order or non-monotonic hunk applications.
+- **Entropy-Based Anchor Ranking:** Enhanced candidate anchor ranking in `find_search_ranges` by entropy and distinctiveness, bounded anchor search radius up to 120 lines, and aligned search window boundaries with maximum hunk expansion lengths.
+- **File Creation Discrimination:** Fixed file creation discrimination in `Patch::is_creation()`. It now strictly requires `old_start_line == Some(0)` or an unnumbered addition hunk on an empty target, preventing zero-context additions into existing files from being falsely flagged as file creations (which caused spurious `TargetNotFound` errors).
+- **Multi-Anchor Expansion & Ratio Bounds:** Expanded search window bounds and incorporated line-based similarity ratios (`ratio_lines` and `ratio_loose_lines`) with expansion penalty limits to reliably match multi-anchor hunks spanning across newly inserted documentation comments without runaway window bloat.
+- **Discrepancy Check Whitespace Normalization:** Trimmed whitespace during patch normalization in `format_normalized_patch` to prevent smart-indentation adjustments from triggering false-positive failures in the debug report discrepancy check (`-vvvv`).
 
 ## [1.6.4] - 2026-06-02
 
