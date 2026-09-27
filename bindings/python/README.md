@@ -286,16 +286,16 @@ Perform line-level 3-way merges between an ancestor (`base`), local code (`ours`
 ```python
 import mpatch
 
-base = "Apples\nBananas\nCherries\n"
-ours = "Apples\nBlueberries\nCherries\n"
-theirs = "Apples\nBananas\nCranberries\n"
+base = "Apples\nBananas\nCherries\nDates\n"
+ours = "Apples\nBlueberries\nCherries\nDates\n"
+theirs = "Apples\nBananas\nCherries\nDragonfruit\n"
 
 merged, is_conflicted = mpatch.merge_three_way(base, ours, theirs)
 assert not is_conflicted
 print(merged)
 # Apples
 # Blueberries
-# Cranberries
+# Dragonfruit
 
 # If there is a conflict, standard Diff3 markers are inserted:
 conflict_merged, is_conflicted = mpatch.merge_three_way(

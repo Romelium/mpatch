@@ -382,13 +382,13 @@ Perform line-level 3-way merges backed by `similar::TextMerge`, automatically ge
 ```rust
 use mpatch::merge_three_way;
 
-let base   = "Apples\nBananas\nCherries\n";
-let ours   = "Apples\nBlueberries\nCherries\n";
-let theirs = "Apples\nBananas\nCranberries\n";
+let base   = "Apples\nBananas\nCherries\nDates\n";
+let ours   = "Apples\nBlueberries\nCherries\nDates\n";
+let theirs = "Apples\nBananas\nCherries\nDragonfruit\n";
 
 let (merged, is_conflicted) = merge_three_way(base, ours, theirs, None);
 assert!(!is_conflicted);
-assert_eq!(merged, "Apples\nBlueberries\nCranberries\n");
+assert_eq!(merged, "Apples\nBlueberries\nCherries\nDragonfruit\n");
 ```
 
 ### 9. Inline Word Diffs & Path Suggestions

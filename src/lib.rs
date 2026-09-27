@@ -214,13 +214,13 @@
 //! ````rust
 //! use mpatch::merge_three_way;
 //!
-//! let base   = "Apples\nBananas\nCherries\n";
-//! let ours   = "Apples\nBlueberries\nCherries\n";
-//! let theirs = "Apples\nBananas\nCranberries\n";
+//! let base   = "Apples\nBananas\nCherries\nDates\n";
+//! let ours   = "Apples\nBlueberries\nCherries\nDates\n";
+//! let theirs = "Apples\nBananas\nCherries\nDragonfruit\n";
 //!
 //! let (merged, is_conflicted) = merge_three_way(base, ours, theirs, None);
 //! assert!(!is_conflicted);
-//! assert_eq!(merged, "Apples\nBlueberries\nCranberries\n");
+//! assert_eq!(merged, "Apples\nBlueberries\nCherries\nDragonfruit\n");
 //! ````
 //!
 //! ## Key Concepts
@@ -978,6 +978,7 @@ pub enum StrictBatchApplyError {
     /// let err = StrictBatchApplyError::Failed { batch_result: batch };
     /// match err {
     ///     StrictBatchApplyError::Failed { batch_result } => assert!(batch_result.all_succeeded()),
+    ///     _ => unreachable!(),
     /// }
     /// ```
     #[error("One or more patch operations failed. See batch result for details.")]
@@ -13793,13 +13794,13 @@ pub fn format_inline_diff<T: AsRef<str>>(expected_lines: &[&str], actual_lines: 
 /// ```rust
 /// use mpatch::merge_three_way;
 ///
-/// let base = "alpha\nbeta\ngamma\n";
-/// let ours = "alpha\nbeta_local\ngamma\n";
-/// let theirs = "alpha\nbeta\ngamma_remote\n";
+/// let base   = "Apples\nBananas\nCherries\nDates\n";
+/// let ours   = "Apples\nBlueberries\nCherries\nDates\n";
+/// let theirs = "Apples\nBananas\nCherries\nDragonfruit\n";
 ///
 /// let (merged, is_conflicted) = merge_three_way(base, ours, theirs, None);
 /// assert!(!is_conflicted);
-/// assert_eq!(merged, "alpha\nbeta_local\ngamma_remote\n");
+/// assert_eq!(merged, "Apples\nBlueberries\nCherries\nDragonfruit\n");
 ///
 /// // Conflicting 3-way merge with labels:
 /// let (conflict_merged, is_conflicted) = merge_three_way(
