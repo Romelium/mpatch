@@ -945,6 +945,54 @@ fn test_file_creation() {
 }
 
 #[test]
+fn test_file_creation_with_non_zero_start_line() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("new_file.txt");
+
+    let diff = indoc! {"
+        ```diff
+        --- a/new_file.txt
+        +++ b/new_file.txt
+        @@ -1,0 +1,2 @@
+        +hello
+        +world
+        ```
+    "};
+    let patch = &parse_diffs(diff).unwrap()[0];
+    assert!(patch.is_creation());
+    let options = ApplyOptions::exact();
+    let result = apply_patch_to_file(patch, dir.path(), options).unwrap();
+
+    assert!(result.report.all_applied_cleanly());
+    assert!(result.diff.is_none());
+    let content = fs::read_to_string(file_path).unwrap();
+    assert_eq!(content, "hello\nworld\n");
+}
+
+#[test]
+fn test_atomic_file_creation_with_non_zero_start_line() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("new_file_atomic.txt");
+
+    let diff = indoc! {"
+        --- a/new_file_atomic.txt
+        +++ b/new_file_atomic.txt
+        @@ -1,0 +1,2 @@
+        +hello
+        +world
+    "};
+    let patches = parse_auto(diff).unwrap();
+    assert!(patches[0].is_creation());
+    let batch = apply_patches_to_dir_atomic(&patches, dir.path(), ApplyOptions::exact());
+
+    assert!(batch.all_applied_cleanly());
+    let content = fs::read_to_string(file_path).unwrap();
+    assert_eq!(content, "hello\nworld\n");
+}
+
+#[test]
 fn test_patch_to_empty_file() {
     let _ = env_logger::builder().is_test(true).try_init();
     let dir = tempdir().unwrap();

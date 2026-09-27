@@ -3318,8 +3318,7 @@ impl Patch {
     /// ````
     pub fn is_creation(&self) -> bool {
         let is_create = self.hunks.first().is_some_and(|h| {
-            h.old_start_line == Some(0)
-                || (h.old_start_line.is_none() && h.get_match_block().is_empty())
+            h.old_start_line == Some(0) || h.get_match_block().is_empty()
         });
         trace!(
             "Patch::is_creation for '{}': {} (first hunk old_start_line={:?})",
