@@ -3,7 +3,7 @@ use indoc::indoc;
 use mpatch::{
     apply_patch_to_content, detect_patch, find_hunk_location_in_lines, format_inline_diff,
     merge_three_way, parse_aider, parse_conflict_markers, parse_diffs, parse_patches, ApplyOptions,
-    Patch,
+    Patch, WindowLengthIter,
 };
 
 // --- Detecting Benchmarks ---
@@ -469,12 +469,28 @@ fn similar_v3_benches(c: &mut Criterion) {
     group.finish();
 }
 
+// --- Window Length Search Benchmark ---
+
+fn window_length_search_benches(c: &mut Criterion) {
+    let mut group = c.benchmark_group("WindowLengthSearch");
+
+    group.bench_function("radiating_window_lengths_50", |b| {
+        b.iter(|| {
+            let iter = WindowLengthIter::new(black_box(25), black_box(1), black_box(50));
+            iter.fold(0usize, |acc, len| acc.wrapping_add(len))
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     detecting_benches,
     parsing_benches,
     finding_benches,
     applying_benches,
-    similar_v3_benches
+    similar_v3_benches,
+    window_length_search_benches
 );
 criterion_main!(benches);

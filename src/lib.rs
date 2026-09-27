@@ -27,6 +27,8 @@
 //!   formatting differences to prevent multi-line refactoring mismatches.
 //! - **Wildcard & Ellipsis Matching**: Recognizing code omissions (`...`, `// ... existing code ...`)
 //!   across single and multi-segment hunks, reconstructing multi-line code gaps while preserving untouched code.
+//! - **Zero-Allocation Window Length Search**: Generating candidate window lengths radiating
+//!   outward from nominal hunk length using an in-place iterator with zero heap allocations.
 //! - **Atomic Application**: Staging multi-file changes in-memory and committing
 //!   to disk if and only if all hunks across all patches apply cleanly. If any hunk fails,
 //!   the filesystem remains completely untouched.
@@ -283,6 +285,8 @@
 //! - [`find_hunk_location()`]: Finds the location to apply a hunk to a given text content without modifying it.
 //! - [`find_hunk_location_in_lines()`]: Finds the location to apply a hunk to a slice of lines without modifying it.
 //! - [`DefaultHunkFinder`]: The default, built-in search strategy for locating hunks and candidate match locations.
+//! - [`WindowLengthIter`]: A zero-allocation iterator that generates candidate window lengths radiating outward from a nominal length.
+//! - [`window_lengths()`]: Creates a zero-allocation iterator over candidate window lengths radiating outward from a nominal length.
 //! - [`format_inline_diff()`]: Formats an inline word-level diff with colored ANSI highlights.
 //! - [`merge_three_way()`]: Performs a 3-way line merge with Diff3 conflict markers.
 //! - [`suggest_close_file_paths()`]: Finds close matching file paths in a target directory when a patch specifies a missing file.
@@ -11415,6 +11419,124 @@ struct ScoredWindow {
     window_len: usize,
 }
 
+/// An iterator that generates candidate window lengths radiating outward from a nominal length.
+///
+/// Yields `nominal_len` first, then alternates between smaller (`nominal_len - d`) and
+/// larger (`nominal_len + d`) window lengths within the inclusive range `[min_len, max_len]`.
+/// Operates with zero heap allocations.
+///
+/// # Examples
+///
+/// ```
+/// use mpatch::WindowLengthIter;
+///
+/// let lengths: Vec<usize> = WindowLengthIter::new(7, 5, 10).collect();
+/// assert_eq!(lengths, vec![7, 6, 8, 5, 9, 10]);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowLengthIter {
+    nominal: usize,
+    min_len: usize,
+    max_len: usize,
+    delta: usize,
+    next_lower: bool,
+    remaining: usize,
+}
+
+impl WindowLengthIter {
+    /// Creates a new `WindowLengthIter` radiating outward from `nominal` within `[min_len, max_len]`.
+    ///
+    /// # Arguments
+    ///
+    /// * `nominal` - The preferred/baseline window length (clamped to `[min_len, max_len]`).
+    /// * `min_len` - The minimum allowed window length.
+    /// * `max_len` - The maximum allowed window length.
+    ///
+    /// # Returns
+    ///
+    /// A new [`WindowLengthIter`] instance.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mpatch::WindowLengthIter;
+    ///
+    /// let iter = WindowLengthIter::new(10, 5, 15);
+    /// assert_eq!(iter.len(), 11);
+    /// ```
+    #[inline]
+    pub fn new(nominal: usize, min_len: usize, max_len: usize) -> Self {
+        let remaining = if max_len >= min_len {
+            max_len - min_len + 1
+        } else {
+            0
+        };
+        let nominal = if max_len >= min_len {
+            nominal.clamp(min_len, max_len)
+        } else {
+            nominal
+        };
+        Self {
+            nominal,
+            min_len,
+            max_len,
+            delta: 0,
+            next_lower: false,
+            remaining,
+        }
+    }
+}
+
+impl Iterator for WindowLengthIter {
+    type Item = usize;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+
+        if self.delta == 0 {
+            self.delta = 1;
+            self.next_lower = true;
+            self.remaining -= 1;
+            return Some(self.nominal);
+        }
+
+        loop {
+            let d = self.delta;
+            if self.next_lower {
+                self.next_lower = false;
+                if self.nominal >= self.min_len + d {
+                    self.remaining -= 1;
+                    return Some(self.nominal - d);
+                }
+            } else {
+                self.next_lower = true;
+                self.delta += 1;
+                if self.nominal + d <= self.max_len {
+                    self.remaining -= 1;
+                    return Some(self.nominal + d);
+                }
+            }
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl ExactSizeIterator for WindowLengthIter {
+    #[inline]
+    fn len(&self) -> usize {
+        self.remaining
+    }
+}
+
+impl std::iter::FusedIterator for WindowLengthIter {}
+
 /// Evaluates and scores candidate sliding windows across the provided search ranges in parallel using Rayon.
 ///
 /// # Arguments
@@ -11465,10 +11587,9 @@ impl WindowScorer<'_, '_, '_> {
     ) -> Vec<ScoredWindow> {
         let start_index = range_start + i;
         let actual_max_len = self.max_len.min(target_len - i);
-        let mut local_windows = Vec::new();
 
         if actual_max_len < self.min_len {
-            return local_windows;
+            return Vec::new();
         }
 
         let m = self.match_pre.len;
@@ -11481,28 +11602,21 @@ impl WindowScorer<'_, '_, '_> {
                 self.loose_ps[start_index + actual_max_len] - self.loose_ps[start_index];
             let max_count = max_match_count.max(max_loose_count) as f64;
             if m > 30 && (max_count / m as f64) < self.threshold {
-                return local_windows;
+                return Vec::new();
             }
             let max_ub_lines = (2.0 * max_count) / (self.min_len + m) as f64;
             let max_ub_loose = (2.0 * max_count) / (self.min_len + m) as f64;
             if max_ub_lines.max(max_ub_loose) < 0.20 {
-                return local_windows;
+                return Vec::new();
             }
         }
 
         let nominal_len = m.clamp(self.min_len, actual_max_len);
-        let mut lengths = Vec::with_capacity(actual_max_len - self.min_len + 1);
-        lengths.push(nominal_len);
-        for d in 1..=(actual_max_len - self.min_len + 1) {
-            if nominal_len >= self.min_len + d {
-                lengths.push(nominal_len - d);
-            }
-            if nominal_len + d <= actual_max_len {
-                lengths.push(nominal_len + d);
-            }
-        }
+        let num_lengths = actual_max_len - self.min_len + 1;
+        let mut local_windows = Vec::with_capacity(num_lengths);
 
         let mut best_local_score = 0.0;
+        let lengths = WindowLengthIter::new(nominal_len, self.min_len, actual_max_len);
         for window_len in lengths {
             let w_match_count =
                 self.match_ps[start_index + window_len] - self.match_ps[start_index];
@@ -13299,6 +13413,33 @@ pub fn find_hunk_location_in_lines<T: AsRef<str> + Sync>(
     );
     let finder = DefaultHunkFinder::new(options);
     finder.find_location(hunk, target_lines)
+}
+
+/// Convenience function to create a [`WindowLengthIter`].
+///
+/// Generates candidate window lengths radiating outward from `nominal` within `[min_len, max_len]`.
+///
+/// # Arguments
+///
+/// * `nominal` - The preferred/baseline window length.
+/// * `min_len` - The minimum allowed window length.
+/// * `max_len` - The maximum allowed window length.
+///
+/// # Returns
+///
+/// A new [`WindowLengthIter`] instance.
+///
+/// # Examples
+///
+/// ```
+/// use mpatch::window_lengths;
+///
+/// let lengths: Vec<usize> = window_lengths(7, 5, 10).collect();
+/// assert_eq!(lengths, vec![7, 6, 8, 5, 9, 10]);
+/// ```
+#[inline]
+pub fn window_lengths(nominal: usize, min_len: usize, max_len: usize) -> WindowLengthIter {
+    WindowLengthIter::new(nominal, min_len, max_len)
 }
 
 /// Parses a hunk header line (e.g., `@@ -1,3 +1,3 @@`) to extract starting line numbers.

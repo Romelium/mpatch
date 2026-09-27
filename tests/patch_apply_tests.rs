@@ -4,9 +4,9 @@ use mpatch::{
     apply_patches_to_dir_atomic, detect_patch, find_hunk_location, find_hunk_location_in_lines,
     invert_patches, parse_aider, parse_auto, parse_diffs, parse_patches, parse_patches_from_lines,
     patch_content_str, try_apply_patch_to_content, try_apply_patch_to_file,
-    try_apply_patch_to_lines, ApplyOptions, DefaultHunkFinder, Hunk, HunkApplyError,
-    HunkApplyStatus, HunkFinder, HunkLocation, MatchType, ParseError, Patch, PatchError,
-    PatchFormat, StrictApplyError,
+    try_apply_patch_to_lines, window_lengths, ApplyOptions, DefaultHunkFinder, Hunk,
+    HunkApplyError, HunkApplyStatus, HunkFinder, HunkLocation, MatchType, ParseError, Patch,
+    PatchError, PatchFormat, StrictApplyError, WindowLengthIter,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -13331,5 +13331,92 @@ mod multi_level_fuzzy_weakness_tests {
         assert!(content.contains("fn middle() {"));
         assert!(content.contains("fn one() {"));
         assert!(content.contains("fn two() {"));
+    }
+}
+
+mod window_length_iter_tests {
+    use super::*;
+
+    #[test]
+    fn test_window_length_iter_basic_radiating() {
+        let mut iter = WindowLengthIter::new(7, 5, 10);
+        assert_eq!(iter.len(), 6);
+        assert_eq!(iter.size_hint(), (6, Some(6)));
+
+        assert_eq!(iter.next(), Some(7));
+        assert_eq!(iter.len(), 5);
+        assert_eq!(iter.next(), Some(6));
+        assert_eq!(iter.len(), 4);
+        assert_eq!(iter.next(), Some(8));
+        assert_eq!(iter.len(), 3);
+        assert_eq!(iter.next(), Some(5));
+        assert_eq!(iter.len(), 2);
+        assert_eq!(iter.next(), Some(9));
+        assert_eq!(iter.len(), 1);
+        assert_eq!(iter.next(), Some(10));
+        assert_eq!(iter.len(), 0);
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_window_length_iter_at_min_bound() {
+        let lengths: Vec<usize> = WindowLengthIter::new(5, 5, 8).collect();
+        assert_eq!(lengths, vec![5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn test_window_length_iter_at_max_bound() {
+        let lengths: Vec<usize> = WindowLengthIter::new(8, 5, 8).collect();
+        assert_eq!(lengths, vec![8, 7, 6, 5]);
+    }
+
+    #[test]
+    fn test_window_length_iter_single_element() {
+        let mut iter = WindowLengthIter::new(10, 10, 10);
+        assert_eq!(iter.len(), 1);
+        assert_eq!(iter.next(), Some(10));
+        assert_eq!(iter.len(), 0);
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_window_length_iter_empty() {
+        let mut iter = WindowLengthIter::new(10, 15, 10);
+        assert_eq!(iter.len(), 0);
+        assert_eq!(iter.size_hint(), (0, Some(0)));
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_window_length_iter_out_of_bounds_nominal_clamped() {
+        let below: Vec<usize> = WindowLengthIter::new(0, 5, 8).collect();
+        assert_eq!(below, vec![5, 6, 7, 8]);
+
+        let above: Vec<usize> = WindowLengthIter::new(100, 5, 8).collect();
+        assert_eq!(above, vec![8, 7, 6, 5]);
+    }
+
+    #[test]
+    fn test_window_length_iter_complete_coverage() {
+        for min in 5..=15 {
+            for max in min..=25 {
+                for nominal in min..=max {
+                    let mut collected: Vec<usize> =
+                        WindowLengthIter::new(nominal, min, max).collect();
+                    assert_eq!(collected.len(), max - min + 1);
+                    collected.sort_unstable();
+                    let expected: Vec<usize> = (min..=max).collect();
+                    assert_eq!(collected, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_window_lengths_helper_and_fused() {
+        let mut iter = window_lengths(6, 5, 7);
+        assert_eq!(iter.collect::<Vec<_>>(), vec![6, 5, 7]);
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.next(), None);
     }
 }

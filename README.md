@@ -55,7 +55,7 @@ You ask an AI to modify some code. You get the diff. Except, the comment inside 
 *   **✨ Smarter Indentation:** Automatically indents added lines to be consistent with the target file. It translates tabs/spaces dynamically and preserves the target file's indentation style.
 *   **🗑️ File Deletion:** Automatically removes the target file if the output becomes empty after patching.
 *   **🛡️ Secure:** Path traversal is automatically prevented, ensuring no patch files can access or overwrite files outside the target directory.
-*   **⚡ Fast & Concurrent:** Parallelizes fuzzy matching across all CPU cores via `rayon`, using histogram-based word diffing and mathematical upper-bound pruning for rapid search.
+*   **⚡ Fast & Concurrent:** Parallelizes fuzzy matching across all CPU cores via `rayon`, using histogram-based word diffing, zero-allocation window length iteration, and mathematical upper-bound pruning for rapid search.
 *   **🔍 Dry Run:** Preview what the tool would do without modifying any files using `--dry-run`.
 
 ---
