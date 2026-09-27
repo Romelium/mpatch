@@ -12274,7 +12274,7 @@ fn test_large_hunk_large_file_coincidental_anchor_fallback() {
         if i == 1_000 {
             // Coincidental anchor collision line early in the file
             lines.push("    let unique_marker_token = 0xDEADBEEF;".to_string());
-        } else if i >= 8_000 && i < 8_500 {
+        } else if (8_000..8_500).contains(&i) {
             lines.push(format!("    let core_calc_{} = compute_val({});", i, i));
         } else {
             lines.push(format!("    let noise_{} = dummy_step({});", i, i));

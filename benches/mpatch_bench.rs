@@ -2,8 +2,8 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use indoc::indoc;
 use mpatch::{
     apply_patch_to_content, detect_patch, find_hunk_location_in_lines, format_inline_diff,
-    merge_three_way, parse_aider, parse_conflict_markers, parse_diffs, parse_patches,
-    suggest_close_file_paths, ApplyOptions, Patch,
+    merge_three_way, parse_aider, parse_conflict_markers, parse_diffs, parse_patches, ApplyOptions,
+    Patch,
 };
 
 // --- Detecting Benchmarks ---
