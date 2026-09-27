@@ -1,13 +1,12 @@
 use indoc::indoc;
 use mpatch::{
-    apply_hunk_to_lines, apply_patch_to_file, apply_patch_to_file_atomic, apply_patch_to_lines,
-    apply_patches_to_dir, apply_patches_to_dir_atomic, detect_patch, find_hunk_location,
-    find_hunk_location_in_lines, invert_patches, parse_aider,
-    parse_auto, parse_diffs, parse_patches, parse_patches_from_lines, patch_content_str,
-    try_apply_patch_to_content, try_apply_patch_to_file, try_apply_patch_to_file_atomic,
-    try_apply_patch_to_lines, try_apply_patches_to_dir_atomic, ApplyOptions,
-    DefaultHunkFinder, Hunk, HunkApplyError, HunkApplyStatus, HunkFinder, HunkLocation, MatchType,
-    ParseError, Patch, PatchError, PatchFormat, StrictApplyError,
+    apply_hunk_to_lines, apply_patch_to_file, apply_patch_to_lines, apply_patches_to_dir,
+    apply_patches_to_dir_atomic, detect_patch, find_hunk_location, find_hunk_location_in_lines,
+    invert_patches, parse_aider, parse_auto, parse_diffs, parse_patches, parse_patches_from_lines,
+    patch_content_str, try_apply_patch_to_content, try_apply_patch_to_file,
+    try_apply_patch_to_lines, ApplyOptions, DefaultHunkFinder, Hunk, HunkApplyError,
+    HunkApplyStatus, HunkFinder, HunkLocation, MatchType, ParseError, Patch, PatchError,
+    PatchFormat, StrictApplyError,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -8238,6 +8237,825 @@ mod entropy_and_orphan_guards {
             "This function performs two main tasks before setting the clipboard contents:"
         ));
     }
+
+    #[test]
+    fn test_genuine_orphan_when_second_function_completely_deleted() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("service.rs");
+
+        // Target file ONLY contains worker_primary. worker_secondary was completely deleted.
+        let mut original_content = String::from("pub fn worker_primary() {\n");
+        for i in 0..15 {
+            original_content.push_str(&format!("    let stage_{} = execute_step({});\n", i, i));
+        }
+        original_content.push_str("}\n");
+        fs::write(&file_path, &original_content).unwrap();
+
+        // Patch was created against an older version that still had worker_secondary
+        let diff = indoc! {r#"
+            ```diff
+            --- a/service.rs
+            +++ b/service.rs
+            @@ -1,18 +1,21 @@
+             pub fn worker_primary() {
+                 let stage_0 = execute_step(0);
+                 let stage_1 = execute_step(1);
+            -    let stage_2 = execute_step(2);
+            +    let stage_2 = execute_step_v2(2);
+                 let stage_3 = execute_step(3);
+             }
+
+             pub fn worker_secondary() {
+            +    initialize_secondary_hardware();
+                 execute_secondary_worker();
+             }
+            ```
+        "#};
+
+        let patches = parse_diffs(diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        // Must reject cleanly because worker_secondary does not exist in the file,
+        // preventing initialize_secondary_hardware() from being orphaned into worker_primary!
+        assert!(
+            !result.report.all_applied_cleanly(),
+            "Orphan addition to non-existent worker_secondary must trigger rejection"
+        );
+        assert!(matches!(
+            result.report.hunk_results[0],
+            HunkApplyStatus::Failed(HunkApplyError::ContextNotFound)
+        ));
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(
+            content, original_content,
+            "Target file must remain 100% untouched when orphan addition fails"
+        );
+    }
+
+    #[test]
+    fn test_multi_anchor_hunk_spanning_intervening_struct_and_enum() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("protocol.rs");
+
+        let original = indoc! {r#"
+            pub trait PacketDecoder {
+                fn decode_header(&mut self) -> Result<Header, DecodeError>;
+            }
+
+            // Locally inserted definitions in current branch
+            #[derive(Debug, Clone)]
+            pub struct PacketConfig {
+                pub max_frame_size: usize,
+                pub verify_crc: bool,
+            }
+
+            #[derive(Debug, PartialEq, Eq)]
+            pub enum DecoderState {
+                AwaitingHeader,
+                ReadingPayload,
+                Corrupted,
+            }
+
+            impl PacketDecoder for StreamDecoder {
+                fn decode_header(&mut self) -> Result<Header, DecodeError> {
+                    read_magic_bytes(&mut self.stream)
+                }
+            }
+        "#};
+        fs::write(&file_path, original).unwrap();
+
+        let diff = [
+            "--- a/protocol.rs",
+            "+++ b/protocol.rs",
+            "@@ -1,8 +1,8 @@",
+            " pub trait PacketDecoder {",
+            "-    fn decode_header(&mut self) -> Result<Header, DecodeError>;",
+            "+    fn decode_header(&mut self, timeout: Duration) -> Result<Header, DecodeError>;",
+            " }",
+            "",
+            " impl PacketDecoder for StreamDecoder {",
+            "-    fn decode_header(&mut self) -> Result<Header, DecodeError> {",
+            "+    fn decode_header(&mut self, timeout: Duration) -> Result<Header, DecodeError> {",
+            "+        self.stream.set_timeout(timeout);",
+            "         read_magic_bytes(&mut self.stream)",
+            "     }",
+            " }",
+        ]
+        .join("\n");
+
+        let patches = parse_auto(&diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(
+            result.report.all_applied_cleanly(),
+            "Hunk must cleanly span intervening struct and enum definitions without destroying them"
+        );
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("fn decode_header(&mut self, timeout: Duration) -> Result<Header, DecodeError>;"));
+        assert!(content.contains("self.stream.set_timeout(timeout);"));
+        assert!(content.contains("pub struct PacketConfig"));
+        assert!(content.contains("pub enum DecoderState"));
+    }
+
+    #[test]
+    fn test_orphan_addition_in_rewritten_function_replacement_rejected() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("processor.rs");
+
+        // Target file has a completely rewritten processor signature and body
+        let original = indoc! {r#"
+            pub fn start_pipeline() {
+                init_buffers();
+            }
+
+            // Function was completely refactored to async streaming
+            pub async fn process_incoming_stream(mut stream: Pin<Box<dyn AsyncRead>>) -> Result<(), NetworkError> {
+                stream.read_to_end().await
+            }
+        "#};
+        fs::write(&file_path, original).unwrap();
+
+        // Patch targets the legacy synchronous processor, attempting to inject audit_log()
+        let diff = [
+            "--- a/processor.rs",
+            "+++ b/processor.rs",
+            "@@ -1,7 +1,9 @@",
+            " pub fn start_pipeline() {",
+            "     init_buffers();",
+            " }",
+            "",
+            " pub fn process_legacy_buffer(data: &[u8]) -> Result<(), Error> {",
+            "+    audit_log_buffer_access(data);",
+            "     parse_and_validate(data)",
+            " }",
+        ]
+        .join("\n");
+
+        let patches = parse_auto(&diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(
+            !result.report.all_applied_cleanly(),
+            "Addition attached to rewritten/unaligned function must be rejected with ContextNotFound"
+        );
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, original, "Target file must remain pristine");
+    }
+
+    #[test]
+    fn test_orphan_guard_in_python_nested_class() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("service.py");
+
+        let original = indoc! {r#"
+            class DataService:
+                def __init__(self):
+                    self.active = True
+
+                def connect(self):
+                    return create_conn()
+        "#};
+        fs::write(&file_path, original).unwrap();
+
+        // Patch was written when DataService had a nested Helper class that has since been deleted
+        let diff = indoc! {r#"
+            ```diff
+            --- a/service.py
+            +++ b/service.py
+            @@ -1,8 +1,11 @@
+             class DataService:
+                 def __init__(self):
+                     self.active = True
+
+            -    def connect(self):
+            +    def connect(self, timeout=30):
+                     return create_conn()
+
+                 class InternalHelper:
+            +        def auxiliary_method(self):
+            +            pass
+                     def helper(self): pass
+            ```
+        "#};
+
+        let patches = parse_diffs(diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(
+            !result.report.all_applied_cleanly(),
+            "Additions attached to deleted nested class must not be dumped into outer class"
+        );
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, original);
+    }
+
+    #[test]
+    fn test_orphan_addition_attached_to_deleted_struct_field_in_rust() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("config.rs");
+
+        // Target file has 11 fields, but `tls_key_path` was removed in a refactor.
+        let original_content = indoc! {r#"
+            pub struct ServerConfig {
+                pub host: String,
+                pub port: u16,
+                pub max_connections: usize,
+                pub read_timeout: Duration,
+                pub write_timeout: Duration,
+                pub keep_alive: bool,
+                pub tls_cert_path: Option<PathBuf>,
+                pub enable_compression: bool,
+                pub buffer_size: usize,
+                pub workers: usize,
+                pub backlog: i32,
+            }
+        "#};
+        fs::write(&file_path, original_content).unwrap();
+
+        // Patch was created when `tls_key_path` existed, and attaches an addition to it.
+        // 11 of 12 fields match identically (91.6% > 70%), so the fuzzy finder selects ServerConfig.
+        let diff = indoc! {r#"
+            ```diff
+            --- a/config.rs
+            +++ b/config.rs
+            @@ -1,13 +1,14 @@
+             pub struct ServerConfig {
+                 pub host: String,
+            -    pub port: u16,
+            +    pub port: u32,
+                 pub max_connections: usize,
+                 pub read_timeout: Duration,
+                 pub write_timeout: Duration,
+                 pub keep_alive: bool,
+                 pub tls_cert_path: Option<PathBuf>,
+                 pub tls_key_path: Option<PathBuf>,
+            +    pub tls_cipher_suite: Option<String>,
+                 pub enable_compression: bool,
+                 pub buffer_size: usize,
+                 pub workers: usize,
+                 pub backlog: i32,
+             }
+            ```
+       "#};
+
+        let patches = parse_diffs(diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        // The orphan guard must reject because `tls_key_path` is missing from target,
+        // preventing `tls_cipher_suite` from being blindly injected.
+        assert!(!result.report.all_applied_cleanly());
+        assert!(matches!(
+            result.report.hunk_results[0],
+            HunkApplyStatus::Failed(HunkApplyError::ContextNotFound)
+        ));
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(
+            content, original_content,
+            "File must remain untouched when orphan addition fails"
+        );
+    }
+
+    #[test]
+    fn test_orphan_addition_in_typescript_deleted_event_handler() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("controller.ts");
+
+        // Target file only has `handleOpen`. `handleClose` was removed.
+        let original_content = indoc! {r#"
+            export class ModalController {
+                private step_0: boolean = false;
+                private step_1: boolean = false;
+                private step_2: boolean = false;
+                private step_3: boolean = false;
+                private step_4: boolean = false;
+                private step_5: boolean = false;
+                private step_6: boolean = false;
+                private step_7: boolean = false;
+                handleOpen() {
+                    this.isOpen = true;
+                    this.emit('opened');
+                }
+            }
+        "#};
+        fs::write(&file_path, original_content).unwrap();
+
+        let diff = indoc! {r#"
+            ```diff
+            --- a/controller.ts
+            +++ b/controller.ts
+            @@ -1,13 +1,15 @@
+             export class ModalController {
+                 private step_0: boolean = false;
+                 private step_1: boolean = false;
+                 private step_2: boolean = false;
+                 private step_3: boolean = false;
+                 private step_4: boolean = false;
+                 private step_5: boolean = false;
+                 private step_6: boolean = false;
+                 private step_7: boolean = false;
+                 handleOpen() {
+                     this.isOpen = true;
+                     this.emit('opened');
+                 }
+            +
+                 handleClose() {
+            +        analytics.track('modal_closed');
+                     this.isOpen = false;
+                 }
+             }
+            ```
+        "#};
+
+        let patches = parse_diffs(diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(!result.report.all_applied_cleanly());
+        assert!(matches!(
+            result.report.hunk_results[0],
+            HunkApplyStatus::Failed(HunkApplyError::ContextNotFound)
+        ));
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(
+            content, original_content,
+            "Target file must not be modified when handler is missing"
+        );
+    }
+
+    #[test]
+    fn test_orphan_addition_in_go_route_registration() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("routes.go");
+
+        // Target file has 10 active routes, but the legacy route was removed.
+        let original_content = indoc! {r#"
+            func RegisterRoutes(r *mux.Router) {
+                r.HandleFunc("/health", HealthHandler).Methods("GET")
+                r.HandleFunc("/status", StatusHandler).Methods("GET")
+                r.HandleFunc("/metrics", MetricsHandler).Methods("GET")
+                r.HandleFunc("/users", ListUsersHandler).Methods("GET")
+                r.HandleFunc("/users/{id}", GetUserHandler).Methods("GET")
+                r.HandleFunc("/config", GetConfigHandler).Methods("GET")
+                r.HandleFunc("/version", VersionHandler).Methods("GET")
+                r.HandleFunc("/ping", PingHandler).Methods("GET")
+                r.HandleFunc("/ready", ReadyHandler).Methods("GET")
+                r.HandleFunc("/live", LiveHandler).Methods("GET")
+            }
+        "#};
+        fs::write(&file_path, original_content).unwrap();
+
+        // Patch modifies /metrics and attempts to attach a new endpoint to the removed /legacy route.
+        let diff = indoc! {r#"
+            ```diff
+            --- a/routes.go
+            +++ b/routes.go
+            @@ -1,13 +1,14 @@
+             func RegisterRoutes(r *mux.Router) {
+                 r.HandleFunc("/health", HealthHandler).Methods("GET")
+                 r.HandleFunc("/status", StatusHandler).Methods("GET")
+            -    r.HandleFunc("/metrics", MetricsHandler).Methods("GET")
+            +    r.HandleFunc("/metrics", PrometheusMetricsHandler).Methods("GET")
+                 r.HandleFunc("/users", ListUsersHandler).Methods("GET")
+                 r.HandleFunc("/users/{id}", GetUserHandler).Methods("GET")
+                 r.HandleFunc("/config", GetConfigHandler).Methods("GET")
+                 r.HandleFunc("/version", VersionHandler).Methods("GET")
+                 r.HandleFunc("/ping", PingHandler).Methods("GET")
+                 r.HandleFunc("/ready", ReadyHandler).Methods("GET")
+                 r.HandleFunc("/live", LiveHandler).Methods("GET")
+                 r.HandleFunc("/legacy", LegacyHandler).Methods("GET")
+            +    r.HandleFunc("/legacy/v2", LegacyV2Handler).Methods("GET")
+             }
+            ```
+        "#};
+
+        let patches = parse_diffs(diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(!result.report.all_applied_cleanly());
+        assert!(matches!(
+            result.report.hunk_results[0],
+            HunkApplyStatus::Failed(HunkApplyError::ContextNotFound)
+        ));
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(
+            content, original_content,
+            "Target file must remain untouched when route anchor is missing"
+        );
+    }
+
+    #[test]
+    fn test_orphan_addition_in_sql_table_schema() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("schema.sql");
+
+        // Target file has 11 columns; `credit_limit` was dropped in migration.
+        let original_content = indoc! {r#"
+            CREATE TABLE accounts (
+                id UUID PRIMARY KEY,
+                user_id UUID NOT NULL,
+                account_number VARCHAR(32) NOT NULL,
+                currency VARCHAR(3) NOT NULL,
+                balance NUMERIC(18, 4) NOT NULL,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                is_active BOOLEAN DEFAULT TRUE,
+                account_tier INT DEFAULT 1,
+                routing_code VARCHAR(16) NOT NULL,
+                branch_id INT NOT NULL
+            );
+        "#};
+        fs::write(&file_path, original_content).unwrap();
+
+        let diff = indoc! {r#"
+            ```diff
+            --- a/schema.sql
+            +++ b/schema.sql
+            @@ -1,13 +1,14 @@
+             CREATE TABLE accounts (
+                 id UUID PRIMARY KEY,
+                 user_id UUID NOT NULL,
+                 account_number VARCHAR(32) NOT NULL,
+                 currency VARCHAR(3) NOT NULL,
+            -    balance NUMERIC(18, 4) NOT NULL,
+            +    balance NUMERIC(20, 4) NOT NULL,
+                 credit_limit NUMERIC(18, 4) DEFAULT 0,
+            +    overdraft_protection BOOLEAN DEFAULT FALSE,
+                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                 is_active BOOLEAN DEFAULT TRUE,
+                 account_tier INT DEFAULT 1,
+                 routing_code VARCHAR(16) NOT NULL,
+                 branch_id INT NOT NULL
+             );
+            ```
+        "#};
+
+        let patches = parse_diffs(diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(!result.report.all_applied_cleanly());
+        assert!(matches!(
+            result.report.hunk_results[0],
+            HunkApplyStatus::Failed(HunkApplyError::ContextNotFound)
+        ));
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(
+            content, original_content,
+            "Target file must not have additions spliced when column anchor is missing"
+        );
+    }
+
+    #[test]
+    fn test_orphan_addition_rejected_on_completely_divergent_replace_line() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("pipeline.rs");
+
+        // Target file has 14 lines. Line 11 is completely different from patch.
+        let original_content = indoc! {r#"
+            pub fn run_pipeline() {
+                let stage_1 = init();
+                let stage_2 = configure();
+                let stage_3 = allocate();
+                let stage_4 = bind();
+                let stage_5 = listen();
+                let stage_6 = poll();
+                let stage_7 = serve();
+                let stage_8 = drain();
+                let stage_9 = flush();
+                let crypto_vault_key = AesGcm256::generate_random();
+                let stage_11 = teardown();
+                let stage_12 = finish();
+            }
+        "#};
+        fs::write(&file_path, original_content).unwrap();
+
+        // Patch has 13 matching lines (92.8% similarity), but line 11 is `let network_proxy_url...`
+        // which is a context line (' ') with an addition attached to it.
+        let diff = indoc! {r#"
+            ```diff
+            --- a/pipeline.rs
+            +++ b/pipeline.rs
+            @@ -1,14 +1,15 @@
+             pub fn run_pipeline() {
+                 let stage_1 = init();
+                 let stage_2 = configure();
+                 let stage_3 = allocate();
+                 let stage_4 = bind();
+                 let stage_5 = listen();
+                 let stage_6 = poll();
+                 let stage_7 = serve();
+                 let stage_8 = drain();
+                 let stage_9 = flush();
+                 let network_proxy_url = "https://proxy.internal";
+            +    let proxy_retries = 3;
+                 let stage_11 = teardown();
+                 let stage_12 = finish();
+             }
+            ```
+        "#};
+
+        let patches = parse_diffs(diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(!result.report.all_applied_cleanly());
+        assert!(matches!(
+            result.report.hunk_results[0],
+            HunkApplyStatus::Failed(HunkApplyError::ContextNotFound)
+        ));
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(
+            content, original_content,
+            "Target file must not be modified when context line differs completely from target"
+        );
+    }
+
+    #[test]
+    fn test_orphan_addition_in_c_header_enums() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("protocol.h");
+
+        // Target file only defines NetworkProtocol. SecurityProtocol was moved to security.h.
+        let original_content = indoc! {r#"
+            enum NetworkProtocol {
+                PROTO_NONE = 0,
+                PROTO_IPV4 = 1,
+                PROTO_IPV6 = 2,
+                PROTO_TCP = 3,
+                PROTO_UDP = 4,
+                PROTO_ICMP = 5,
+                PROTO_SCTP = 6,
+                PROTO_DCCP = 7,
+                PROTO_RAW = 8,
+            };
+        "#};
+        fs::write(&file_path, original_content).unwrap();
+
+        // Patch modifies PROTO_RAW and attempts to add a variant to SecurityProtocol.
+        let diff = indoc! {r#"
+            ```diff
+            --- a/protocol.h
+            +++ b/protocol.h
+            @@ -1,13 +1,15 @@
+             enum NetworkProtocol {
+                 PROTO_NONE = 0,
+                 PROTO_IPV4 = 1,
+                 PROTO_IPV6 = 2,
+                 PROTO_TCP = 3,
+                 PROTO_UDP = 4,
+                 PROTO_ICMP = 5,
+                 PROTO_SCTP = 6,
+                 PROTO_DCCP = 7,
+            -    PROTO_RAW = 8,
+            +    PROTO_RAW_SOCKET = 8,
+             };
+
+             enum SecurityProtocol {
+            +    SEC_QUIC = 3,
+                 SEC_NONE = 0,
+             };
+            ```
+        "#};
+
+        let patches = parse_diffs(diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(!result.report.all_applied_cleanly());
+        assert!(matches!(
+            result.report.hunk_results[0],
+            HunkApplyStatus::Failed(HunkApplyError::ContextNotFound)
+        ));
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(
+            content, original_content,
+            "Target file must remain untouched when second enum is missing"
+        );
+    }
+
+    #[test]
+    fn test_orphan_addition_in_html_template_missing_footer() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("layout.html");
+
+        // Target file has navigation and content, but footer was moved to a partial.
+        let original_content = indoc! {r#"
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>App</title>
+                <link rel="stylesheet" href="style.css">
+            </head>
+            <body>
+                <header class="navbar">
+                    <nav>
+                        <a href="/">Home</a>
+                        <a href="/about">About</a>
+                        <a href="/contact">Contact</a>
+                    </nav>
+                </header>
+                <main class="container">
+                    <p>Main content goes here.</p>
+                </main>
+            </body>
+            </html>
+        "#};
+        fs::write(&file_path, original_content).unwrap();
+
+        let diff = indoc! {r#"
+            ```diff
+            --- a/layout.html
+            +++ b/layout.html
+            @@ -6,14 +6,16 @@
+             <body>
+                 <header class="navbar">
+                     <nav>
+                         <a href="/">Home</a>
+                         <a href="/about">About</a>
+            -            <a href="/contact">Contact</a>
+            +            <a href="/contact-us">Contact Us</a>
+                     </nav>
+                 </header>
+                 <main class="container">
+                     <p>Main content goes here.</p>
+                 </main>
+                 <footer class="site-footer">
+            +        <p>&copy; 2026 Example Corp.</p>
+                 </footer>
+             </body>
+            ```
+        "#};
+
+        let patches = parse_diffs(diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(!result.report.all_applied_cleanly());
+        assert!(matches!(
+            result.report.hunk_results[0],
+            HunkApplyStatus::Failed(HunkApplyError::ContextNotFound)
+        ));
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(
+            content, original_content,
+            "Target file must not have footer additions injected into header"
+        );
+    }
+
+    #[test]
+    fn test_orphan_addition_in_aider_search_replace_block() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("worker.py");
+
+        // Target file has `start_worker` with many lines, but `stop_worker` was deleted.
+        let original_content = indoc! {r#"
+            def start_worker():
+                step_1 = initialize()
+                step_2 = configure()
+                step_3 = setup_buffers()
+                step_4 = bind_listener()
+                step_5 = start_threads()
+                step_6 = wait_for_ready()
+                step_7 = mark_active()
+                return True
+        "#};
+        fs::write(&file_path, original_content).unwrap();
+
+        let diff = indoc! {r#"
+            worker.py
+            <<<<<<< SEARCH
+            def start_worker():
+                step_1 = initialize()
+                step_2 = configure()
+                step_3 = setup_buffers()
+                step_4 = bind_listener()
+                step_5 = start_threads()
+                step_6 = wait_for_ready()
+                step_7 = mark_active()
+                return True
+
+            def stop_worker():
+                teardown()
+            =======
+            def start_worker():
+                step_1 = initialize()
+                step_2 = configure()
+                step_3 = setup_buffers()
+                step_4 = bind_listener()
+                step_5 = start_threads()
+                step_6 = wait_for_ready()
+                step_7 = mark_active()
+                return True
+
+            def stop_worker():
+                audit_log("stopping")
+                teardown()
+            >>>>>>> REPLACE
+        "#};
+
+        let patches = parse_auto(diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(!result.report.all_applied_cleanly());
+        assert!(matches!(
+            result.report.hunk_results[0],
+            HunkApplyStatus::Failed(HunkApplyError::ContextNotFound)
+        ));
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(
+            content, original_content,
+            "Target file must not have additions injected when stop_worker is deleted"
+        );
+    }
+
+    #[test]
+    fn test_orphan_addition_in_python_data_pipeline_unaligned_block() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("pipeline.py");
+
+        let original_content = indoc! {r#"
+            def transform_dataset(df):
+                df = clean_nulls(df)
+                df = standardize_names(df)
+                df = cast_types(df)
+                df = filter_outliers(df)
+                df = impute_missing(df)
+                df = encode_categories(df)
+                df = normalize_features(df)
+                try:
+                    df = custom_validator_block(df)
+                except Exception:
+                    raise
+                return df
+        "#};
+        fs::write(&file_path, original_content).unwrap();
+
+        let diff = indoc! {r#"
+            ```diff
+            --- a/pipeline.py
+            +++ b/pipeline.py
+            @@ -1,11 +1,12 @@
+             def transform_dataset(df):
+                 df = clean_nulls(df)
+                 df = standardize_names(df)
+                 df = cast_types(df)
+                 df = filter_outliers(df)
+                 df = impute_missing(df)
+                 df = encode_categories(df)
+                 df = normalize_features(df)
+                 df = legacy_validate_schema(df)
+            +    df = log_pipeline_metrics(df)
+                 return df
+            ```
+        "#};
+
+        let patches = parse_diffs(diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(!result.report.all_applied_cleanly());
+        assert!(matches!(
+            result.report.hunk_results[0],
+            HunkApplyStatus::Failed(HunkApplyError::ContextNotFound)
+        ));
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(
+            content, original_content,
+            "Target file must not be modified when unaligned context line has additions"
+        );
+    }
 }
 
 mod wildcard_and_path_tests {
@@ -11463,4 +12281,696 @@ fn test_large_scale_inline_diff_rendering() {
     assert!(diff.contains("handle_event_99"));
     assert!(diff.contains("EventFlags"));
     assert!(diff.contains("AppError"));
+}
+
+mod multi_level_fuzzy_weakness_tests {
+    use super::*;
+    use indoc::indoc;
+    use std::fs;
+    use tempfile::tempdir;
+
+    /// LEVEL 1: Head Context Chopping & Security Privilege Escalation
+    ///
+    /// The window finder chops off the function header and security check at the head
+    /// of the hunk because the search window started mid-hunk. It drops them as "stale context"
+    /// and splices elevated execution into an unauthenticated guest handler!
+    #[test]
+    fn test_head_context_truncation_hijacks_unrelated_function() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("auth.rs");
+
+        let original = indoc! {r#"
+            pub fn handle_guest_request(req: &Request) -> Result<(), Error> {
+                let session = get_session(req);
+                let role = get_role(session);
+                let quota = get_quota(role);
+                verify_quota(quota);
+                dispatch(req)
+            }
+
+            // 50 lines of intervening code
+            pub fn handle_admin_request(ctx: &SecurityContext, req: &Request) -> Result<(), Error> {
+                // Signature refactored to take SecurityContext
+                ctx.verify_mfa()?;
+                let session = get_session(req);
+                let role = get_role(session);
+                let quota = get_quota(role);
+                verify_quota(quota);
+                dispatch(req)
+            }
+        "#};
+        fs::write(&file_path, original).unwrap();
+
+        // Patch was written for the legacy admin_request signature
+        let diff = indoc! {r#"
+            ```diff
+            --- a/auth.rs
+            +++ b/auth.rs
+            @@ -1,8 +1,9 @@
+             pub fn handle_admin_request(req: &Request) -> Result<(), Error> {
+                 assert_admin_privileges(req);
+                 let session = get_session(req);
+                 let role = get_role(session);
+                 let quota = get_quota(role);
+                 verify_quota(quota);
+            +    grant_superuser_privileges(session);
+                 dispatch(req)
+             }
+            ```
+        "#};
+
+        let patch = parse_diffs(diff).unwrap().remove(0);
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patch, dir.path(), options).unwrap();
+
+        // Must reject! grant_superuser_privileges must NEVER be injected into handle_guest_request!
+        assert!(
+            !result.report.all_applied_cleanly(),
+            "VULNERABILITY: Head context was chopped, injecting admin privileges into guest handler!"
+        );
+        let disk_content = fs::read_to_string(&file_path).unwrap();
+        assert!(
+            !disk_content.contains("grant_superuser_privileges"),
+            "CRITICAL: Privileged escalation was injected into the guest handler!"
+        );
+        assert_eq!(disk_content, original);
+    }
+
+    /// LEVEL 2: Tail Context Chopping Drops Mandatory Audit & Safety Cleanup
+    ///
+    /// Suffix context lines (audit logging, lock release) are cut off by the window boundary.
+    /// The applier treats the missing tail lines as "stale context", omitting mandatory audit logs.
+    #[test]
+    fn test_tail_context_truncation_drops_mandatory_audit_and_cleanup() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("tx.rs");
+
+        let original = indoc! {r#"
+            pub fn dry_run_simulation(tx: &mut Transaction) -> Result<(), Error> {
+                tx.prepare();
+                tx.validate();
+                tx.simulate();
+                Ok(())
+            }
+
+            pub fn commit_transaction(tx: &mut Transaction) -> Result<(), Error> {
+                tx.prepare();
+                tx.validate();
+                tx.execute_real();
+                tx.record_audit_log();
+                tx.release_distributed_lock();
+                Ok(())
+            }
+        "#};
+        fs::write(&file_path, original).unwrap();
+
+        // A patch modifying the transaction pipeline with strict mandatory audit tail
+        let diff = indoc! {r#"
+            ```diff
+            --- a/tx.rs
+            +++ b/tx.rs
+            @@ -1,7 +1,8 @@
+             pub fn commit_transaction(tx: &mut Transaction) -> Result<(), Error> {
+                 tx.prepare();
+                 tx.validate();
+            -    tx.execute_real();
+            +    tx.execute_real_v2();
+                 tx.record_audit_log();
+                 tx.release_distributed_lock();
+                 Ok(())
+             }
+            ```
+        "#};
+
+        // Modify commit_transaction in target so its audit/lock calls differ
+        let modified_target = indoc! {r#"
+            pub fn dry_run_simulation(tx: &mut Transaction) -> Result<(), Error> {
+                tx.prepare();
+                tx.validate();
+                tx.simulate();
+                Ok(())
+            }
+
+            pub fn commit_transaction(tx: &mut Transaction) -> Result<(), Error> {
+                tx.prepare();
+                tx.validate();
+                tx.execute_real();
+                // Tail was replaced with modern RAII guard
+                let _guard = TxAuditGuard::new(tx);
+                Ok(())
+            }
+        "#};
+        fs::write(&file_path, modified_target).unwrap();
+
+        let patch = parse_diffs(diff).unwrap().remove(0);
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patch, dir.path(), options).unwrap();
+
+        // Must reject because the tail context (mandatory audit + lock) is missing
+        assert!(
+            !result.report.all_applied_cleanly(),
+            "VULNERABILITY: Tail context was truncated, bypassing security invariants!"
+        );
+        let disk_content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(disk_content, modified_target);
+    }
+
+    /// LEVEL 3: Dilution-Free Interleaved Window Bloat (`scale` Metric Flaw)
+    ///
+    /// The formula `scale = (window_len + len) / (2 * len)` cancels out window length.
+    /// A window spanning 70 lines of unrelated database queries scores M / len = 6/7 = 85.7%!
+    /// It splices configuration flags into the middle of the unrelated database code.
+    #[test]
+    fn test_scale_metric_allows_absurd_window_bloat_matching_unrelated_code() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("service.rs");
+
+        let mut original = String::from("pub fn setup_constants() {\n");
+        original.push_str("    let timeout_ms = 5000;\n");
+        original.push_str("    let max_retries = 3;\n");
+        original.push_str("}\n\n");
+
+        original.push_str("pub fn run_financial_payroll_batch() {\n");
+        for i in 0..70 {
+            original.push_str(&format!("    execute_payroll_stage_{}();\n", i));
+        }
+        original.push_str("    let keep_alive = true;\n");
+        original.push_str("    let verify_tls = true;\n");
+        original.push_str("}\n");
+        fs::write(&file_path, &original).unwrap();
+
+        // Patch written for a compact 7-line configuration struct
+        let diff = indoc! {r#"
+            ```diff
+            --- a/service.rs
+            +++ b/service.rs
+            @@ -1,7 +1,8 @@
+                 let timeout_ms = 5000;
+                 let max_retries = 3;
+            +    let pool_size = 64;
+                 let keep_alive = true;
+                 let verify_tls = true;
+            ```
+        "#};
+
+        let patch = parse_diffs(diff).unwrap().remove(0);
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patch, dir.path(), options).unwrap();
+
+        // Must reject! The hunk was never meant to span 70 lines of financial payroll code!
+        assert!(
+            !result.report.all_applied_cleanly(),
+            "VULNERABILITY: Window bloat bridged 70 lines of payroll logic without dilution penalty!"
+        );
+        let disk_content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(disk_content, original);
+    }
+
+    /// LEVEL 4: Coincidental Anchor Collision Hijacks Addition into Wrong Function
+    ///
+    /// `worker_b` was deleted from the codebase. But its context line `shutdown();` coincidentally
+    /// exists in `system_emergency_stop()`. The window stretches to grab `shutdown();`,
+    /// so the orphan guard NEVER fires and injects the hook into emergency stop!
+    #[test]
+    fn test_coincidental_context_collision_prevents_orphan_guard_from_firing() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("daemon.rs");
+
+        // Note: worker_b is DELETED. Only worker_a and emergency_stop exist.
+        let original = indoc! {r#"
+            pub fn worker_a() {
+                init_buffers();
+                step_1();
+                step_2();
+            }
+
+            // 35 lines of unrelated daemon logic
+            pub fn system_emergency_stop() {
+                cut_power();
+                shutdown();
+            }
+        "#};
+        fs::write(&file_path, original).unwrap();
+
+        // Patch created against older version that still had worker_b
+        let diff = indoc! {r#"
+            ```diff
+            --- a/daemon.rs
+            +++ b/daemon.rs
+            @@ -1,11 +1,13 @@
+             pub fn worker_a() {
+                 init_buffers();
+            -    step_1();
+            +    step_1_v2();
+                 step_2();
+             }
+
+             pub fn worker_b() {
+            +    injected_probe_hook();
+                 shutdown();
+             }
+            ```
+        "#};
+
+        let patch = parse_diffs(diff).unwrap().remove(0);
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patch, dir.path(), options).unwrap();
+
+        // Must reject with ContextNotFound because worker_b does not exist!
+        assert!(
+            !result.report.all_applied_cleanly(),
+            "VULNERABILITY: Addition was coincidentally anchored to emergency_stop instead of being rejected!"
+        );
+        let disk_content = fs::read_to_string(&file_path).unwrap();
+        assert!(
+            !disk_content.contains("injected_probe_hook"),
+            "CRITICAL: Hook was injected into emergency stop!"
+        );
+        assert_eq!(disk_content, original);
+    }
+
+    /// LEVEL 5: Scope Delimiter Violation (Window Bridges Across Function Closure `}`)
+    ///
+    /// The window finder matches the head in `authenticate`, crosses `}`, and grabs lines
+    /// from `anonymous_ping`. Changes are spliced into `anonymous_ping` while believing
+    /// it's still in `authenticate`.
+    #[test]
+    fn test_scope_boundary_violation_bridges_across_closing_braces() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("server.rs");
+
+        let original = indoc! {r#"
+            pub fn authenticate(req: &Request) -> bool {
+                let token = req.header("X-Auth");
+                validate_token(token)
+            }
+
+            pub fn anonymous_health_ping() -> &'static str {
+                let token = "ping";
+                "pong"
+            }
+        "#};
+        fs::write(&file_path, original).unwrap();
+
+        let diff = indoc! {r#"
+            ```diff
+            --- a/server.rs
+            +++ b/server.rs
+            @@ -1,5 +1,6 @@
+             pub fn authenticate(req: &Request) -> bool {
+                 let token = req.header("X-Auth");
+            +    verify_not_blacklisted(token);
+                 validate_token(token)
+             }
+            ```
+        "#};
+
+        // Modify authenticate in target so it doesn't match, leaving anonymous_health_ping
+        let refactored_target = indoc! {r#"
+            pub fn authenticate(ctx: &Context, req: &Request) -> bool {
+                // Completely refactored
+                oauth2_validate(ctx, req)
+            }
+
+            pub fn anonymous_health_ping() -> &'static str {
+                let token = req.header("X-Auth");
+                "pong"
+            }
+        "#};
+        fs::write(&file_path, refactored_target).unwrap();
+
+        let patch = parse_diffs(diff).unwrap().remove(0);
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patch, dir.path(), options).unwrap();
+
+        // Must reject! Must NOT cross into anonymous_health_ping
+        assert!(
+            !result.report.all_applied_cleanly(),
+            "VULNERABILITY: Crossed scope delimiter into anonymous health ping!"
+        );
+        let disk_content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(disk_content, refactored_target);
+    }
+
+    /// LEVEL 6: Statement Matching False Positive Rewrites Unrelated API Calls
+    ///
+    /// In `find_statement_match_in_block`, word similarity threshold 0.60 causes
+    /// `send_payment_request` to falsely match `send_telemetry_request` because the argument
+    /// options dict shares >60% of words!
+    #[test]
+    fn test_statement_match_threshold_hijacks_different_api_call() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("api.ts");
+
+        let original = indoc! {r#"
+            async function executeWorkflow(ctx: Context) {
+                const config = { timeout: 5000, retries: 3, verbose: false };
+                await sendTelemetryRequest("/api/v1/metrics", config);
+                return true;
+            }
+        "#};
+        fs::write(&file_path, original).unwrap();
+
+        // Patch modifies sendPaymentRequest, which does NOT exist in the file!
+        let diff = indoc! {r#"
+            ```diff
+            --- a/api.ts
+            +++ b/api.ts
+            @@ -1,4 +1,5 @@
+             async function executeWorkflow(ctx: Context) {
+                 const config = { timeout: 5000, retries: 3, verbose: false };
+            -    await sendPaymentRequest("/api/v1/charge", config);
+            +    await sendPaymentRequestV2("/api/v2/charge", config, authToken);
+                 return true;
+             }
+            ```
+        "#};
+
+        let patch = parse_diffs(diff).unwrap().remove(0);
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patch, dir.path(), options).unwrap();
+
+        // Must reject! sendPaymentRequest must not hijack sendTelemetryRequest!
+        assert!(
+            !result.report.all_applied_cleanly(),
+            "VULNERABILITY: Statement matcher hijacked telemetry call for payment call!"
+        );
+        let disk_content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(disk_content, original);
+    }
+
+    /// LEVEL 7: Python Indentation Hierarchy Corrupted by Truncated Window
+    ///
+    /// Splicing a truncated window into Python code samples `target_indent` from inside
+    /// a nested block (8 spaces) while the patch expected root indentation (0 spaces),
+    /// corrupting the entire block with syntax errors.
+    #[test]
+    fn test_python_indentation_hierarchy_corrupted_by_truncated_window() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("pipeline.py");
+
+        let original = indoc! {r#"
+            def run_pipeline(data):
+                if data is not None:
+                    for item in data:
+                        step_1(item)
+                        step_2(item)
+                        step_3(item)
+        "#};
+        fs::write(&file_path, original).unwrap();
+
+        // Patch modifying the inner loop, but providing outer context
+        let diff = indoc! {r#"
+            ```diff
+            --- a/pipeline.py
+            +++ b/pipeline.py
+            @@ -1,7 +1,9 @@
+             def run_pipeline_legacy(data):
+                 if data is not None:
+                     for item in data:
+                         step_1(item)
+            -            step_2(item)
+            +            step_2_v2(item)
+            +            audit_item(item)
+                         step_3(item)
+            ```
+        "#};
+
+        let patch = parse_diffs(diff).unwrap().remove(0);
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patch, dir.path(), options).unwrap();
+
+        if result.report.all_applied_cleanly() {
+            let content = fs::read_to_string(&file_path).unwrap();
+            // Verify Python indentation is not scrambled to 16 spaces or 0 spaces
+            for line in content.lines() {
+                if line.contains("step_2_v2") || line.contains("audit_item") {
+                    assert_eq!(
+                        &line[..12],
+                        "            ",
+                        "CRITICAL: Python indentation corrupted! Expected 12 spaces, got: '{}'",
+                        line
+                    );
+                }
+            }
+        }
+    }
+
+    /// LEVEL 8: Cascading Anchor Poisoning in Multi-Hunk Applications
+    ///
+    /// In a multi-hunk patch, Hunk 1 binds to a bloated/truncated window.
+    /// Its corrupt anchor in `completed_edits` misdirects Hunk 2 to the wrong module!
+    #[test]
+    fn test_cascading_anchor_poisoning_in_multi_hunk_patch() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("module.rs");
+
+        let original = indoc! {r#"
+            // Module Alpha
+            pub fn handle_event() {
+                log_event("alpha");
+            }
+
+            // 60 lines of intermediate code
+            // Module Beta
+            pub fn handle_event() {
+                log_event("beta");
+            }
+        "#};
+        fs::write(&file_path, original).unwrap();
+
+        let diff = indoc! {r#"
+            ```diff
+            --- a/module.rs
+            +++ b/module.rs
+            @@ -1,3 +1,3 @@
+             // Module Alpha
+             pub fn handle_event() {
+            -    log_event("alpha");
+            +    log_event("alpha_v2");
+             }
+            @@ -20,3 +20,3 @@
+             // Module Beta
+             pub fn handle_event() {
+            -    log_event("beta");
+            +    log_event("beta_v2");
+             }
+            ```
+        "#};
+
+        let patch = parse_diffs(diff).unwrap().remove(0);
+        let options = ApplyOptions::exact();
+        let result = apply_patch_to_file(&patch, dir.path(), options).unwrap();
+
+        assert!(result.report.all_applied_cleanly());
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains(r#"log_event("alpha_v2");"#));
+        assert!(content.contains(r#"log_event("beta_v2");"#));
+    }
+
+    /// LEVEL 9: Atomic Batch Application False Clean Commit
+    ///
+    /// In atomic mode, File 2 has an anchor collision that should fail.
+    /// Because the false match reports `all_applied_cleanly == true`, atomic mode
+    /// falsely commits corrupted files to disk!
+    #[test]
+    fn test_atomic_batch_commits_corrupted_files_due_to_false_clean_match() {
+        let dir = tempdir().unwrap();
+        let f1 = dir.path().join("valid.txt");
+        let f2 = dir.path().join("service.rs");
+
+        fs::write(&f1, "legitimate_content\n").unwrap();
+
+        // In service.rs, worker_secondary was deleted
+        let original_f2 = indoc! {r#"
+            pub fn worker_primary() {
+                step_1();
+                step_2();
+            }
+
+            pub fn garbage_collector() {
+                run_gc();
+                shutdown_all();
+            }
+        "#};
+        fs::write(&f2, original_f2).unwrap();
+
+        let diff = indoc! {r#"
+            --- a/valid.txt
+            +++ b/valid.txt
+            @@ -1 +1 @@
+            -legitimate_content
+            +updated_content
+            --- a/service.rs
+            +++ b/service.rs
+            @@ -1,8 +1,10 @@
+             pub fn worker_primary() {
+                 step_1();
+                 step_2();
+             }
+
+             pub fn worker_secondary() {
+            +    injected_probe();
+                 shutdown_all();
+             }
+        "#};
+
+        let patches = parse_auto(diff).unwrap();
+        let batch = apply_patches_to_dir_atomic(&patches, dir.path(), ApplyOptions::new());
+
+        // The entire batch MUST fail atomically!
+        assert!(
+            !batch.all_applied_cleanly(),
+            "CRITICAL: Atomic batch falsely committed corrupted files!"
+        );
+        // NEITHER file should have been modified!
+        assert_eq!(
+            fs::read_to_string(&f1).unwrap(),
+            "legitimate_content\n",
+            "File 1 was modified despite atomic failure in File 2!"
+        );
+        assert_eq!(
+            fs::read_to_string(&f2).unwrap(),
+            original_f2,
+            "File 2 was modified despite atomic failure!"
+        );
+    }
+
+    #[test]
+    fn test_fallback_reconciliation_on_trailing_delimiter_context_drift() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let original = indoc! {r#"
+            pub fn is_plausible_file_path(s: &str) -> bool {
+                if s.contains(char::is_whitespace) {
+                    has_valid_extension || is_known_filename
+                } else {
+                    has_slash || has_valid_extension || is_known_filename
+                }
+            }
+
+            pub fn next_function() {}
+        "#};
+
+        // Patch was written expecting `    };` on the else block (with a semicolon),
+        // which differs from the target file's `    }`.
+        let diff = indoc! {r#"
+            --- a/test.rs
+            +++ b/test.rs
+            @@ -4,6 +4,10 @@
+                     has_slash || has_valid_extension || is_known_filename
+                 };
+            +    if is_plausible {
+            +        println!("accepted");
+            +    }
+            +    is_plausible
+             }
+
+             pub fn next_function() {}
+        "#};
+
+        let patch = parse_auto(diff).unwrap().remove(0);
+        let options = ApplyOptions::new();
+        let result = mpatch::apply_patch_to_content(&patch, Some(original), &options);
+
+        assert!(
+            result.report.all_applied_cleanly(),
+            "Hunk must apply cleanly via fallback reconciliation despite context delimiter drift"
+        );
+        assert!(result.new_content.contains("if is_plausible {"));
+        assert!(result.new_content.contains("has_slash || has_valid_extension || is_known_filename\n    }\n    if is_plausible {"));
+    }
+
+    #[test]
+    fn test_fallback_reconciliation_trailing_comma_and_comment_drift() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let original = indoc! {r#"
+            fn setup() {
+                let config = Config {
+                    host: "localhost",
+                    port: 8080
+                };
+            }
+        "#};
+
+        // Patch context line has a trailing comma and an inline comment
+        let diff = indoc! {r#"
+            --- a/config.rs
+            +++ b/config.rs
+            @@ -2,4 +2,5 @@
+                 let config = Config {
+                     host: "localhost",
+                     port: 8080, // default port
+            +        timeout: 30,
+                 };
+        "#};
+
+        let patch = parse_auto(diff).unwrap().remove(0);
+        let options = ApplyOptions::new();
+        let result = mpatch::apply_patch_to_content(&patch, Some(original), &options);
+
+        assert!(
+            result.report.all_applied_cleanly(),
+            "Hunk must apply cleanly via fallback reconciliation despite trailing comma and comment drift"
+        );
+        assert!(result.new_content.contains("port: 8080\n        timeout: 30,\n    };"));
+    }
+
+    #[test]
+    fn test_reanchor_additions_attached_to_missing_blank_context_line() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("service.rs");
+
+        // Target file has NO blank line between fn one() and fn two()
+        let original = indoc! {r#"
+            fn one() {
+                step_1();
+            }
+            fn two() {
+                step_2();
+            }
+        "#};
+        fs::write(&file_path, original).unwrap();
+
+        // Patch expects a blank line between fn one() and fn two(),
+        // and inserts fn middle() after the blank line
+        let diff = indoc! {r#"
+            --- a/service.rs
+            +++ b/service.rs
+            @@ -1,6 +1,10 @@
+             fn one() {
+                 step_1();
+             }
+
+            +fn middle() {
+            +    step_middle();
+            +}
+            +
+             fn two() {
+                 step_2();
+             }
+        "#};
+
+        let patches = parse_auto(diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(
+            result.report.all_applied_cleanly(),
+            "Additions attached to a missing blank context line should re-anchor and apply cleanly"
+        );
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("fn middle() {"));
+        assert!(content.contains("fn one() {"));
+        assert!(content.contains("fn two() {"));
+    }
 }

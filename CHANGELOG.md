@@ -23,9 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Python Bindings:** Exposed `mpatch.format_inline_diff` and `mpatch.merge_three_way` with full type stubs (`mpatch.pyi`).
 - **Dependencies & Similar v3.2.0:** Upgraded `similar` from `2.7.0` to `3.2.0` with `inline` feature enabled.
 - **CLI & Diagnostics:** Added Aider search/replace format detection to CLI diagnostics and benchmark suites.
+- **Diagnostics:** Added comprehensive trace and debug instrumentation across parsing, topological anchoring, candidate backtracking, and atomic patch application pipelines.
 
 ### Performance
 - **Fuzzy Matching:** Switched word-level sequence comparisons in `score_window`, `find_statement_match_in_block`, and `try_apply_hunk_at_location` to `similar::Algorithm::Histogram`, eliminating quadratic Myers degradations on repetitive code.
+- **Fuzzy Matching:** Optimized word-level diff evaluation in `score_window` by short-circuiting Myers comparisons when line-level similarity bounds show word diffs cannot exceed the active score.
 - **Fuzzy Matching:** Added mathematical upper-bound pruning and lazy metric evaluation in `score_window` to skip expensive character- and word-level Myers diffs when line-level similarity reaches 1.0 or non-whitespace bounds cannot alter the window's score.
 - **Fuzzy Matching:** Precomputed contiguous target slices and character indices in `find_hunk_location_internal` to eliminate four heap allocations per candidate window.
 - **Fuzzy Matching:** Short-circuited anchor occurrence search in `find_search_ranges` as soon as the maximum occurrence threshold is exceeded, avoiding full linear scans and unbounded vector allocations on repetitive target files.
@@ -39,6 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **Patch Application:** Fixed a bug in fuzzy reconstruction where additions attached to unchanged context lines that were missing or unaligned in the target file window (`DiffOp::Delete` and `DiffOp::Replace`) were blindly injected into preceding code. The applier now aborts with `ContextNotFound` to prevent syntax corruption.
+- **Patch Application & Security:** Enforced head and tail context line preservation in fuzzy reconstruction, rejecting candidate windows with chopped outer context (`ContextNotFound`) to prevent additions or modifications from being injected into wrong or unauthenticated functions.
+- **Patch Application:** Enforced primary identifier matching (`extract_primary_identifier`) and definition status consistency (`is_definition`) in statement and replacement matching, and raised statement matching threshold to 0.80, preventing fuzzy matches from hijacking unrelated API calls across scope boundaries.
+- **Patch Application:** Implemented two-pass candidate location application in `apply_hunk_to_lines`, testing all candidates strictly before falling back to lenient trailing delimiter reconciliation (`normalize_line_delimiters`), and re-anchoring additions on missing blank context lines.
+- **Fuzzy Matching:** Enhanced candidate anchor ranking in `find_search_ranges` by entropy and distinctiveness, bounded anchor search radius up to 120 lines, and aligned search window boundaries with maximum hunk expansion lengths.
 - **Patch Application:** Fixed a bug where hunks with low-entropy match blocks (such as a single closing brace `}`) were incorrectly tie-broken using line-number hints across multiple ambiguous locations, which could overwrite unrelated block delimiters. Ambiguous low-entropy contexts are now cleanly rejected.
 - **Patch Application:** Implemented topological anchor interval bounding and cascading relaxation (`resolve_hunk_line_hints`) for patches lacking explicit line numbers (such as Aider search/replace blocks). Unambiguous hunks act as spatial anchors to soundly disambiguate intermediate hunks containing identical or repetitive code, while maintaining genuine ambiguity rejection.
 - **Patch Application:** Added position-aware cumulative delta tracking in `HunkApplier` to ensure earlier hunk line additions or deletions only shift line numbers for subsequent hunks located downstream in the original file, correctly handling out-of-order or non-monotonic hunk applications.

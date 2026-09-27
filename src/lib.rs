@@ -2371,6 +2371,12 @@ impl Hunk {
     /// assert_eq!(inverted_hunk.new_start_line, Some(10));
     /// ```
     pub fn invert(&self) -> Hunk {
+        trace!(
+            "Hunk::invert: inverting hunk with {} line(s) (old_start={:?}, new_start={:?})",
+            self.lines.len(),
+            self.old_start_line,
+            self.new_start_line
+        );
         let inverted_lines = self
             .lines
             .iter()
@@ -2639,10 +2645,17 @@ impl Hunk {
             }
         }
 
-        match (first_match_idx, last_match_idx) {
+        let span = match (first_match_idx, last_match_idx) {
             (Some(first), Some(last)) => last.saturating_sub(first) + 1,
             _ => 0,
-        }
+        };
+        trace!(
+            "Hunk::required_match_span: calculated required match span as {} line(s) (first_match_idx={:?}, last_match_idx={:?})",
+            span,
+            first_match_idx,
+            last_match_idx
+        );
+        span
     }
 }
 
@@ -2930,6 +2943,13 @@ impl Patch {
         context_len: usize,
     ) -> Result<Self, ParseError> {
         let path = file_path.into();
+        debug!(
+            "Patch::from_texts: generating unified diff for '{}' (old len: {} bytes, new len: {} bytes, context: {})",
+            path.display(),
+            old_text.len(),
+            new_text.len(),
+            context_len
+        );
         let diff = TextDiff::configure()
             .algorithm(similar::Algorithm::Patience)
             .diff_lines(old_text, new_text);
@@ -2994,6 +3014,12 @@ impl Patch {
             });
         }
 
+        debug!(
+            "Patch::from_texts: produced {} hunk(s) for '{}' (ends_with_newline={})",
+            hunks.len(),
+            path.display(),
+            new_text.ends_with('\n') || new_text.is_empty()
+        );
         Ok(Patch {
             file_path: path,
             hunks,
@@ -3038,6 +3064,11 @@ impl Patch {
     /// assert_eq!(inverted_hunk.added_lines(), vec!["deleted"]);
     /// ```
     pub fn invert(&self) -> Patch {
+        debug!(
+            "Patch::invert: inverting patch for '{}' with {} hunk(s)",
+            self.file_path.display(),
+            self.hunks.len()
+        );
         Patch {
             file_path: self.file_path.clone(),
             hunks: self.hunks.iter().map(|h| h.invert()).collect(),
@@ -3389,12 +3420,16 @@ fn is_aider_search_fence(trimmed: &str) -> bool {
     if trimmed.starts_with("<<<<") {
         let after = trimmed.trim_start_matches('<').trim_start();
         let upper = after.to_ascii_uppercase();
-        upper.starts_with("SEARCH")
+        let is_match = upper.starts_with("SEARCH")
             || upper.starts_with("ORIGINAL")
             || upper.starts_with("BEFORE")
             || upper.starts_with("OLD")
             || upper.starts_with("CURRENT")
-            || upper.starts_with("SOURCE")
+            || upper.starts_with("SOURCE");
+        if is_match {
+            trace!("is_aider_search_fence: matched search fence: '{}'", trimmed);
+        }
+        is_match
     } else {
         false
     }
@@ -3417,7 +3452,12 @@ fn extract_file_path_from_search_fence(trimmed: &str) -> Option<PathBuf> {
             if upper.starts_with(keyword) {
                 let rest = after[keyword.len()..].trim();
                 if !rest.is_empty() {
-                    return extract_file_path_from_line(rest);
+                    let path = extract_file_path_from_line(rest);
+                    debug!(
+                        "extract_file_path_from_search_fence: extracted path {:?} from search fence line '{}'",
+                        path, trimmed
+                    );
+                    return path;
                 }
                 return None;
             }
@@ -3439,9 +3479,13 @@ fn extract_file_path_from_search_fence(trimmed: &str) -> Option<PathBuf> {
 fn is_aider_divide_fence(trimmed: &str) -> bool {
     if trimmed.starts_with("====") {
         let after = trimmed.trim_start_matches('=').trim();
-        after.is_empty()
+        let is_match = after.is_empty()
             || after.to_ascii_uppercase().starts_with("DIVIDE")
-            || after.to_ascii_uppercase().starts_with("SPLIT")
+            || after.to_ascii_uppercase().starts_with("SPLIT");
+        if is_match {
+            trace!("is_aider_divide_fence: matched divide fence: '{}'", trimmed);
+        }
+        is_match
     } else {
         false
     }
@@ -3461,16 +3505,21 @@ fn is_aider_replace_fence(trimmed: &str) -> bool {
     if trimmed.starts_with(">>>>") {
         let after = trimmed.trim_start_matches('>').trim_start();
         if after.is_empty() {
+            trace!("is_aider_replace_fence: matched bare replace fence: '{}'", trimmed);
             return true;
         }
         let upper = after.to_ascii_uppercase();
-        upper.starts_with("REPLACE")
+        let is_match = upper.starts_with("REPLACE")
             || upper.starts_with("UPDATED")
             || upper.starts_with("AFTER")
             || upper.starts_with("NEW")
             || upper.starts_with("MODIFIED")
             || upper.starts_with("FINAL")
-            || upper.starts_with("PROPOSED")
+            || upper.starts_with("PROPOSED");
+        if is_match {
+            trace!("is_aider_replace_fence: matched replace fence: '{}'", trimmed);
+        }
+        is_match
     } else {
         false
     }
@@ -3549,6 +3598,11 @@ pub fn apply_patch_to_file_atomic(
     target_dir: &Path,
     options: ApplyOptions,
 ) -> Result<PatchResult, PatchError> {
+    debug!(
+        "apply_patch_to_file_atomic: dispatching atomic patch for '{}' to directory '{}'",
+        patch.file_path.display(),
+        target_dir.display()
+    );
     let mut batch = apply_patches_to_dir_atomic(std::slice::from_ref(patch), target_dir, options);
     let (_, res) = batch.results.remove(0);
     res
@@ -3563,10 +3617,23 @@ pub fn try_apply_patch_to_file_atomic(
     target_dir: &Path,
     options: ApplyOptions,
 ) -> Result<PatchResult, StrictApplyError> {
+    debug!(
+        "try_apply_patch_to_file_atomic: strictly applying atomic patch for '{}'",
+        patch.file_path.display()
+    );
     let result = apply_patch_to_file_atomic(patch, target_dir, options)?;
     if result.report.all_applied_cleanly() {
+        debug!(
+            "try_apply_patch_to_file_atomic: patch for '{}' applied cleanly",
+            patch.file_path.display()
+        );
         Ok(result)
     } else {
+        warn!(
+            "try_apply_patch_to_file_atomic: patch for '{}' failed ({} hunk failures)",
+            patch.file_path.display(),
+            result.report.failure_count()
+        );
         Err(StrictApplyError::PartialApply {
             report: result.report,
         })
@@ -3599,6 +3666,7 @@ pub fn is_ellipsis_line(line: &str) -> bool {
 
     // 1. Bare dots or unicode ellipsis
     if trimmed == "..." || trimmed == "…" || trimmed == "...." || trimmed == "....." {
+        trace!("is_ellipsis_line: matched bare dots/ellipsis '{}'", trimmed);
         return true;
     }
 
@@ -3606,6 +3674,7 @@ pub fn is_ellipsis_line(line: &str) -> bool {
     if (trimmed.len() >= 3 || trimmed.chars().count() >= 2)
         && trimmed.chars().all(|c| c == '.' || c == '…' || c == '-' || c == '~')
     {
+        trace!("is_ellipsis_line: matched repeated ellipsis characters '{}'", trimmed);
         return true;
     }
 
@@ -3623,9 +3692,11 @@ pub fn is_ellipsis_line(line: &str) -> bool {
     {
         let inner = trimmed[1..trimmed.len() - 1].trim();
         if inner == "..." || inner == "…" || inner == "...." || inner == "....." {
+            trace!("is_ellipsis_line: matched bracketed ellipsis '{}'", trimmed);
             return true;
         }
         if !inner.is_empty() && inner.chars().all(|c| c == '.' || c == '…' || c == '-' || c == '~') {
+            trace!("is_ellipsis_line: matched bracketed repeated ellipsis characters '{}'", trimmed);
             return true;
         }
     }
@@ -3691,11 +3762,13 @@ pub fn is_ellipsis_line(line: &str) -> bool {
         .trim();
 
     if inner_unbannered == "..." || inner_unbannered == "…" || inner_unbannered == "...." {
+        trace!("is_ellipsis_line: matched unbannered comment ellipsis '{}'", trimmed);
         return true;
     }
     if !inner_unbannered.is_empty()
         && inner_unbannered.chars().all(|c| c == '.' || c == '…' || c == '-' || c == '~')
     {
+        trace!("is_ellipsis_line: matched unbannered repeated ellipsis characters '{}'", trimmed);
         return true;
     }
 
@@ -3795,6 +3868,9 @@ pub fn is_ellipsis_line(line: &str) -> bool {
         }
     }
 
+    if has_primary {
+        trace!("is_ellipsis_line: matched phrase-based ellipsis '{}'", trimmed);
+    }
     has_primary
 }
 
@@ -3879,6 +3955,7 @@ pub fn normalize_candidate_path(s: &str) -> Option<PathBuf> {
     if final_str.is_empty() {
         None
     } else {
+        trace!("normalize_candidate_path: candidate normalized from '{}' to '{}'", s, final_str);
         Some(PathBuf::from(final_str))
     }
 }
@@ -4125,6 +4202,7 @@ pub fn extract_file_path_from_line(line: &str) -> Option<PathBuf> {
     if trimmed.is_empty() {
         return None;
     }
+    trace!("extract_file_path_from_line: analyzing line '{}'", trimmed);
 
     if trimmed.starts_with("```")
         || trimmed.starts_with("<<<<")
@@ -4170,7 +4248,9 @@ pub fn extract_file_path_from_line(line: &str) -> Option<PathBuf> {
                     if end_ch == quote_char {
                         let candidate = trimmed[start + 1..end].trim();
                         if is_plausible_file_path(candidate) {
-                            return normalize_candidate_path(candidate);
+                            let path = normalize_candidate_path(candidate);
+                            trace!("extract_file_path_from_line: detected quoted path {:?} in line '{}'", path, trimmed);
+                            return path;
                         }
                         break;
                     }
@@ -4243,7 +4323,9 @@ pub fn extract_file_path_from_line(line: &str) -> Option<PathBuf> {
         c == '`' || c == '*' || c == '"' || c == '\'' || c == ':' || c == '(' || c == ')' || c == '[' || c == ']' || c == '{' || c == '}' || c.is_whitespace()
     });
     if is_plausible_file_path(cleaned) {
-        return normalize_candidate_path(cleaned);
+        let path = normalize_candidate_path(cleaned);
+        trace!("extract_file_path_from_line: extracted prefix path {:?} from line '{}'", path, trimmed);
+        return path;
     }
 
     for raw_token in candidate.split_whitespace() {
@@ -4251,10 +4333,13 @@ pub fn extract_file_path_from_line(line: &str) -> Option<PathBuf> {
             c == '`' || c == '*' || c == '"' || c == '\'' || c == ':' || c == ',' || c == ';' || c == '(' || c == ')' || c == '[' || c == ']'
         });
         if is_plausible_file_path(token) {
-            return normalize_candidate_path(token);
+            let path = normalize_candidate_path(token);
+            trace!("extract_file_path_from_line: extracted token path {:?} from line '{}'", path, trimmed);
+            return path;
         }
     }
 
+    trace!("extract_file_path_from_line: no plausible path found in line '{}'", trimmed);
     None
 }
 
@@ -4294,6 +4379,11 @@ pub fn extract_file_path_from_line(line: &str) -> Option<PathBuf> {
 /// assert_eq!(detect_patch(aider), PatchFormat::Aider);
 /// ```
 pub fn detect_patch(content: &str) -> PatchFormat {
+    trace!(
+        "detect_patch: analyzing content ({} bytes, ~{} lines)",
+        content.len(),
+        content.lines().count()
+    );
     let mut lines = content.lines().peekable();
     let mut in_code_block = false;
     let mut current_fence_len = 0;
@@ -4316,6 +4406,7 @@ pub fn detect_patch(content: &str) -> PatchFormat {
                     current_fence_len = fence_len;
                     let info = &trimmed[fence_len..];
                     if info.contains("diff") || info.contains("patch") {
+                        debug!("detect_patch: recognized Markdown code block with '{}'", info.trim());
                         return PatchFormat::Markdown;
                     }
                 } else if fence_len >= current_fence_len {
@@ -4333,7 +4424,9 @@ pub fn detect_patch(content: &str) -> PatchFormat {
         let is_hunk_header = line.starts_with("@@ -") && line.contains(" @@");
 
         if is_diff_git || is_unified_header || is_hunk_header {
+            trace!("detect_patch: found unified diff signature in line: '{}'", line);
             if in_code_block {
+                debug!("detect_patch: recognized Unified diff headers inside Markdown code block");
                 return PatchFormat::Markdown;
             }
             has_unified_headers = true;
@@ -4341,14 +4434,17 @@ pub fn detect_patch(content: &str) -> PatchFormat {
 
         // Check for Aider Search/Replace Markers
         if is_aider_search_fence(trimmed) {
+            trace!("detect_patch: found Aider search fence: '{}'", trimmed);
             has_aider_start = true;
         } else if (trimmed.starts_with("====") || is_aider_replace_fence(trimmed))
             && has_aider_start
         {
+            trace!("detect_patch: found Aider divide or replace fence: '{}'", trimmed);
             has_aider_middle_or_end = true;
         }
         if has_aider_start && has_aider_middle_or_end {
             if in_code_block {
+                debug!("detect_patch: recognized Aider search/replace markers inside Markdown code block");
                 return PatchFormat::Markdown;
             }
             has_aider_markers = true;
@@ -4356,21 +4452,24 @@ pub fn detect_patch(content: &str) -> PatchFormat {
 
         // Check for Conflict Markers
         if trimmed.starts_with("<<<<") {
+            trace!("detect_patch: found conflict start marker: '{}'", trimmed);
             has_conflict_start = true;
         } else if (trimmed.starts_with("====") || trimmed.starts_with(">>>>")) && has_conflict_start
         {
+            trace!("detect_patch: found conflict middle/end marker: '{}'", trimmed);
             has_conflict_middle_or_end = true;
         }
 
         if has_conflict_start && has_conflict_middle_or_end {
             if in_code_block {
+                debug!("detect_patch: recognized conflict markers inside Markdown code block");
                 return PatchFormat::Markdown;
             }
             has_conflict_markers = true;
         }
     }
 
-    if has_unified_headers {
+    let detected = if has_unified_headers {
         PatchFormat::Unified
     } else if has_aider_markers {
         PatchFormat::Aider
@@ -4378,7 +4477,9 @@ pub fn detect_patch(content: &str) -> PatchFormat {
         PatchFormat::Conflict
     } else {
         PatchFormat::Unknown
-    }
+    };
+    debug!("detect_patch: detected format {:?}", detected);
+    detected
 }
 
 /// Automatically detects the format of the input text and parses it into a list of patches.
@@ -4498,11 +4599,20 @@ pub fn detect_patch(content: &str) -> PatchFormat {
 /// assert_eq!(patches[0].file_path.to_str(), Some("patch_target"));
 /// ````
 pub fn parse_auto(content: &str) -> Result<Vec<Patch>, ParseError> {
+    debug!("parse_auto: analyzing input ({} bytes)", content.len());
     let format = detect_patch(content);
     debug!("Auto-detected patch format: {:?}", format);
     match format {
-        PatchFormat::Markdown => parse_diffs(content),
-        PatchFormat::Unified => parse_patches(content),
+        PatchFormat::Markdown => {
+            let patches = parse_diffs(content)?;
+            debug!("parse_auto: parsed {} patch(es) from Markdown blocks", patches.len());
+            Ok(patches)
+        }
+        PatchFormat::Unified => {
+            let patches = parse_patches(content)?;
+            debug!("parse_auto: parsed {} patch(es) from Unified diff", patches.len());
+            Ok(patches)
+        }
         PatchFormat::Aider => {
             let patches = parse_aider(content);
             debug!(
@@ -4613,11 +4723,14 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
         if trimmed.starts_with("```") && count_leading_backticks(trimmed) >= 3 {
             let fence_len = count_leading_backticks(trimmed);
             let opening_indent = line_text.len() - trimmed.len();
+            let block_info = trimmed[fence_len..].trim();
 
             trace!(
-                "Found potential diff block start on line {}: '{}'",
-                line_index,
-                line_text
+                "parse_diffs: found code block start at line {}: fence_len={}, indent={}, info='{}'",
+                line_index + 1,
+                fence_len,
+                opening_indent,
+                block_info
             );
             let diff_block_start_line = line_index + 1;
 
@@ -4631,6 +4744,11 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
                     && count_leading_backticks(inner_trimmed) >= fence_len
                     && current_indent <= opening_indent
                 {
+                    trace!(
+                        "parse_diffs: closing code block for start line {} at line {}",
+                        diff_block_start_line,
+                        line_index + 1
+                    );
                     lines.next(); // Consume the closing fence
                     break;
                 }
@@ -4647,11 +4765,22 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
                     .iter()
                     .rev()
                     .find_map(|l| extract_file_path_from_line(l));
+                if let Some(ref path) = default_file_path {
+                    trace!(
+                        "  Inferred target file path for block from preceding text: '{}'",
+                        path.display()
+                    );
+                }
                 let block_patches = parse_generic_block_lines(
                     &block_lines,
                     diff_block_start_line,
                     default_file_path,
                 )?;
+                debug!(
+                    "  Extracted {} patch(es) from block starting on line {}.",
+                    block_patches.len(),
+                    diff_block_start_line
+                );
                 all_patches.extend(block_patches);
             } else {
                 trace!(
@@ -4719,6 +4848,7 @@ fn has_patch_signature_at_level_1<S: AsRef<str>>(lines: &[S]) -> bool {
                 || trimmed.starts_with("====")
                 || trimmed.starts_with(">>>>"))
         {
+            trace!("has_patch_signature_at_level_1: matched top-level patch signature: '{}'", trimmed);
             return true;
         }
     }
@@ -4749,8 +4879,9 @@ fn parse_generic_block_lines(
     default_file_path: Option<PathBuf>,
 ) -> Result<Vec<Patch>, ParseError> {
     trace!(
-        "  Attempting to parse generic block starting at line {} as standard unified diff.",
-        start_line
+        "  Attempting to parse generic block starting at line {} ({} line(s)) as standard unified diff.",
+        start_line,
+        lines.len()
     );
     // 1. Try parsing as standard unified diff
     let standard_result = parse_patches_from_lines(lines.iter().copied());
@@ -4758,7 +4889,7 @@ fn parse_generic_block_lines(
     match standard_result {
         Ok(patches) => {
             if !patches.is_empty() {
-                trace!("  Successfully parsed block as standard unified diff.");
+                debug!("  Successfully parsed block starting at line {} as standard unified diff ({} patch(es)).", start_line, patches.len());
                 Ok(patches)
             } else {
                 trace!(
@@ -4767,14 +4898,14 @@ fn parse_generic_block_lines(
                 let aider_patches =
                     parse_aider_from_lines(lines.iter().copied(), default_file_path.clone());
                 if !aider_patches.is_empty() {
-                    trace!("  Successfully parsed block as Aider search/replace blocks.");
+                    debug!("  Successfully parsed block starting at line {} as Aider search/replace blocks ({} patch(es)).", start_line, aider_patches.len());
                     Ok(aider_patches)
                 } else {
                     trace!("  No Aider blocks found. Attempting conflict markers.");
                     // 3. If standard and Aider parsing found nothing, try conflict markers
                     let conflict_patches = parse_conflict_markers_from_lines(lines.iter().copied());
                     if !conflict_patches.is_empty() {
-                        trace!("  Successfully parsed block as conflict markers.");
+                        debug!("  Successfully parsed block starting at line {} as conflict markers ({} patch(es)).", start_line, conflict_patches.len());
                     } else {
                         trace!("  No conflict markers found either.");
                     }
@@ -4784,18 +4915,18 @@ fn parse_generic_block_lines(
         }
         Err(e) => {
             trace!(
-                "  Standard parsing failed ({}). Attempting conflict markers.",
+                "  Standard parsing failed ({}). Attempting Aider search/replace blocks.",
                 e
             );
             let aider_patches = parse_aider_from_lines(lines.iter().copied(), default_file_path);
             if !aider_patches.is_empty() {
-                trace!("  Successfully parsed block as Aider search/replace blocks.");
+                debug!("  Successfully parsed block starting at line {} as Aider search/replace blocks ({} patch(es)).", start_line, aider_patches.len());
                 Ok(aider_patches)
             } else {
                 trace!("  Aider parsing found nothing. Attempting conflict markers.");
                 let conflict_patches = parse_conflict_markers_from_lines(lines.iter().copied());
                 if !conflict_patches.is_empty() {
-                    trace!("  Successfully parsed block as conflict markers.");
+                    debug!("  Successfully parsed block starting at line {} as conflict markers ({} patch(es)).", start_line, conflict_patches.len());
                     Ok(conflict_patches)
                 } else {
                     trace!("  Conflict marker parsing also failed. Returning original error.");
@@ -4825,6 +4956,11 @@ fn parse_generic_block_lines(
 ///
 /// A structured [`Hunk`] representing the diff between the two blocks.
 fn create_hunk_from_search_replace(search_lines: &[String], replace_lines: &[String]) -> Hunk {
+    trace!(
+        "create_hunk_from_search_replace: aligning {} search line(s) and {} replace line(s)",
+        search_lines.len(),
+        replace_lines.len()
+    );
     let mut search_norm = Vec::with_capacity(search_lines.len());
     for s in search_lines {
         if is_ellipsis_line(s) {
@@ -4867,6 +5003,7 @@ fn create_hunk_from_search_replace(search_lines: &[String], replace_lines: &[Str
     };
 
     for op in diff.ops() {
+        trace!("  create_hunk_from_search_replace: diff op {:?}", op);
         match *op {
             similar::DiffOp::Equal { old_index, len, .. } => {
                 for i in 0..len {
@@ -4903,6 +5040,11 @@ fn create_hunk_from_search_replace(search_lines: &[String], replace_lines: &[Str
         }
     }
 
+    debug!(
+        "create_hunk_from_search_replace: produced hunk with {} lines (has_changes={})",
+        hunk_lines.len(),
+        hunk_lines.iter().any(|l| l.starts_with(['+', '-']))
+    );
     Hunk {
         lines: hunk_lines,
         old_start_line: None,
@@ -4964,7 +5106,7 @@ fn create_hunk_from_search_replace(search_lines: &[String], replace_lines: &[Str
 /// assert_eq!(patches[0].hunks[0].added_lines(), vec!["    print(\"hello, world!\")"]);
 /// ```
 pub fn parse_aider(content: &str) -> Vec<Patch> {
-    debug!("Starting to parse Aider search/replace content.");
+    debug!("Starting to parse Aider search/replace content ({} bytes).", content.len());
     let patches = parse_aider_from_lines(content.lines(), None);
     debug!(
         "Finished parsing Aider content. Found {} patch(es).",
@@ -5012,6 +5154,10 @@ pub fn parse_aider_from_lines<'a, I>(lines: I, default_file_path: Option<PathBuf
 where
     I: Iterator<Item = &'a str>,
 {
+    debug!(
+        "parse_aider_from_lines: scanning lines (default_file_path={:?})",
+        default_file_path
+    );
     let mut unmerged_patches: Vec<Patch> = Vec::new();
     let mut active_file_path: Option<PathBuf> = default_file_path;
     let mut pending_file_path: Option<PathBuf> = None;
@@ -5035,6 +5181,11 @@ where
                 .or_else(|| active_file_path.clone())
                 .unwrap_or_else(|| PathBuf::from("patch_target"));
 
+            debug!(
+                "  Aider parser: starting SEARCH block for '{}' (fence: '{}')",
+                target_file.display(),
+                trimmed
+            );
             active_file_path = Some(target_file.clone());
 
             search_lines.clear();
@@ -5044,11 +5195,17 @@ where
         }
 
         if is_aider_divide_fence(trimmed) && matches!(state, State::InSearch) {
+            debug!("  Aider parser: transitioned to REPLACE block ({} search lines collected)", search_lines.len());
             state = State::InReplace;
             continue;
         }
 
         if is_aider_replace_fence(trimmed) && matches!(state, State::InReplace) {
+            debug!(
+                "  Aider parser: ending REPLACE block ({} replace lines collected) for '{}'",
+                replace_lines.len(),
+                active_file_path.as_deref().unwrap_or(Path::new("patch_target")).display()
+            );
             state = State::Outside;
 
             let file_path = active_file_path
@@ -5081,6 +5238,12 @@ where
                     .collect();
 
                 if s_segs.len() == r_segs.len() && changed_indices.len() > 1 {
+                    debug!(
+                        "  Aider search/replace has {} wildcard segment(s) with {} modified site(s) for '{}'",
+                        s_segs.len(),
+                        changed_indices.len(),
+                        file_path.display()
+                    );
                     for &idx in &changed_indices {
                         let mut s_sub = s_segs[idx].clone();
                         let mut r_sub = r_segs[idx].clone();
@@ -5114,6 +5277,11 @@ where
 
             let hunk = create_hunk_from_search_replace(&search_lines, &replace_lines);
             if hunk.has_changes() || !search_lines.is_empty() || !replace_lines.is_empty() {
+                debug!(
+                    "  Adding Aider patch hunk with {} line(s) for '{}'",
+                    hunk.lines.len(),
+                    file_path.display()
+                );
                 unmerged_patches.push(Patch {
                     file_path,
                     hunks: vec![hunk],
@@ -5169,6 +5337,10 @@ where
         }
     }
 
+    debug!(
+        "parse_aider_from_lines: completed. Merged into {} patch(es).",
+        merged_patches.len()
+    );
     merged_patches
 }
 
@@ -5182,6 +5354,7 @@ where
 ///
 /// A vector of line segments excluding the ellipsis separator lines.
 fn split_lines_by_ellipsis(lines: &[String]) -> Vec<Vec<String>> {
+    trace!("split_lines_by_ellipsis: input {} line(s)", lines.len());
     let mut segs = Vec::new();
     let mut current = Vec::new();
     for line in lines {
@@ -5192,6 +5365,7 @@ fn split_lines_by_ellipsis(lines: &[String]) -> Vec<Vec<String>> {
         }
     }
     segs.push(current);
+    trace!("split_lines_by_ellipsis: partitioned into {} segment(s)", segs.len());
     segs
 }
 
@@ -5255,15 +5429,29 @@ fn split_lines_by_ellipsis(lines: &[String]) -> Vec<Vec<String>> {
 /// assert!(matches!(result, Err(SingleParseError::MultiplePatchesFound(2))));
 /// ````
 pub fn parse_single_patch(content: &str) -> Result<Patch, SingleParseError> {
+    debug!(
+        "parse_single_patch: parsing single patch from content ({} bytes)",
+        content.len()
+    );
     let mut patches = parse_auto(content)?;
 
     if patches.len() > 1 {
+        warn!(
+            "parse_single_patch: expected exactly 1 patch, but found {}",
+            patches.len()
+        );
         Err(SingleParseError::MultiplePatchesFound(patches.len()))
     } else if patches.is_empty() {
+        warn!("parse_single_patch: no patches found in input");
         Err(SingleParseError::NoPatchesFound)
     } else {
-        // .remove(0) is safe here because we've confirmed the length is 1.
-        Ok(patches.remove(0))
+        let p = patches.remove(0);
+        debug!(
+            "parse_single_patch: successfully parsed patch for '{}' ({} hunks)",
+            p.file_path.display(),
+            p.hunks.len()
+        );
+        Ok(p)
     }
 }
 /// Parses a string containing raw unified diff content into a vector of [`Patch`] objects.
@@ -5307,7 +5495,7 @@ pub fn parse_single_patch(content: &str) -> Result<Patch, SingleParseError> {
 /// assert_eq!(patches[0].file_path.to_str(), Some("src/main.rs"));
 /// ```
 pub fn parse_patches(content: &str) -> Result<Vec<Patch>, ParseError> {
-    debug!("Starting to parse raw diff content.");
+    debug!("Starting to parse raw diff content ({} bytes).", content.len());
     parse_patches_from_lines(content.lines())
 }
 
@@ -5355,9 +5543,9 @@ pub fn parse_patches(content: &str) -> Result<Vec<Patch>, ParseError> {
 /// assert_eq!(patches[0].hunks[0].added_lines(), vec!["    println!(\"New\");"]);
 /// ```
 pub fn parse_conflict_markers(content: &str) -> Vec<Patch> {
-    debug!("Starting to parse conflict marker content.");
+    debug!("Starting to parse conflict marker content ({} bytes).", content.len());
     let patches = parse_conflict_markers_from_lines(content.lines());
-    debug!("Finished parsing. Found {} patch(es).", patches.len());
+    debug!("Finished parsing conflict markers. Found {} patch(es).", patches.len());
     patches
 }
 
@@ -5407,6 +5595,7 @@ pub fn parse_patches_from_lines<'a, I>(lines: I) -> Result<Vec<Patch>, ParseErro
 where
     I: Iterator<Item = &'a str>,
 {
+    debug!("parse_patches_from_lines: reading diff lines...");
     let mut unmerged_patches: Vec<Patch> = Vec::new();
     const HUNK_BUFFER_CAPACITY: usize = 32;
 
@@ -5499,7 +5688,7 @@ where
                 first_hunk_header_line = Some(line_idx + 1);
             }
             let (old, new) = parse_hunk_header(line);
-            trace!("    Parsed old_start={:?}, new_start={:?}", old, new);
+            debug!("  Hunk header at line {}: '{}' -> old_start={:?}, new_start={:?}", line_idx + 1, line, old, new);
             current_hunk_old_start_line = old;
             current_hunk_new_start_line = new;
         } else if line.starts_with(['+', '-', ' ']) {
@@ -5514,6 +5703,7 @@ where
                 if let Some(last_line) = current_hunk_lines.last() {
                     if last_line.starts_with('+') || last_line.starts_with(' ') {
                         ends_with_newline_for_section = false;
+                        trace!("    Recorded ends_with_newline=false for section");
                     }
                 }
             }
@@ -5588,6 +5778,10 @@ where
         }
     }
 
+    debug!(
+        "parse_patches_from_lines: completed with {} merged patch(es).",
+        merged_patches.len()
+    );
     Ok(merged_patches)
 }
 
@@ -5642,6 +5836,7 @@ fn parse_conflict_markers_from_lines<'a, I>(lines: I) -> Vec<Patch>
 where
     I: Iterator<Item = &'a str>,
 {
+    trace!("parse_conflict_markers_from_lines: scanning lines for conflict markers");
     let mut hunk_lines = Vec::new();
     let mut has_start = false;
     let mut has_middle_or_end = false;
@@ -5655,16 +5850,19 @@ where
 
     for line in lines {
         if line.trim_start().starts_with("<<<<") {
+            trace!("  Conflict marker start: '{}'", line.trim());
             state = State::Old;
             has_start = true;
             continue;
         } else if line.trim_start().starts_with("====") {
+            trace!("  Conflict marker separator: '{}'", line.trim());
             state = State::New;
             if has_start {
                 has_middle_or_end = true;
             }
             continue;
         } else if line.trim_start().starts_with(">>>>") {
+            trace!("  Conflict marker end: '{}'", line.trim());
             state = State::Context;
             if has_start {
                 has_middle_or_end = true;
@@ -5684,6 +5882,7 @@ where
     }
 
     if !(has_start && has_middle_or_end) {
+        trace!("  Conflict markers incomplete or missing. No patches created.");
         return Vec::new();
     }
 
@@ -5696,6 +5895,7 @@ where
     };
 
     // Since conflict markers don't specify a file, we use a placeholder.
+    debug!("  Created conflict marker patch with {} line(s)", hunk.lines.len());
     // The user can override this or use `patch_content_str` where it doesn't matter.
     vec![Patch {
         file_path: PathBuf::from("patch_target"),
@@ -5783,9 +5983,15 @@ pub fn ensure_path_is_safe(base_dir: &Path, relative_path: &Path) -> Result<Path
     // Lexical check to prevent arbitrary directory creation outside base_dir
     let mut virtual_path = base_path.clone();
     for component in relative_path.components() {
+        trace!("  ensure_path_is_safe: processing component '{:?}' on virtual path '{}'", component, virtual_path.display());
         match component {
             std::path::Component::ParentDir => {
                 if !virtual_path.pop() || !virtual_path.starts_with(&base_path) {
+                    warn!(
+                        "Path safety violation: relative path '{}' escapes base directory '{}'",
+                        relative_path.display(),
+                        base_dir.display()
+                    );
                     return Err(PatchError::PathTraversal(relative_path.to_path_buf()));
                 }
             }
@@ -5798,17 +6004,32 @@ pub fn ensure_path_is_safe(base_dir: &Path, relative_path: &Path) -> Result<Path
                     virtual_path = fs::canonicalize(&virtual_path)
                         .map_err(|e| map_io_error(virtual_path.clone(), e))?;
                     if !virtual_path.starts_with(&base_path) {
+                        warn!(
+                            "Path safety violation: symlink in '{}' resolves outside base directory '{}'",
+                            relative_path.display(),
+                            base_dir.display()
+                        );
                         return Err(PatchError::PathTraversal(relative_path.to_path_buf()));
                     }
                 }
             }
             std::path::Component::CurDir => {}
             std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                warn!(
+                    "Path safety violation: path '{}' contains root or prefix component outside base directory '{}'",
+                    relative_path.display(),
+                    base_dir.display()
+                );
                 return Err(PatchError::PathTraversal(relative_path.to_path_buf()));
             }
         }
     }
 
+    trace!(
+        "  Path safety verified: '{}' safely resolves to '{}'",
+        relative_path.display(),
+        virtual_path.display()
+    );
     Ok(virtual_path)
 }
 
@@ -5873,15 +6094,37 @@ pub fn apply_patches_to_dir(
     target_dir: &Path,
     options: ApplyOptions,
 ) -> BatchResult {
-    let results = patches
+    debug!(
+        "apply_patches_to_dir: applying {} patch(es) to '{}' (dry_run={}, fuzz={:.2})",
+        patches.len(),
+        target_dir.display(),
+        options.dry_run,
+        options.fuzz_factor
+    );
+    let results: Vec<(PathBuf, Result<PatchResult, PatchError>)> = patches
         .iter()
-        .map(|patch| {
+        .enumerate()
+        .map(|(idx, patch)| {
+            debug!(
+                "  [{}/{}] Applying patch for '{}' ({} hunk(s))",
+                idx + 1,
+                patches.len(),
+                patch.file_path.display(),
+                patch.hunks.len()
+            );
             let result = apply_patch_to_file(patch, target_dir, options);
             (patch.file_path.clone(), result)
         })
         .collect();
 
-    BatchResult { results }
+    let batch = BatchResult { results };
+    debug!(
+        "apply_patches_to_dir: completed {} patch(es). all_succeeded={}, all_applied_cleanly={}",
+        batch.results.len(),
+        batch.all_succeeded(),
+        batch.all_applied_cleanly()
+    );
+    batch
 }
 
 /// Internal representation of applied file actions used during atomic disk commit rollback.
@@ -5894,14 +6137,21 @@ enum AppliedCommitAction {
 
 /// Rolls back committed filesystem actions in reverse order upon encountering an unexpected I/O error.
 fn rollback_committed_actions(actions: Vec<AppliedCommitAction>) {
+    warn!("Rolling back {} committed filesystem action(s)...", actions.len());
     for action in actions.into_iter().rev() {
         match action {
             AppliedCommitAction::Created(path) => {
-                let _ = fs::remove_file(&path);
+                trace!("Rollback: removing created file '{}'", path.display());
+                if let Err(e) = fs::remove_file(&path) {
+                    warn!("Rollback failed to remove created file '{}': {}", path.display(), e);
+                }
             }
             AppliedCommitAction::Overwritten { path, prev_content }
             | AppliedCommitAction::Deleted { path, prev_content } => {
-                let _ = fs::write(&path, prev_content);
+                trace!("Rollback: restoring previous content to '{}' ({} bytes)", path.display(), prev_content.len());
+                if let Err(e) = fs::write(&path, prev_content) {
+                    warn!("Rollback failed to restore file '{}': {}", path.display(), e);
+                }
             }
         }
     }
@@ -5973,9 +6223,11 @@ pub fn apply_patches_to_dir_atomic(
     options: ApplyOptions,
 ) -> BatchResult {
     debug!(
-        "Applying {} patch(es) to '{}' in atomic mode.",
+        "Applying {} patch(es) to '{}' in atomic mode (dry_run={}, fuzz={:.2}).",
         patches.len(),
-        target_dir.display()
+        target_dir.display(),
+        options.dry_run,
+        options.fuzz_factor
     );
 
     struct StagedFile {
@@ -5989,16 +6241,32 @@ pub fn apply_patches_to_dir_atomic(
     let mut results: Vec<(PathBuf, Result<PatchResult, PatchError>)> =
         Vec::with_capacity(patches.len());
 
-    for patch in patches {
+    for (idx, patch) in patches.iter().enumerate() {
+        debug!(
+            "  [Atomic Stage {}/{}] Staging '{}' ({} hunks)...",
+            idx + 1,
+            patches.len(),
+            patch.file_path.display(),
+            patch.hunks.len()
+        );
         let safe_target_path = match ensure_path_is_safe(target_dir, &patch.file_path) {
             Ok(p) => p,
             Err(e) => {
+                warn!(
+                    "  Atomic apply: path safety check failed for '{}': {}",
+                    patch.file_path.display(),
+                    e
+                );
                 results.push((patch.file_path.clone(), Err(e)));
                 continue;
             }
         };
 
         if safe_target_path.is_dir() {
+            warn!(
+                "  Atomic apply: target path '{}' is a directory",
+                safe_target_path.display()
+            );
             results.push((
                 patch.file_path.clone(),
                 Err(PatchError::TargetIsDirectory {
@@ -6014,8 +6282,12 @@ pub fn apply_patches_to_dir_atomic(
             std::collections::hash_map::Entry::Vacant(entry) => {
                 let (existed, content) = if safe_target_path.is_file() {
                     match fs::read_to_string(&safe_target_path) {
-                        Ok(c) => (true, Some(c)),
+                        Ok(c) => {
+                            trace!("    Read {} bytes from '{}'", c.len(), safe_target_path.display());
+                            (true, Some(c))
+                        }
                         Err(e) => {
+                            warn!("    Failed to read '{}': {}", safe_target_path.display(), e);
                             results.push((
                                 patch.file_path.clone(),
                                 Err(map_io_error(safe_target_path.clone(), e)),
@@ -6037,6 +6309,10 @@ pub fn apply_patches_to_dir_atomic(
         };
 
         if staged.current_content.is_none() && !patch.is_creation() {
+            warn!(
+                "  Atomic apply: target file '{}' not found and patch is not file creation",
+                patch.file_path.display()
+            );
             results.push((
                 patch.file_path.clone(),
                 Err(PatchError::TargetNotFound(target_dir.join(&patch.file_path))),
@@ -6047,6 +6323,19 @@ pub fn apply_patches_to_dir_atomic(
         let original_before_patch = staged.current_content.clone();
         let in_memory_res =
             apply_patch_to_content(patch, original_before_patch.as_deref(), &options);
+        if in_memory_res.report.all_applied_cleanly() {
+            debug!(
+                "  Atomic apply: staged changes for '{}' cleanly ({} hunks applied)",
+                patch.file_path.display(),
+                in_memory_res.report.success_count()
+            );
+        } else {
+            warn!(
+                "  Atomic apply: staged changes for '{}' had {} failure(s)",
+                patch.file_path.display(),
+                in_memory_res.report.failure_count()
+            );
+        }
 
         let mut diff = None;
         if options.dry_run {
@@ -6079,6 +6368,13 @@ pub fn apply_patches_to_dir_atomic(
         .iter()
         .all(|(_, res)| res.as_ref().map_or(false, |r| r.report.all_applied_cleanly()));
 
+    debug!(
+        "apply_patches_to_dir_atomic: evaluated all patches. all_applied_cleanly={}, dry_run={}, staged files count={}",
+        all_applied_cleanly,
+        options.dry_run,
+        staged_files.len()
+    );
+
     if !all_applied_cleanly || options.dry_run || staged_files.is_empty() {
         if options.dry_run {
             info!(
@@ -6106,6 +6402,7 @@ pub fn apply_patches_to_dir_atomic(
         let new_content = staged.current_content.unwrap_or_default();
         if new_content.is_empty() {
             if staged.existed_on_disk && staged.safe_path.exists() {
+                debug!("  Atomic commit: removing empty file '{}'", staged.safe_path.display());
                 if let Err(e) = fs::remove_file(&staged.safe_path) {
                     warn!(
                         "  I/O error removing file '{}' during atomic commit: {}. Rolling back...",
@@ -6134,6 +6431,7 @@ pub fn apply_patches_to_dir_atomic(
             }
         } else {
             if let Some(parent) = staged.safe_path.parent() {
+                trace!("  Atomic commit: ensuring parent dir '{}'", parent.display());
                 if let Err(e) = fs::create_dir_all(parent) {
                     warn!("  I/O error creating parent directory '{}' during atomic commit: {}. Rolling back...", parent.display(), e);
                     rollback_committed_actions(applied_actions);
@@ -6156,6 +6454,7 @@ pub fn apply_patches_to_dir_atomic(
             let was_file = staged.existed_on_disk;
             let prev = staged.original_disk_content;
 
+            debug!("  Atomic commit: writing {} bytes to '{}'", new_content.len(), staged.safe_path.display());
             if let Err(e) = fs::write(&staged.safe_path, &new_content) {
                 warn!(
                     "  I/O error writing file '{}' during atomic commit: {}. Rolling back...",
@@ -6179,11 +6478,13 @@ pub fn apply_patches_to_dir_atomic(
             }
 
             if was_file {
+                debug!("  Atomic commit: overwritten existing file '{}'", staged.safe_path.display());
                 applied_actions.push(AppliedCommitAction::Overwritten {
                     path: staged.safe_path,
                     prev_content: prev.unwrap_or_default(),
                 });
             } else {
+                debug!("  Atomic commit: created new file '{}'", staged.safe_path.display());
                 applied_actions.push(AppliedCommitAction::Created(staged.safe_path));
             }
         }
@@ -6213,10 +6514,16 @@ pub fn try_apply_patches_to_dir_atomic(
     target_dir: &Path,
     options: ApplyOptions,
 ) -> Result<BatchResult, StrictBatchApplyError> {
+    debug!(
+        "try_apply_patches_to_dir_atomic: applying {} patch(es) strictly and atomically",
+        patches.len()
+    );
     let result = apply_patches_to_dir_atomic(patches, target_dir, options);
     if result.all_applied_cleanly() {
+        debug!("try_apply_patches_to_dir_atomic: all patches and hunks applied cleanly");
         Ok(result)
     } else {
+        warn!("try_apply_patches_to_dir_atomic: strict atomic batch application failed");
         Err(StrictBatchApplyError::Failed {
             batch_result: result,
         })
@@ -6243,10 +6550,16 @@ pub fn try_apply_patches_to_dir(
     target_dir: &Path,
     options: ApplyOptions,
 ) -> Result<BatchResult, StrictBatchApplyError> {
+    debug!(
+        "try_apply_patches_to_dir: applying {} patch(es) strictly",
+        patches.len()
+    );
     let result = apply_patches_to_dir(patches, target_dir, options);
     if result.all_applied_cleanly() {
+        debug!("try_apply_patches_to_dir: all patches applied cleanly");
         Ok(result)
     } else {
+        warn!("try_apply_patches_to_dir: strict batch application failed");
         Err(StrictBatchApplyError::Failed {
             batch_result: result,
         })
@@ -6281,6 +6594,7 @@ pub fn try_apply_patches_to_dir(
 /// assert_eq!(hunk.added_lines(), vec!["old"]);
 /// ```
 pub fn invert_patches(patches: &[Patch]) -> Vec<Patch> {
+    debug!("invert_patches: inverting {} patch(es)", patches.len());
     patches.iter().map(|p| p.invert()).collect()
 }
 
@@ -6352,6 +6666,13 @@ pub fn apply_patch_to_file(
     options: ApplyOptions,
 ) -> Result<PatchResult, PatchError> {
     info!("Applying patch to: {}", patch.file_path.display());
+    debug!(
+        "  apply_patch_to_file: target_dir='{}', hunks={}, dry_run={}, fuzz={:.2}",
+        target_dir.display(),
+        patch.hunks.len(),
+        options.dry_run,
+        options.fuzz_factor
+    );
 
     // --- Path Safety Check ---
     // This is a critical security measure. `ensure_path_is_safe` returns a
@@ -6375,7 +6696,7 @@ pub fn apply_patch_to_file(
     }
 
     let (original_content, is_new_file) = if safe_target_path.is_file() {
-        debug!("  Target file exists. Reading content...");
+        debug!("  Target file exists: '{}'. Reading content...", safe_target_path.display());
         let content = fs::read_to_string(&safe_target_path)
             .map_err(|e| map_io_error(safe_target_path.clone(), e))?;
         trace!(
@@ -6387,13 +6708,13 @@ pub fn apply_patch_to_file(
     } else {
         // File doesn't exist. This is only okay if it's a file creation patch.
         if !patch.is_creation() {
-            debug!("  Target file does not exist, and patch is not a creation patch. Aborting.");
+            debug!("  Target file '{}' does not exist, and patch is not a creation patch. Aborting.", safe_target_path.display());
             // For user-facing errors, show the original path, not the canonicalized one.
             return Err(PatchError::TargetNotFound(
                 target_dir.join(&patch.file_path),
             ));
         }
-        debug!("  Target file does not exist. Assuming file creation.");
+        debug!("  Target file '{}' does not exist. Assuming file creation.", safe_target_path.display());
         (String::new(), true)
     };
 
@@ -6415,8 +6736,10 @@ pub fn apply_patch_to_file(
     if options.dry_run {
         // In dry-run mode, generate a diff instead of writing to the file.
         info!(
-            "  DRY RUN: Would write changes to '{}'",
-            patch.file_path.display()
+            "  DRY RUN: Evaluated changes for '{}' ({} hunks, clean={})",
+            patch.file_path.display(),
+            patch.hunks.len(),
+            apply_result.all_applied_cleanly()
         );
         trace!("  Generating diff for dry run...");
 
@@ -6463,6 +6786,7 @@ pub fn apply_patch_to_file(
             }
         } else {
             if let Some(parent) = safe_target_path.parent() {
+                trace!("  Ensuring parent directory exists: '{}'", parent.display());
                 fs::create_dir_all(parent).map_err(|e| map_io_error(parent.to_path_buf(), e))?;
             }
             trace!(
@@ -6571,11 +6895,23 @@ pub fn try_apply_patch_to_file(
     target_dir: &Path,
     options: ApplyOptions,
 ) -> Result<PatchResult, StrictApplyError> {
-    // This line was already correct
+    debug!(
+        "try_apply_patch_to_file: strictly applying patch for '{}'",
+        patch.file_path.display()
+    );
     let result = apply_patch_to_file(patch, target_dir, options)?;
     if result.report.all_applied_cleanly() {
+        debug!(
+            "try_apply_patch_to_file: all hunks applied cleanly for '{}'",
+            patch.file_path.display()
+        );
         Ok(result)
     } else {
+        warn!(
+            "try_apply_patch_to_file: partial apply for '{}' ({} failures)",
+            patch.file_path.display(),
+            result.report.failure_count()
+        );
         Err(StrictApplyError::PartialApply {
             report: result.report,
         })
@@ -6596,6 +6932,7 @@ fn find_valid_chains(
         return;
     }
     if j == cand_lists.len() {
+        trace!("  find_valid_chains: found valid chain: {:?}", current);
         chains.push(current.clone());
         return;
     }
@@ -6631,6 +6968,11 @@ fn resolve_hunk_line_hints<T: AsRef<str>>(
     }
 
     let n = resolved.len();
+    debug!(
+        "resolve_hunk_line_hints: evaluating {} hunk(s) across {} target lines",
+        n,
+        lines.len()
+    );
     let mut matches_per_hunk: Vec<Vec<usize>> = Vec::with_capacity(n);
     let mut anchors: Vec<Option<usize>> = vec![None; n];
     let match_lens: Vec<usize> = resolved
@@ -6641,11 +6983,13 @@ fn resolve_hunk_line_hints<T: AsRef<str>>(
     for (i, hunk) in resolved.iter_mut().enumerate() {
         let match_block = hunk.get_match_block();
         if match_block.is_empty() || is_low_entropy_segment(&match_block) {
+            trace!("  Hunk {}: empty or low-entropy match block, skipping initial anchor", i + 1);
             matches_per_hunk.push(Vec::new());
             continue;
         }
 
         if let Some(explicit_line) = hunk.old_start_line {
+            trace!("  Hunk {}: already has explicit line hint {}", i + 1, explicit_line);
             matches_per_hunk.push(vec![explicit_line.saturating_sub(1)]);
             anchors[i] = Some(explicit_line.saturating_sub(1));
             continue;
@@ -6668,7 +7012,14 @@ fn resolve_hunk_line_hints<T: AsRef<str>>(
             }
         }
 
+        trace!("  Hunk {}: found {} exact/trimmed match(es)", i + 1, exact_matches.len());
         if exact_matches.len() == 1 {
+            debug!(
+                "  Hunk {}: uniquely anchored at line {} (0-based: {})",
+                i + 1,
+                exact_matches[0] + 1,
+                exact_matches[0]
+            );
             anchors[i] = Some(exact_matches[0]);
             hunk.old_start_line = Some(exact_matches[0] + 1);
         }
@@ -6677,7 +7028,10 @@ fn resolve_hunk_line_hints<T: AsRef<str>>(
 
     // Relaxation: Soundly bound intermediate ambiguous hunks between established anchors
     let mut changed = true;
+    let mut iteration = 0;
     while changed {
+        iteration += 1;
+        trace!("resolve_hunk_line_hints: beginning relaxation pass {}", iteration);
         changed = false;
 
         // Pass 1: Single unique bounded matches and contiguous anchor attachments
@@ -6716,6 +7070,14 @@ fn resolve_hunk_line_hints<T: AsRef<str>>(
 
                 if bounded_matches.len() == 1 {
                     let unique_match = bounded_matches[0];
+                    debug!(
+                        "  Hunk {}: uniquely resolved between anchors to line {} (0-based: {}) in interval [{}..{}]",
+                        i + 1,
+                        unique_match + 1,
+                        unique_match,
+                        min_bound,
+                        max_bound
+                    );
                     anchors[i] = Some(unique_match);
                     resolved[i].old_start_line = Some(unique_match + 1);
                     changed = true;
@@ -6726,6 +7088,12 @@ fn resolve_hunk_line_hints<T: AsRef<str>>(
                 // and a bounded candidate starts right where prev_anchor ended (`m == min_bound`), anchor it.
                 if let Some((p, _)) = prev_anchor {
                     if i == p + 1 && bounded_matches.contains(&min_bound) {
+                        debug!(
+                            "  Hunk {}: resolved via contiguity to prev anchor {} at line {}",
+                            i + 1,
+                            p + 1,
+                            min_bound + 1
+                        );
                         anchors[i] = Some(min_bound);
                         resolved[i].old_start_line = Some(min_bound + 1);
                         changed = true;
@@ -6741,6 +7109,12 @@ fn resolve_hunk_line_hints<T: AsRef<str>>(
                         && bounded_matches.contains(&(max_bound - hunk_len))
                     {
                         let m = max_bound - hunk_len;
+                        debug!(
+                            "  Hunk {}: resolved via contiguity to next anchor {} at line {}",
+                            i + 1,
+                            s + 1,
+                            m + 1
+                        );
                         anchors[i] = Some(m);
                         resolved[i].old_start_line = Some(m + 1);
                         changed = true;
@@ -6825,9 +7199,19 @@ fn resolve_hunk_line_hints<T: AsRef<str>>(
                         );
 
                         if !chains.is_empty() {
+                            trace!(
+                                "  Found {} monotonic chain(s) for hunks {:?}",
+                                chains.len(),
+                                unanchored_indices
+                            );
                             for (j, &h) in unanchored_indices.iter().enumerate() {
                                 let pos0 = chains[0][j];
                                 if chains.iter().all(|c| c[j] == pos0) {
+                                    debug!(
+                                        "  Hunk {}: invariant chain position resolved to line {}",
+                                        h + 1,
+                                        pos0 + 1
+                                    );
                                     anchors[h] = Some(pos0);
                                     resolved[h].old_start_line = Some(pos0 + 1);
                                     changed = true;
@@ -6840,6 +7224,12 @@ fn resolve_hunk_line_hints<T: AsRef<str>>(
         }
     }
 
+    let anchored_count = anchors.iter().filter(|a| a.is_some()).count();
+    debug!(
+        "resolve_hunk_line_hints: completed hint resolution. {}/{} hunk(s) have anchors.",
+        anchored_count,
+        n
+    );
     resolved
 }
 
@@ -6958,6 +7348,13 @@ impl<'a> HunkApplier<'a> {
             patch.hunks.clone()
         };
 
+        debug!(
+            "HunkApplier: initialized with {} hunk(s) across {} line(s) of target content (fuzz_factor={:.2}, dry_run={})",
+            hunks.len(),
+            current_lines.len(),
+            options.fuzz_factor,
+            options.dry_run
+        );
         Self {
             hunks,
             current_idx: 0,
@@ -7120,6 +7517,13 @@ impl<'a> HunkApplier<'a> {
     /// # }
     /// ```
     pub fn into_content(self) -> String {
+        debug!(
+            "HunkApplier::into_content: assembling final content from {} line(s) (touched_eof={}, patch_ends_with_newline={}, original_ends_with_newline={})",
+            self.current_lines.len(),
+            self.touched_eof,
+            self.patch_ends_with_newline,
+            self.original_ends_with_newline
+        );
         let mut new_content = self.current_lines.join("\n");
 
         let should_have_newline = if self.touched_eof {
@@ -7131,6 +7535,12 @@ impl<'a> HunkApplier<'a> {
         if should_have_newline && !self.current_lines.is_empty() {
             new_content.push('\n');
         }
+        trace!(
+            "HunkApplier::into_content: resulting content has {} bytes ({} lines, ends_with_newline={})",
+            new_content.len(),
+            self.current_lines.len(),
+            should_have_newline
+        );
         new_content
     }
 }
@@ -7190,6 +7600,13 @@ impl<'a> Iterator for HunkApplier<'a> {
             if applicable_delta != 0 {
                 adjusted_hunk = hunk.clone();
                 let shifted = (old_start as isize + applicable_delta).max(1) as usize;
+                trace!(
+                    "  HunkApplier: shifting hunk {} line hint from {} to {} (cumulative delta={})",
+                    self.current_idx,
+                    old_start,
+                    shifted,
+                    applicable_delta
+                );
                 adjusted_hunk.old_start_line = Some(shifted);
                 &adjusted_hunk
             } else {
@@ -7200,14 +7617,24 @@ impl<'a> Iterator for HunkApplier<'a> {
         };
 
         let status = apply_hunk_to_lines(hunk_to_apply, &mut self.current_lines, self.options);
+        debug!("  HunkApplier: hunk {} application outcome: {:?}", self.current_idx, status);
 
         if let HunkApplyStatus::Applied { location, .. } = &status {
             let new_len = self.current_lines.len();
             let delta = (new_len as isize) - (old_len as isize);
             let orig_pos = hunk.old_start_line.unwrap_or(location.start_index + 1);
+            trace!(
+                "  HunkApplier: hunk {} applied at line {} (len={}), delta={}, target lines now={}",
+                self.current_idx,
+                location.start_index + 1,
+                location.length,
+                delta,
+                new_len
+            );
             self.completed_edits.push((orig_pos, delta));
             let inserted_len = (location.length as isize + delta) as usize;
             if location.start_index + inserted_len >= new_len {
+                trace!("  HunkApplier: hunk touched EOF (start={}, inserted={}, total={})", location.start_index, inserted_len, new_len);
                 self.touched_eof = true;
             }
             self.last_applied_line = Some(location.start_index + inserted_len + 1);
@@ -7270,6 +7697,12 @@ pub fn apply_patch_to_lines<T: AsRef<str>>(
     original_lines: Option<&[T]>,
     options: &ApplyOptions,
 ) -> InMemoryResult {
+    debug!(
+        "apply_patch_to_lines: patch for '{}' ({} hunks), original line count={:?}",
+        patch.file_path.display(),
+        patch.hunks.len(),
+        original_lines.map(|l| l.len())
+    );
     apply_patch_to_lines_internal(patch, original_lines, options, true)
 }
 
@@ -7419,11 +7852,23 @@ pub fn try_apply_patch_to_lines<T: AsRef<str>>(
     original_lines: Option<&[T]>,
     options: &ApplyOptions,
 ) -> Result<InMemoryResult, StrictApplyError> {
-    // This line was already correct
+    debug!(
+        "try_apply_patch_to_lines: strictly applying patch for '{}'",
+        patch.file_path.display()
+    );
     let result = apply_patch_to_lines(patch, original_lines, options);
     if result.report.all_applied_cleanly() {
+        debug!(
+            "try_apply_patch_to_lines: all hunks applied cleanly for '{}'",
+            patch.file_path.display()
+        );
         Ok(result)
     } else {
+        warn!(
+            "try_apply_patch_to_lines: partial apply for '{}' ({} failures)",
+            patch.file_path.display(),
+            result.report.failure_count()
+        );
         Err(StrictApplyError::PartialApply {
             report: result.report,
         })
@@ -7491,6 +7936,12 @@ pub fn apply_patch_to_content(
     original_content: Option<&str>,
     options: &ApplyOptions,
 ) -> InMemoryResult {
+    debug!(
+        "apply_patch_to_content: patch for '{}' ({} hunks), original content: {} bytes",
+        patch.file_path.display(),
+        patch.hunks.len(),
+        original_content.map_or(0, |s| s.len())
+    );
     let original_lines: Option<Vec<String>> =
         original_content.map(|c| c.lines().map(String::from).collect());
     let original_ends_with_newline = original_content.is_none_or(|s| {
@@ -7583,11 +8034,23 @@ pub fn try_apply_patch_to_content(
     original_content: Option<&str>,
     options: &ApplyOptions,
 ) -> Result<InMemoryResult, StrictApplyError> {
-    // This line was already correct
+    debug!(
+        "try_apply_patch_to_content: strictly applying patch for '{}' in-memory",
+        patch.file_path.display()
+    );
     let result = apply_patch_to_content(patch, original_content, options);
     if result.report.all_applied_cleanly() {
+        debug!(
+            "try_apply_patch_to_content: all hunks applied cleanly for '{}'",
+            patch.file_path.display()
+        );
         Ok(result)
     } else {
+        warn!(
+            "try_apply_patch_to_content: partial apply for '{}' ({} failures)",
+            patch.file_path.display(),
+            result.report.failure_count()
+        );
         Err(StrictApplyError::PartialApply {
             report: result.report,
         })
@@ -7676,15 +8139,34 @@ pub fn patch_content_str(
     original_content: Option<&str>,
     options: &ApplyOptions,
 ) -> Result<String, OneShotError> {
+    debug!(
+        "patch_content_str: parsing diff ({} bytes) and applying to content ({:?} bytes)",
+        diff_content.len(),
+        original_content.map(|s| s.len())
+    );
     let mut patches = parse_auto(diff_content)?;
     if patches.is_empty() {
+        warn!("patch_content_str: no patches found in input");
         return Err(OneShotError::NoPatchesFound);
     }
     if patches.len() > 1 {
+        warn!(
+            "patch_content_str: expected exactly 1 patch, but found {}",
+            patches.len()
+        );
         return Err(OneShotError::MultiplePatchesFound(patches.len()));
     }
     let patch = patches.remove(0);
+    debug!(
+        "patch_content_str: applying single patch for '{}' ({} hunk(s))",
+        patch.file_path.display(),
+        patch.hunks.len()
+    );
     let result = try_apply_patch_to_content(&patch, original_content, options)?;
+    debug!(
+        "patch_content_str: application succeeded. Result content length: {} bytes",
+        result.new_content.len()
+    );
     Ok(result.new_content)
 }
 
@@ -7712,6 +8194,13 @@ fn adjust_indentation(line: &str, hunk_indent: &str, target_indent: &str) -> Str
     }
 
     let line_indent = get_indent(line);
+    trace!(
+        "adjust_indentation: line='{}', hunk_indent='{}', target_indent='{}', line_indent='{}'",
+        line.escape_debug(),
+        hunk_indent.escape_debug(),
+        target_indent.escape_debug(),
+        line_indent.escape_debug()
+    );
 
     // Check for pure spaces to pure tabs translation (or vice versa)
     if !hunk_indent.is_empty() && !target_indent.is_empty() {
@@ -7734,18 +8223,20 @@ fn adjust_indentation(line: &str, hunk_indent: &str, target_indent: &str) -> Str
 
                 let target_tabs = target_indent.len();
 
-                if line_tabs >= hunk_tabs {
+                let res = if line_tabs >= hunk_tabs {
                     let new_tabs = target_tabs + (line_tabs - hunk_tabs);
                     let new_indent =
                         format!("{}{}", "\t".repeat(new_tabs), " ".repeat(line_spaces));
-                    return format!("{}{}", new_indent, &line[line_indent.len()..]);
+                    format!("{}{}", new_indent, &line[line_indent.len()..])
                 } else {
                     let outdent = hunk_tabs - line_tabs;
                     let new_tabs = target_tabs.saturating_sub(outdent);
                     let new_indent =
                         format!("{}{}", "\t".repeat(new_tabs), " ".repeat(line_spaces));
-                    return format!("{}{}", new_indent, &line[line_indent.len()..]);
-                }
+                    format!("{}{}", new_indent, &line[line_indent.len()..])
+                };
+                trace!("  adjust_indentation: translated spaces to tabs (spaces_per_tab={}): '{}'", spaces_per_tab, res.escape_debug());
+                return res;
             }
         }
 
@@ -7767,23 +8258,27 @@ fn adjust_indentation(line: &str, hunk_indent: &str, target_indent: &str) -> Str
 
                 let target_spaces = target_indent.len();
 
-                if line_tabs >= hunk_tabs {
+                let res = if line_tabs >= hunk_tabs {
                     let new_spaces = target_spaces + (line_tabs - hunk_tabs) * spaces_per_tab;
                     let new_indent = " ".repeat(new_spaces);
-                    return format!("{}{}", new_indent, &line[line_indent.len()..]);
+                    format!("{}{}", new_indent, &line[line_indent.len()..])
                 } else {
                     let outdent_spaces = (hunk_tabs - line_tabs) * spaces_per_tab;
                     let new_spaces = target_spaces.saturating_sub(outdent_spaces);
                     let new_indent = " ".repeat(new_spaces);
-                    return format!("{}{}", new_indent, &line[line_indent.len()..]);
-                }
+                    format!("{}{}", new_indent, &line[line_indent.len()..])
+                };
+                trace!("  adjust_indentation: translated tabs to spaces (spaces_per_tab={}): '{}'", spaces_per_tab, res.escape_debug());
+                return res;
             }
         }
     }
 
     // If the line starts with the hunk's indentation, we can simply replace it with the target's indentation.
     if let Some(stripped) = line.strip_prefix(hunk_indent) {
-        return format!("{}{}", target_indent, stripped);
+        let res = format!("{}{}", target_indent, stripped);
+        trace!("  adjust_indentation: replaced prefix matching hunk indent: '{}'", res.escape_debug());
+        return res;
     }
 
     // Fallback for lines that are outdented relative to the hunk's context.
@@ -7797,12 +8292,17 @@ fn adjust_indentation(line: &str, hunk_indent: &str, target_indent: &str) -> Str
                 break;
             }
         }
-        format!("{}{}", new_indent, &line[line_indent.len()..])
+        let res = format!("{}{}", new_indent, &line[line_indent.len()..]);
+        trace!("  adjust_indentation: outdented fallback adjustment: '{}'", res.escape_debug());
+        res
     } else if let Some(diff) = target_indent.strip_prefix(hunk_indent) {
         // Target is more indented than hunk.
         // We need to add `diff` to the start of `line`.
-        format!("{}{}", diff, line)
+        let res = format!("{}{}", diff, line);
+        trace!("  adjust_indentation: indented fallback adjustment: '{}'", res.escape_debug());
+        res
     } else {
+        trace!("  adjust_indentation: no adjustment applied: '{}'", line.escape_debug());
         line.to_string()
     }
 }
@@ -7820,6 +8320,238 @@ fn get_indent(line: &str) -> &str {
     &line[..line.len() - line.trim_start().len()]
 }
 
+/// Extracts the primary definition or invocation identifier from a line of code.
+///
+/// Recognizes function, method, struct, class, enum, trait, interface, and type definitions
+/// across Rust, Python, Go, JavaScript/TypeScript, C/C++, Java, C#, and other languages,
+/// as well as function and method call expressions preceding parentheses.
+///
+/// Strictly ignores comments, string literals, and control-flow keywords (`if`, `while`, etc.).
+fn extract_primary_identifier(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // 1. Strictly ignore comments and documentation
+    if trimmed.starts_with("//")
+        || trimmed.starts_with("/*")
+        || trimmed.starts_with('*')
+        || trimmed.starts_with('#')
+        || trimmed.starts_with("<!--")
+        || trimmed.starts_with("--")
+        || trimmed.starts_with(';')
+        || trimmed.starts_with('%')
+    {
+        return None;
+    }
+
+    // 2. Definition patterns across languages
+    // Strip leading decorators/attributes like `@decorator`
+    let mut text = trimmed;
+    while text.starts_with('@') {
+        if let Some(pos) = text.find(char::is_whitespace) {
+            text = text[pos..].trim_start();
+        } else {
+            return None;
+        }
+    }
+
+    let mut words = text.split_whitespace().peekable();
+    while let Some(word) = words.next() {
+        let clean_word = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+
+        // Skip language visibility modifiers, async/const qualifiers, and pub(...) scopes
+        if clean_word.starts_with("pub")
+            || matches!(
+            clean_word,
+                "public"
+                    | "private"
+                    | "protected"
+                    | "internal"
+                    | "static"
+                    | "final"
+                    | "abstract"
+                    | "virtual"
+                    | "override"
+                    | "sealed"
+                | "async"
+                | "unsafe"
+                | "extern"
+                | "default"
+                    | "inline"
+                    | "explicit"
+                    | "constexpr"
+                    | "consteval"
+                    | "friend"
+                    | "export"
+                    | "suspend"
+                    | "readonly"
+                    | "mut"
+            )
+        {
+            // If modifier has parentheses (e.g. pub(crate) or extern "C"), skip consumed tokens
+            if word.contains('(') && !word.contains(')') {
+                while let Some(next_tok) = words.next() {
+                    if next_tok.contains(')') {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Definition keywords
+        if matches!(
+            clean_word,
+            "fn" | "def" | "function" | "func" | "fun" | "class" | "struct" | "enum" | "trait" | "interface" | "union" | "type"
+        ) {
+            // Check for Go receiver: func (s *Server) Name(...)
+            if clean_word == "func" {
+                if let Some(&next_tok) = words.peek() {
+                    if next_tok.starts_with('(') {
+                        words.next();
+                        if !next_tok.contains(')') {
+                            while let Some(tok) = words.next() {
+                                if tok.contains(')') {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(name_word) = words.next() {
+                let name = name_word
+                    .split(['(', '<', ':', '{', ' ', '[', ';', '='])
+                    .next()
+                    .unwrap_or(name_word);
+                let clean_name = name.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                if !clean_name.is_empty() && clean_name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_') {
+                    trace!("extract_primary_identifier: found definition identifier '{}' in '{}'", clean_name, trimmed);
+                    return Some(clean_name);
+                }
+            }
+        }
+        break;
+    }
+
+    // 3. Call patterns and method invocations: identifier immediately preceding '('
+    let mut search_start = 0;
+    while let Some(rel_paren) = trimmed[search_start..].find('(') {
+        let paren_pos = search_start + rel_paren;
+        let before_paren = &trimmed[..paren_pos];
+        let ident = before_paren
+            .rsplit(|c: char| !c.is_alphanumeric() && c != '_')
+            .next()
+            .unwrap_or("");
+
+        if !ident.is_empty() && ident.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_') {
+            if matches!(
+                ident,
+                "if" | "while"
+                    | "for"
+                    | "switch"
+                    | "match"
+                    | "catch"
+                    | "return"
+                    | "typeof"
+                    | "sizeof"
+                    | "alignof"
+                    | "decltype"
+                    | "new"
+                    | "delete"
+                    | "throw"
+                    | "assert"
+                    | "let"
+                    | "var"
+                    | "const"
+                    | "pub"
+            ) {
+                search_start = paren_pos + 1;
+                continue;
+            }
+            trace!("extract_primary_identifier: found call identifier '{}' in '{}'", ident, trimmed);
+            return Some(ident);
+        }
+        search_start = paren_pos + 1;
+    }
+
+    None
+}
+
+/// Returns whether a line represents a declaration/definition header.
+fn is_definition(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    // Ignore comments
+    if trimmed.starts_with("//")
+        || trimmed.starts_with("/*")
+        || trimmed.starts_with('*')
+        || trimmed.starts_with('#')
+        || trimmed.starts_with("<!--")
+        || trimmed.starts_with("--")
+        || trimmed.starts_with(';')
+        || trimmed.starts_with('%')
+    {
+        return false;
+    }
+
+    let mut words = trimmed.split_whitespace();
+    while let Some(word) = words.next() {
+        let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+        if clean.starts_with("pub")
+            || matches!(
+                clean,
+                "public"
+                    | "private"
+                    | "protected"
+                    | "internal"
+                    | "static"
+                    | "final"
+                    | "abstract"
+                    | "virtual"
+                    | "override"
+                    | "sealed"
+                    | "async"
+                    | "unsafe"
+                    | "extern"
+                    | "default"
+                    | "inline"
+                    | "explicit"
+                    | "constexpr"
+                    | "export"
+                    | "suspend"
+                    | "readonly"
+                    | "mut"
+            )
+        {
+            if word.contains('(') && !word.contains(')') {
+                while let Some(next_tok) = words.next() {
+                    if next_tok.contains(')') {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+
+        let res = matches!(
+            clean,
+            "fn" | "def" | "function" | "func" | "fun" | "class" | "struct" | "enum" | "trait" | "interface" | "union" | "type"
+        );
+        if res {
+            trace!("is_definition: '{}' is a definition header ({})", trimmed, clean);
+        }
+        return res;
+    }
+    false
+}
+
 /// Searches for a target line in `new_slice` that represents the same semantic statement
 /// as `old_slice` across line-break or formatting variations.
 ///
@@ -7830,7 +8562,7 @@ fn get_indent(line: &str) -> &str {
 ///
 /// * `old_slice` - The sequence of hunk match lines representing the statement.
 /// * `new_slice` - Candidate target lines in the target file window.
-/// * `has_context` - Whether `old_slice` contains context lines, requiring higher similarity.
+/// * `_has_context` - Unused flag maintained for interface compatibility.
 ///
 /// # Returns
 ///
@@ -7838,7 +8570,7 @@ fn get_indent(line: &str) -> &str {
 fn find_statement_match_in_block(
     old_slice: &[&str],
     new_slice: &[String],
-    has_context: bool,
+    _has_context: bool,
 ) -> Option<usize> {
     if old_slice.is_empty() || new_slice.is_empty() {
         return None;
@@ -7846,16 +8578,54 @@ fn find_statement_match_in_block(
     if old_slice.iter().all(|l| is_ellipsis_line(l)) {
         return None;
     }
+    trace!(
+        "find_statement_match_in_block: attempting statement alignment for {} line(s) against {} target line(s)",
+        old_slice.len(),
+        new_slice.len()
+    );
+
+    // If old_slice has multiple lines, ensure line 0 is an incomplete statement
+    // (e.g., an unclosed parameter list or wrapped expression) rather than a complete
+    // statement or block header.
+    if old_slice.len() > 1 {
+        let first_trimmed = old_slice[0].trim();
+        if first_trimmed.is_empty()
+            || first_trimmed.starts_with("//")
+            || first_trimmed.starts_with('#')
+            || first_trimmed.starts_with("/*")
+            || first_trimmed.starts_with('*')
+            || first_trimmed.starts_with("<!--")
+            || first_trimmed.ends_with('{')
+            || first_trimmed.ends_with(';')
+            || first_trimmed.ends_with('}')
+        {
+            return None;
+        }
+        if first_trimmed.ends_with(':')
+            && (first_trimmed.starts_with("def ")
+                || first_trimmed.starts_with("async def ")
+                || first_trimmed.starts_with("class ")
+                || first_trimmed.starts_with("if ")
+                || first_trimmed.starts_with("while ")
+                || first_trimmed.starts_with("for ")
+                || first_trimmed.starts_with("with "))
+        {
+            return None;
+        }
+    }
+
     let old_text = old_slice.join(" ");
     let old_trimmed = old_text.trim();
     if old_trimmed.is_empty() {
         return None;
     }
 
+    let id_old = extract_primary_identifier(old_trimmed);
+
     let mut best_match = None;
     let mut best_ratio: f32 = 0.0;
-    // Require a near-perfect match if we are replacing context lines to avoid corrupting the file.
-    let threshold: f32 = if has_context { 0.85 } else { 0.6 };
+    // Require a strong match (>= 0.80) to avoid false-positive statement hijacking.
+    let threshold: f32 = 0.80;
 
     let old_no_ws: String = old_trimmed.chars().filter(|c| !c.is_whitespace()).collect();
 
@@ -7864,6 +8634,14 @@ fn find_statement_match_in_block(
         if trimmed.is_empty() {
             continue;
         }
+
+        // If both lines contain primary identifiers (function/call name), they must match.
+        if let (Some(o_id), Some(n_id)) = (id_old, extract_primary_identifier(trimmed)) {
+            if o_id != n_id {
+                continue;
+            }
+        }
+
         let diff = similar::TextDiff::configure()
             .algorithm(similar::Algorithm::Histogram)
             .diff_words(old_trimmed, trimmed);
@@ -7873,10 +8651,32 @@ fn find_statement_match_in_block(
         let ratio_no_ws = similar::TextDiff::from_chars(&old_no_ws, &new_no_ws).ratio();
         let combined_ratio = ratio.max(ratio_no_ws);
 
+        trace!(
+            "  find_statement_match_in_block: comparing target line {} ('{}'): word_ratio={:.3}, char_ratio={:.3}, combined={:.3}",
+            idx + 1,
+            trimmed,
+            ratio,
+            ratio_no_ws,
+            combined_ratio
+        );
+
         if combined_ratio > best_ratio && combined_ratio >= threshold {
+            trace!(
+                "  Candidate statement line {} matched with ratio {:.3}: '{}'",
+                idx + 1,
+                combined_ratio,
+                trimmed
+            );
             best_ratio = combined_ratio;
             best_match = Some(idx);
         }
+    }
+    if let Some(idx) = best_match {
+        debug!(
+            "find_statement_match_in_block: aligned statement with target line {} (ratio={:.3})",
+            idx + 1,
+            best_ratio
+        );
     }
     best_match
 }
@@ -7910,6 +8710,29 @@ fn is_low_entropy_line(line: &str) -> bool {
     let trimmed = line.trim();
     matches!(trimmed, "" | "}" | "};" | "]" | "];" | ")" | ");" | "{")
 }
+ 
+/// Normalizes trailing delimiters (such as semicolons and commas) and trailing inline comments
+/// for line-by-line reconciliation when strict context diffing fails.
+fn normalize_line_delimiters(s: &str) -> String {
+    let mut trimmed = s.trim();
+    if let Some(pos) = trimmed.rfind("//") {
+        if pos > 0 && trimmed.as_bytes()[pos - 1].is_ascii_whitespace() {
+            let before = trimmed[..pos].trim_end();
+            if !before.is_empty() {
+                trimmed = before;
+            }
+        }
+    } else if let Some(pos) = trimmed.rfind('#') {
+        if pos > 0 && trimmed.as_bytes()[pos - 1].is_ascii_whitespace() {
+            let before = trimmed[..pos].trim_end();
+            if !before.is_empty() {
+                trimmed = before;
+            }
+        }
+    }
+    trimmed.trim_end_matches([';', ',']).trim_end().to_string()
+}
+
 /// Applies a single hunk to a mutable vector of lines in-place.
 ///
 /// This function provides granular control over the patching process, allowing library
@@ -7974,7 +8797,7 @@ pub fn apply_hunk_to_lines(
     target_lines: &mut Vec<String>,
     options: &ApplyOptions,
 ) -> HunkApplyStatus {
-    debug!("Applying hunk with {} lines.", hunk.lines.len());
+    debug!("apply_hunk_to_lines: applying hunk with {} line(s) against target with {} line(s)", hunk.lines.len(), target_lines.len());
     if log::log_enabled!(log::Level::Trace) {
         trace!("  Match block: {:?}", hunk.get_match_block());
         trace!("  Replace block: {:?}", hunk.get_replace_block());
@@ -7987,26 +8810,83 @@ pub fn apply_hunk_to_lines(
     let finder = DefaultHunkFinder::new(options);
     let candidates = match finder.find_candidate_locations(hunk, target_lines) {
         Ok(c) => c,
-        Err(error) => return HunkApplyStatus::Failed(error),
+        Err(error) => {
+            warn!("  Hunk location search failed: {}", error);
+            return HunkApplyStatus::Failed(error);
+        }
     };
+
+    let candidate_count = candidates.len();
+    debug!(
+        "  Found {} candidate location(s) for hunk. Testing sequentially...",
+        candidate_count
+    );
 
     let mut last_error = HunkApplyError::ContextNotFound;
 
-    for (location, match_type) in candidates {
-        match try_apply_hunk_at_location(hunk, target_lines, location, match_type.clone()) {
+    // --- Pass 1: Strict application across candidates ---
+    for (cand_idx, (location, match_type)) in candidates.iter().cloned().enumerate() {
+        trace!(
+            "  Evaluating candidate {}/{} at location {:?} (match_type: {:?})",
+            cand_idx + 1,
+            candidate_count,
+            location,
+            match_type
+        );
+        match try_apply_hunk_at_location(hunk, target_lines, location, match_type, options, false) {
             Ok(status) => {
+                debug!(
+                    "  Candidate {}/{} at {:?} succeeded! Hunk applied cleanly.",
+                    cand_idx + 1,
+                    candidate_count,
+                    location
+                );
                 return status;
             }
             Err(e) => {
                 debug!(
-                    "  Candidate at {:?} failed ({:?}). Trying next candidate...",
-                    location, e
+                    "  Candidate {}/{} at {:?} failed with {:?}. Backtracking...",
+                    cand_idx + 1,
+                    candidate_count,
+                    location,
+                    e
                 );
                 last_error = e;
             }
         }
     }
 
+    // --- Pass 2: Fallback lenient reconciliation only if Pass 1 (strict) failed on all candidates ---
+    debug!(
+        "  Strict application failed for all {} candidate(s). Retrying with fallback context reconciliation...",
+        candidate_count
+    );
+    for (cand_idx, (location, match_type)) in candidates.into_iter().enumerate() {
+        trace!(
+            "  Evaluating candidate {}/{} with lenient reconciliation at location {:?}",
+            cand_idx + 1,
+            candidate_count,
+            location
+        );
+        match try_apply_hunk_at_location(hunk, target_lines, location, match_type, options, true) {
+            Ok(status) => {
+                info!(
+                    "  Hunk applied cleanly at location {:?} via fallback context reconciliation.",
+                    location
+                );
+                return status;
+            }
+            Err(e) => {
+                last_error = e;
+            }
+        }
+    }
+
+    warn!(
+        "  All {} candidate location(s) exhausted. Hunk application failed with: {}",
+        candidate_count,
+        last_error
+    );
     HunkApplyStatus::Failed(last_error)
 }
 
@@ -8043,10 +8923,19 @@ fn try_apply_hunk_at_location(
     target_lines: &mut Vec<String>,
     location: HunkLocation,
     match_type: MatchType,
+    options: &ApplyOptions,
+    lenient: bool,
 ) -> Result<HunkApplyStatus, HunkApplyError> {
     debug!(
         "  Found location {:?} with match type {:?}. Applying changes.",
         location, match_type
+    );
+    debug!(
+        "  try_apply_hunk_at_location: target line {} (length {}), match_type={:?}, total target lines={}.",
+        location.start_index + 1,
+        location.length,
+        match_type,
+        target_lines.len()
     );
 
     let match_block = hunk.get_match_block();
@@ -8061,7 +8950,24 @@ fn try_apply_hunk_at_location(
         && target_slice.iter().zip(match_block.iter()).all(|(t, m)| t.trim() == m.trim());
     let is_wildcard_gap_match = has_ellipsis && !is_literal_match;
 
+    trace!(
+        "    Match block lines: {} | Total hunk lines: {}",
+        match_block.len(),
+        hunk.lines.len()
+    );
+    trace!("    Target slice to replace: {:?}", target_slice);
+    trace!(
+        "    Ellipsis flags: has_ellipsis={}, is_literal_match={}, is_wildcard_gap_match={}",
+        has_ellipsis,
+        is_literal_match,
+        is_wildcard_gap_match
+    );
+
     let final_replace_block: Vec<String> = if is_wildcard_gap_match {
+        debug!(
+            "    Applying hunk via wildcard gap reconstruction (target slice has {} lines).",
+            location.length
+        );
         // Sound N-segment wildcard reconstruction:
         // 1. Separate hunk lines into segments and identify ellipsis removal/context markers
         struct HunkSegment {
@@ -8099,6 +9005,12 @@ fn try_apply_hunk_at_location(
             match_lines: current_match,
         });
 
+        debug!(
+            "    Partitioned wildcard hunk into {} segment(s) with {} gap marker(s).",
+            hunk_segs.len(),
+            ellipsis_is_removal.len()
+        );
+
         let file_matched_slice = &target_lines[location.start_index..location.start_index + location.length];
         let mut seg_offsets = Vec::with_capacity(hunk_segs.len());
         let mut search_offset = 0;
@@ -8107,9 +9019,20 @@ fn try_apply_hunk_at_location(
             if m == 0 {
                 seg_offsets.push(0);
                 search_offset = seg.match_lines.len();
+                trace!(
+                    "      Segment 0: anchored at target slice offset 0 ({} match line(s))",
+                    seg.match_lines.len()
+                );
             } else if m == hunk_segs.len() - 1 {
                 let offset = file_matched_slice.len().saturating_sub(seg.match_lines.len());
-                seg_offsets.push(offset.max(search_offset));
+                let final_offset = offset.max(search_offset);
+                seg_offsets.push(final_offset);
+                trace!(
+                    "      Final Segment {}: anchored at target slice offset {} ({} match line(s))",
+                    m,
+                    final_offset,
+                    seg.match_lines.len()
+                );
             } else {
                 let seg_trimmed: Vec<&str> = seg.match_lines.iter().map(|s| s.trim()).collect();
                 let mut found_pos = search_offset;
@@ -8122,6 +9045,12 @@ fn try_apply_hunk_at_location(
                     }
                 }
                 seg_offsets.push(found_pos);
+                trace!(
+                    "      Intermediate Segment {}: anchored at target slice offset {} (search_offset={})",
+                    m,
+                    found_pos,
+                    search_offset
+                );
                 search_offset = found_pos + seg.match_lines.len();
             }
         }
@@ -8158,7 +9087,17 @@ fn try_apply_hunk_at_location(
                 }
             }
 
+            trace!(
+                "      Reconstructing segment {} (offset={}, match_len={}): hunk_indent='{}', target_indent='{}'",
+                m,
+                seg_offset,
+                seg_len,
+                current_hunk_indent.escape_debug(),
+                current_target_indent.escape_debug()
+            );
+
             let mut t_idx = 0;
+            let mut seg_added_count = 0;
             for line in &seg.lines {
                 if line.starts_with(' ') {
                     if t_idx < target_seg.len() {
@@ -8170,26 +9109,53 @@ fn try_apply_hunk_at_location(
                 } else if let Some(add) = line.strip_prefix('+') {
                     if !is_ellipsis_line(add) {
                         final_lines.push(adjust_indentation(add, current_hunk_indent, current_target_indent));
+                        seg_added_count += 1;
                     }
                 }
             }
+            trace!(
+                "        Segment {} emitted lines (current total: {}, added: {})",
+                m,
+                final_lines.len(),
+                seg_added_count
+            );
 
             if m < hunk_segs.len() - 1 && m < ellipsis_is_removal.len() {
                 let gap_start = seg_offset + seg_len;
                 let gap_end = seg_offsets[m + 1];
                 if !ellipsis_is_removal[m] && gap_start <= gap_end && gap_end <= file_matched_slice.len() {
+                    let gap_lines = &file_matched_slice[gap_start..gap_end];
+                    trace!(
+                        "        Preserving untouched code gap between segments {} and {} ({} line(s), offsets {}..{})",
+                        m,
+                        m + 1,
+                        gap_lines.len(),
+                        gap_start,
+                        gap_end
+                    );
                     for t_line in &file_matched_slice[gap_start..gap_end] {
                         final_lines.push(t_line.clone());
                     }
+                } else if ellipsis_is_removal[m] {
+                    trace!(
+                        "        Omitting removed gap between segments {} and {} as requested by '-' prefix",
+                        m,
+                        m + 1
+                    );
                 }
             }
         }
+        debug!(
+            "    Wildcard gap reconstruction produced {} replacement line(s) for {} target line(s).",
+            final_lines.len(),
+            location.length
+        );
         final_lines
     } else if matches!(match_type, MatchType::Exact) {
         // For Exact matches, we assume the patch's indentation is intentional and correct relative to the context.
         // We don't need dynamic adjustment because the context matched byte-for-byte.
         trace!("    Applying hunk via exact logic.");
-        hunk.get_replace_block()
+        let block: Vec<String> = hunk.get_replace_block()
             .iter()
             .map(|s| {
                 if s.trim().is_empty() {
@@ -8198,7 +9164,14 @@ fn try_apply_hunk_at_location(
                     s.to_string()
                 }
             })
-            .collect()
+            .collect();
+        debug!(
+            "    Exact match replacement generated {} line(s) to replace {} line(s).",
+            block.len(),
+            location.length
+        );
+        trace!("    Replacement block content: {:?}", block);
+        block
     } else {
         // For Fuzzy and ExactIgnoringWhitespace, indentation might mismatch or drift.
         // We use a robust reconstruction that dynamically adjusts indentation based on the
@@ -8212,7 +9185,8 @@ fn try_apply_hunk_at_location(
         let file_matched_slice =
             &target_lines[location.start_index..location.start_index + location.length];
         trace!(
-            "      File content in matched range: {:?}",
+            "      File content in matched range ({} line(s)): {:?}",
+            file_matched_slice.len(),
             file_matched_slice
         );
 
@@ -8252,16 +9226,47 @@ fn try_apply_hunk_at_location(
             }
         }
 
+        trace!(
+            "      Parsed hunk: {} match line(s), {} initial addition(s).",
+            match_lines_meta.len(),
+            initial_additions.len()
+        );
+
         // 2. Prepare text for diffing
         // We align the hunk's "old" view (match block) with the file's actual content.
         let match_block_content: Vec<&str> = hunk.get_match_block();
         let file_block_content: Vec<&str> = file_matched_slice.iter().map(|s| s.as_str()).collect();
 
-        let match_block_trimmed: Vec<&str> = match_block_content.iter().map(|s| s.trim()).collect();
-        let file_block_trimmed: Vec<&str> = file_block_content.iter().map(|s| s.trim()).collect();
+        let match_block_trimmed_storage: Vec<String>;
+        let file_block_trimmed_storage: Vec<String>;
+
+        let (match_block_trimmed, file_block_trimmed): (Vec<&str>, Vec<&str>) = if lenient {
+            match_block_trimmed_storage = match_block_content
+                .iter()
+                .map(|s| normalize_line_delimiters(s))
+                .collect();
+            file_block_trimmed_storage = file_block_content
+                .iter()
+                .map(|s| normalize_line_delimiters(s))
+                .collect();
+            (
+                match_block_trimmed_storage.iter().map(|s| s.as_str()).collect(),
+                file_block_trimmed_storage.iter().map(|s| s.as_str()).collect(),
+            )
+        } else {
+            (
+                match_block_content.iter().map(|s| s.trim()).collect(),
+                file_block_content.iter().map(|s| s.trim()).collect(),
+            )
+        };
 
         // 3. Diff
         let diff = similar::TextDiff::from_slices(&match_block_trimmed, &file_block_trimmed);
+        trace!(
+            "      Computed diff between match block and file slice: {} operation(s), similarity ratio={:.3}",
+            diff.ops().len(),
+            diff.ratio()
+        );
 
         // 4. Determine Initial Indentation Context
         // We scan the diff ops to find the first aligned line (Equal or Replace)
@@ -8330,6 +9335,12 @@ fn try_apply_hunk_at_location(
             }
         }
 
+        trace!(
+            "      Active baseline indentation: hunk='{}', target='{}'",
+            current_hunk_indent.escape_debug(),
+            current_target_indent.escape_debug()
+        );
+
         // 5. Reconstruct the block
         let mut final_lines = Vec::new();
 
@@ -8352,6 +9363,12 @@ fn try_apply_hunk_at_location(
                     new_index,
                     len,
                 } => {
+                    trace!(
+                        "      DiffOp::Equal: {} line(s) aligned (hunk old_idx={}, file new_idx={})",
+                        len,
+                        old_index,
+                        new_index
+                    );
                     // The file content matches the hunk's expectation (fuzzy or exact).
                     for i in 0..*len {
                         let old_idx = old_index + i;
@@ -8381,6 +9398,13 @@ fn try_apply_hunk_at_location(
                         if !*is_removal {
                             final_lines.push(file_matched_slice[new_idx].clone());
                         }
+                        if !additions.is_empty() {
+                            trace!(
+                                "        Appended {} addition(s) after line {}",
+                                additions.len(),
+                                old_idx
+                            );
+                        }
                         // Always insert the additions associated with this line
                         for add in additions {
                             final_lines.push(adjust_indentation(
@@ -8394,20 +9418,50 @@ fn try_apply_hunk_at_location(
                 similar::DiffOp::Delete {
                     old_index, old_len, ..
                 } => {
-                    // Lines in hunk match block that are missing in the file.
-                    // If it was a REMOVAL line, it's already gone, so we skip it.
-                    // If it was a CONTEXT line, we only restore it if we are at the EOF
-                    // and this is the trailing part of the patch (implying truncation).
-                    // Otherwise, we assume it's stale context (extra line in patch) and skip it.
+                    trace!(
+                        "      DiffOp::Delete: {} line(s) missing from target file (hunk old_idx={})",
+                        old_len,
+                        old_index
+                    );
+
                     let is_last_op = op_idx == ops.len() - 1;
+
+                    // 1. Head context cannot be missing from target file
+                    if *old_index == 0 && (0..*old_len).any(|i| {
+                        let (is_removal, _) = &match_lines_meta[*old_index + i];
+                        !is_removal && !match_block_content[*old_index + i].trim().is_empty()
+                    }) {
+                        warn!("    Fuzzy match rejected: Head context line(s) missing from target file.");
+                        return Err(HunkApplyError::ContextNotFound);
+                    }
+
+                    // 2. Tail context cannot be missing from target file (unless restoring truncated context at EOF)
+                    let is_tail = *old_index + *old_len == match_block_content.len();
+                    let is_eof_restoration = is_at_eof
+                        && is_last_op
+                        && (0..*old_len).all(|i| is_low_entropy_line(match_block_content[*old_index + i]))
+                        && location.length < match_block_content.len();
+
+                    if is_tail && !is_eof_restoration && (0..*old_len).any(|i| {
+                        let (is_removal, _) = &match_lines_meta[*old_index + i];
+                        !is_removal && !match_block_content[*old_index + i].trim().is_empty()
+                    }) {
+                        warn!("    Fuzzy match rejected: Tail context line(s) missing from target file.");
+                        return Err(HunkApplyError::ContextNotFound);
+                    }
+
                     for i in 0..*old_len {
                         let old_idx = old_index + i;
                         let (is_removal, additions) = &match_lines_meta[old_idx];
+                        let is_blank_context = match_block_content[old_idx].trim().is_empty();
+
                         if !*is_removal
-                            && is_at_eof
-                            && is_last_op
-                            && location.length < match_block_content.len()
+                            && is_eof_restoration
                         {
+                            trace!(
+                                "        Restoring truncated context line at EOF: {:?}",
+                                match_block_content[old_idx]
+                            );
                             // Restore truncated context at EOF
                             let line = match_block_content[old_idx];
                             // Adjust it to match target style? Best effort using last known.
@@ -8424,6 +9478,20 @@ fn try_apply_hunk_at_location(
                                 ));
                             }
                         } else if !*is_removal && !additions.is_empty() {
+                            if is_blank_context {
+                                trace!(
+                                    "        Re-anchoring {} addition(s) from missing blank contextline to current target location",
+                                    additions.len()
+                                );
+                                for add in additions {
+                                    final_lines.push(adjust_indentation(
+                                        add,
+                                        current_hunk_indent,
+                                        current_target_indent,
+                                    ));
+                                }
+                                continue;
+                            }
                             // Context line from hunk is missing in target, but had additions attached.
                             // Splicing additions whose anchor context does not exist causes syntax corruption.
                             warn!(
@@ -8433,6 +9501,11 @@ fn try_apply_hunk_at_location(
                                     );
                             return Err(HunkApplyError::ContextNotFound);
                         } else if *is_removal {
+                            trace!(
+                                "        Skipping deleted line {:?} from old hunk, applying its {} addition(s)",
+                                match_block_content[old_idx],
+                                additions.len()
+                            );
                             for add in additions {
                                 final_lines.push(adjust_indentation(
                                     add,
@@ -8440,12 +9513,22 @@ fn try_apply_hunk_at_location(
                                     current_target_indent,
                                 ));
                             }
+                        } else {
+                            trace!(
+                                "        Skipping stale context line missing in target: {:?}",
+                                match_block_content[old_idx]
+                            );
                         }
                     }
                 }
                 similar::DiffOp::Insert {
                     new_index, new_len, ..
                 } => {
+                    trace!(
+                        "      DiffOp::Insert: preserving {} local insertion line(s) from target file (new_idx={})",
+                        new_len,
+                        new_index
+                    );
                     // Extra lines in the file (local insertions).
                     // We preserve them.
                     for i in 0..*new_len {
@@ -8459,6 +9542,15 @@ fn try_apply_hunk_at_location(
                     new_index,
                     new_len,
                 } => {
+                    trace!(
+                        "      DiffOp::Replace: hunk lines {}..{} (len={}) vs file lines {}..{} (len={})",
+                        old_index,
+                        old_index + old_len,
+                        old_len,
+                        new_index,
+                        new_index + new_len,
+                        new_len
+                    );
                     // A region where the file differs significantly from the hunk.
                     // Try to update indentation from the first non-empty line of the replacement block
                     if *old_len > 0 && *new_len > 0 {
@@ -8484,35 +9576,109 @@ fn try_apply_hunk_at_location(
 
                     // If lengths match, we assume a 1-to-1 correspondence (e.g. whitespace changes).
                     if *old_len == *new_len {
+                        trace!("        1-to-1 length replacement. Validating similarity of modified lines...");
                         for i in 0..*old_len {
                             let old_idx = old_index + i;
                             let new_idx = new_index + i;
                             let (is_removal, additions) = &match_lines_meta[old_idx];
+                            let old_trimmed = match_block_trimmed[old_idx];
+                            let new_trimmed = file_block_trimmed[new_idx];
 
-                            // If a context line has additions attached, ensure it actually matches
-                            // the target line rather than being an entirely different code block.
-                            if !*is_removal && !additions.is_empty() {
-                                let old_trimmed = match_block_trimmed[old_idx];
-                                let new_trimmed = file_block_trimmed[new_idx];
-                                let sim_words =
-                                    similar::TextDiff::configure()
-                                        .algorithm(similar::Algorithm::Histogram)
-                                        .diff_words(old_trimmed, new_trimmed)
-                                        .ratio();
-                                let old_no_ws: String =
-                                    old_trimmed.chars().filter(|c| !c.is_whitespace()).collect();
-                                let new_no_ws: String =
-                                    new_trimmed.chars().filter(|c| !c.is_whitespace()).collect();
-                                let sim_chars =
-                                    similar::TextDiff::from_chars(&old_no_ws, &new_no_ws).ratio();
+                            // Definition mismatch check
+                            if is_definition(old_trimmed) != is_definition(new_trimmed) {
+                                warn!(
+                                    "    Fuzzy match rejected: Definition status mismatch between hunk line {:?} and target line {:?}.",
+                                    old_trimmed, new_trimmed
+                                );
+                                return Err(HunkApplyError::ContextNotFound);
+                            }
 
-                                if sim_words < 0.5 || sim_chars < 0.6 {
+                            // Primary identifier check: function/call names must match
+                            if let (Some(id_old), Some(id_new)) = (
+                                extract_primary_identifier(old_trimmed),
+                                extract_primary_identifier(new_trimmed),
+                            ) {
+                                if id_old != id_new {
                                     warn!(
-                                                "    Fuzzy match rejected: Context line {:?} differs completely from target line {:?}, cannot anchor {} addition(s).",
-                                                match_block_content[old_idx],
-                                                file_matched_slice[new_idx],
-                                                additions.len()
-                                            );
+                                        "    Fuzzy match rejected: Primary identifier mismatch ('{}' vs '{}') between hunk line {:?} and target line {:?}.",
+                                        id_old, id_new, old_trimmed, new_trimmed
+                                    );
+                                    return Err(HunkApplyError::ContextNotFound);
+                                }
+                            }
+
+                            let sim_words = similar::TextDiff::configure()
+                                .algorithm(similar::Algorithm::Histogram)
+                                .diff_words(old_trimmed, new_trimmed)
+                                .ratio();
+                            let old_no_ws: String =
+                                old_trimmed.chars().filter(|c| !c.is_whitespace()).collect();
+                            let new_no_ws: String =
+                                new_trimmed.chars().filter(|c| !c.is_whitespace()).collect();
+                            let sim_chars =
+                                similar::TextDiff::from_chars(&old_no_ws, &new_no_ws).ratio();
+
+                            trace!(
+                                "        1-to-1 replacement line validation [line {}]: is_removal={}, word_sim={:.3}, char_sim={:.3}",
+                                old_idx,
+                                is_removal,
+                                sim_words,
+                                sim_chars
+                            );
+
+                            if !*is_removal {
+                                if !additions.is_empty() {
+                                    let is_delimiter_match = lenient && {
+                                        let h_norm = normalize_line_delimiters(old_trimmed);
+                                        let t_norm = normalize_line_delimiters(new_trimmed);
+                                        !h_norm.is_empty() && h_norm == t_norm
+                                    };
+
+                                    if !is_delimiter_match && (sim_words < 0.5 || sim_chars < 0.6) {
+                                        warn!(
+                                            "    Fuzzy match rejected: Context line {:?} differs completely from target line {:?}, cannot anchor {} addition(s).",
+                                            match_block_content[old_idx],
+                                            file_matched_slice[new_idx],
+                                            additions.len()
+                                        );
+                                        return Err(HunkApplyError::ContextNotFound);
+                                    }
+                                } else if sim_words < 0.4 && sim_chars < 0.5 {
+                                    let is_delimiter_match = lenient && {
+                                        let h_norm = normalize_line_delimiters(old_trimmed);
+                                        let t_norm = normalize_line_delimiters(new_trimmed);
+                                        !h_norm.is_empty() && h_norm == t_norm
+                                    };
+
+                                    if !is_delimiter_match {
+                                    warn!(
+                                        "    Fuzzy match rejected: Context line {:?} differs completely from target line {:?}.",
+                                        match_block_content[old_idx],
+                                        file_matched_slice[new_idx]
+                                    );
+                                    return Err(HunkApplyError::ContextNotFound);
+                                }
+                                }
+                            } else {
+                                let is_delimiter_match = lenient && {
+                                    let h_norm = normalize_line_delimiters(old_trimmed);
+                                    let t_norm = normalize_line_delimiters(new_trimmed);
+                                    !h_norm.is_empty() && h_norm == t_norm
+                                };
+                                let req_threshold = if lenient {
+                                    (options.fuzz_factor * 0.5).min(0.40)
+                                } else {
+                                    options.fuzz_factor.min(0.50)
+                                };
+                                if !is_delimiter_match && sim_words < req_threshold && sim_chars < req_threshold {
+                                    warn!(
+                                        "    Fuzzy match rejected: Removal line {:?} differs from target line {:?} (sim_words={:.3}, sim_chars={:.3}, required={:.3}).",
+                                        match_block_content[old_idx],
+                                        file_matched_slice[new_idx],
+                                        sim_words,
+                                        sim_chars,
+                                        req_threshold
+                                    );
                                     return Err(HunkApplyError::ContextNotFound);
                                 }
                             }
@@ -8543,6 +9709,11 @@ fn try_apply_hunk_at_location(
                             }
                         }
                     } else {
+                        trace!(
+                            "        Multi-line replacement (hunk_len={}, target_len={}). Searching for statement alignment across line breaks...",
+                            old_len,
+                            new_len
+                        );
                         let mut has_context = false;
                         for i in 0..*old_len {
                             if !match_lines_meta[old_index + i].0 {
@@ -8559,6 +9730,11 @@ fn try_apply_hunk_at_location(
 
                         if let Some(matching_sub_idx) = match_in_new {
                             let absolute_target_match = *new_index + matching_sub_idx;
+                            debug!(
+                                "        Statement match aligned with target line {} (relative offset {})",
+                                absolute_target_match + 1,
+                                matching_sub_idx
+                            );
                             for line in &file_matched_slice[*new_index..absolute_target_match] {
                                 final_lines.push(line.clone());
                             }
@@ -8595,28 +9771,79 @@ fn try_apply_hunk_at_location(
                                 final_lines.push(line.clone());
                             }
                         } else {
-                            // Heuristic: If the hunk region contains ANY context lines, we assume
-                            // the file content is a modified version of that context, so we KEEP it.
-                            // If the hunk region is PURELY removals, we assume the file content
-                            // is what needs to be removed, so we DROP it.
+                            trace!(
+                                "        No single statement alignment found (has_context={}). Using block fallback heuristic.",
+                                has_context
+                            );
+
+                            let has_substantive_context = (0..*old_len).any(|i| {
+                                let (is_removal, _) = &match_lines_meta[old_index + i];
+                                !is_removal && !match_block_content[old_index + i].trim().is_empty()
+                            });
+
+                            // 1. Head context cannot be unaligned in replacement
+                            if *old_index == 0 && has_substantive_context {
+                                warn!("    Fuzzy match rejected: Head context is unaligned in replacement block.");
+                                return Err(HunkApplyError::ContextNotFound);
+                            }
+
+                            // 2. Tail context cannot be unaligned in replacement
+                            if *old_index + *old_len == match_block_content.len() && has_substantive_context {
+                                warn!("    Fuzzy match rejected: Tail context is unaligned in replacement block.");
+                                return Err(HunkApplyError::ContextNotFound);
+                            }
+
+                            // 3. Definitions cannot be unaligned in replacement
+                            for i in 0..*old_len {
+                                let line = match_block_content[old_index + i];
+                                if is_definition(line) {
+                                    warn!(
+                                        "    Fuzzy match rejected: Definition {:?} is unaligned in replacement block.",
+                                        line
+                                    );
+                                    return Err(HunkApplyError::ContextNotFound);
+                                }
+                            }
+
+                            // 4. Context lines with additions attached cannot be unaligned
+                            for i in 0..*old_len {
+                                let (is_removal, additions) = &match_lines_meta[old_index + i];
+                                if !*is_removal && !additions.is_empty() && !match_block_content[old_index + i].trim().is_empty() {
+                                    let is_reconciled = lenient && {
+                                        let h_norm = normalize_line_delimiters(match_block_content[old_index + i]);
+                                        (0..*new_len).any(|j| {
+                                            let t_norm = normalize_line_delimiters(&file_matched_slice[new_index + j]);
+                                            !h_norm.is_empty() && h_norm == t_norm
+                                        })
+                                    };
+                                    if is_reconciled {
+                                        continue;
+                                    }
+                                    warn!(
+                                        "    Fuzzy match rejected: Context line {:?} was unaligned in replacement block, cannot anchor {} addition(s).",
+                                        match_block_content[old_index + i],
+                                        additions.len()
+                                    );
+                                    return Err(HunkApplyError::ContextNotFound);
+                                }
+                            }
+
+                            if !has_context {
+                                for i in 0..*old_len {
+                                    let (_, additions) = &match_lines_meta[old_index + i];
+                                    if !additions.is_empty() {
+                                        warn!(
+                                            "    Fuzzy match rejected: Removal lines were unaligned in replacement block, cannot anchor {} addition(s).",
+                                            additions.len()
+                                        );
+                                        return Err(HunkApplyError::ContextNotFound);
+                                    }
+                                }
+                            }
 
                             if has_context {
                                 for i in 0..*new_len {
                                     final_lines.push(file_matched_slice[new_index + i].clone());
-                                }
-                            }
-
-                            // If any context line in an unaligned replacement has additions attached,
-                            // it cannot be safely anchored.
-                            for i in 0..*old_len {
-                                let (is_removal, additions) = &match_lines_meta[old_index + i];
-                                if !*is_removal && !additions.is_empty() {
-                                    warn!(
-                                            "    Fuzzy match rejected: Context line {:?} was unaligned in replacement block, cannot anchor {} addition(s).",
-                                            match_block_content[old_index + i],
-                                            additions.len()
-                                        );
-                                    return Err(HunkApplyError::ContextNotFound);
                                 }
                             }
 
@@ -8636,8 +9863,20 @@ fn try_apply_hunk_at_location(
                 }
             }
         }
+        debug!(
+            "    Robust reconstruction complete: produced {} replacement line(s) for {} target line(s).",
+            final_lines.len(),
+            location.length
+        );
         final_lines
     };
+
+    trace!(
+        "  Splicing final replacement block into target lines: range [{}..{}], replacement line count={}",
+        location.start_index,
+        location.start_index + location.length,
+        final_replace_block.len()
+    );
 
     let replaced_lines: Vec<String> = target_lines
         .splice(
@@ -8645,10 +9884,13 @@ fn try_apply_hunk_at_location(
             final_replace_block,
         )
         .collect();
-    trace!(
-        "  Successfully spliced changes into target lines. Replaced {} lines.",
-        replaced_lines.len()
+    info!(
+        "  try_apply_hunk_at_location: successfully spliced hunk at line {} (replaced {} line(s), resulting target lines={})",
+        location.start_index + 1,
+        replaced_lines.len(),
+        target_lines.len()
     );
+    trace!("    Replaced lines: {:?}", replaced_lines);
     Ok(HunkApplyStatus::Applied {
         location,
         match_type,
@@ -9075,31 +10317,35 @@ fn score_window(
         return (1.0, 1.0, ratio_lines as f64, 1.0);
     }
 
-    let ratio_words = if window.content == match_data.content {
-        1.0
-    } else {
-        similar::TextDiff::configure()
-            .algorithm(similar::Algorithm::Histogram)
-            .diff_words(window.content, &match_data.content)
-            .ratio()
-    };
+    let max_strict = 0.3 * ratio_lines as f64 + 0.70;
+    let max_loose = 0.3 * ratio_loose_lines as f64 + 0.70;
 
-    let ratio_loose_words = if window.loose_content == match_data.loose_content {
-        1.0
-    } else if window.content == window.loose_content
-        && match_data.content == match_data.loose_content
-    {
-        ratio_words
-    } else {
-        similar::TextDiff::configure()
-            .algorithm(similar::Algorithm::Histogram)
-            .diff_words(window.loose_content, &match_data.loose_content)
-            .ratio()
-    };
+    let (ratio_words, _ratio_loose_words, current_max) =
+        if max_strict <= line_score && max_loose <= line_score {
+            (0.0, 0.0, line_score)
+        } else {
+            let r_words = if window.content == match_data.content {
+                1.0
+            } else {
+                similar::TextDiff::from_words(window.content, &match_data.content).ratio()
+            };
+            let r_strict = 0.3 * ratio_lines as f64 + 0.7 * r_words as f64;
+            let c_max = r_strict.max(line_score);
 
-    let ratio_strict = 0.3 * ratio_lines as f64 + 0.7 * ratio_words as f64;
-    let ratio_loose = 0.3 * ratio_loose_lines as f64 + 0.7 * ratio_loose_words as f64;
-    let current_max = ratio_strict.max(ratio_loose).max(line_score);
+            let r_loose_words = if max_loose <= c_max {
+                0.0
+            } else if window.loose_content == match_data.loose_content {
+                1.0
+            } else if window.content == window.loose_content
+                && match_data.content == match_data.loose_content
+            {
+                r_words
+            } else {
+                similar::TextDiff::from_words(window.loose_content, &match_data.loose_content).ratio()
+            };
+            let r_loose = 0.3 * ratio_loose_lines as f64 + 0.7 * r_loose_words as f64;
+            (r_words, r_loose_words, c_max.max(r_loose))
+        };
 
     let c_w = if match_data.is_ascii && window.no_ws.is_ascii() {
         window.no_ws.len()
@@ -9129,6 +10375,15 @@ fn score_window(
     let ratio_very_loose = 0.1 * ratio_lines as f64 + 0.9 * ratio_no_ws as f64;
     let ratio = current_max.max(ratio_very_loose);
     let score = ratio;
+
+    trace!(
+        "        score_window: window_len={}, match_len={}, line_score={:.3}, ratio_lines={:.3}, final_score={:.3}",
+        window_len,
+        len,
+        line_score,
+        ratio_lines,
+        score
+    );
 
     (score, ratio, ratio_lines as f64, ratio_words as f64)
 }
@@ -9173,7 +10428,31 @@ fn compute_scored_windows(
     min_len: usize,
     max_len: usize,
 ) -> Vec<ScoredWindow> {
-    search_ranges
+    let total_candidates: usize = search_ranges
+        .iter()
+        .map(|&(start, end)| {
+            let t_len = end.saturating_sub(start);
+            (min_len..=max_len)
+                .map(|w_len| if w_len <= t_len { t_len - w_len + 1 } else { 0 })
+                .sum::<usize>()
+        })
+        .sum();
+
+    debug!(
+        "      compute_scored_windows (parallel): evaluating {} candidate window(s) across {} range(s) (window lengths {}..={})",
+        total_candidates,
+        search_ranges.len(),
+        min_len,
+        max_len
+    );
+    trace!(
+        "        Match block length: {}, Target line count: {}, Search ranges: {:?}",
+        match_pre.len,
+        target_refs.len(),
+        search_ranges
+    );
+
+    let windows: Vec<ScoredWindow> = search_ranges
         .par_iter()
         .flat_map(|&(range_start, range_end)| {
             let target_len = range_end.saturating_sub(range_start);
@@ -9197,7 +10476,23 @@ fn compute_scored_windows(
                     })
                 })
         })
-        .collect()
+        .collect();
+
+    let (best_score, best_start, best_len) = windows
+        .iter()
+        .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|w| (w.score, w.start_index, w.window_len))
+        .unwrap_or((-1.0, 0, 0));
+
+    debug!(
+        "      compute_scored_windows (parallel) complete: scored {} window(s). Best candidate score={:.3} at line {} (len={}).",
+        windows.len(),
+        best_score,
+        best_start + 1,
+        best_len
+    );
+
+    windows
 }
 
 /// Evaluates and scores candidate sliding windows across the provided search ranges sequentially.
@@ -9223,7 +10518,31 @@ fn compute_scored_windows(
     min_len: usize,
     max_len: usize,
 ) -> Vec<ScoredWindow> {
-    search_ranges
+    let total_candidates: usize = search_ranges
+        .iter()
+        .map(|&(start, end)| {
+            let t_len = end.saturating_sub(start);
+            (min_len..=max_len)
+                .map(|w_len| if w_len <= t_len { t_len - w_len + 1 } else { 0 })
+                .sum::<usize>()
+        })
+        .sum();
+
+    debug!(
+        "      compute_scored_windows (sequential): evaluating {} candidate window(s) across {} range(s) (window lengths {}..={})",
+        total_candidates,
+        search_ranges.len(),
+        min_len,
+        max_len
+    );
+    trace!(
+        "        Match block length: {}, Target line count: {}, Search ranges: {:?}",
+        match_pre.len,
+        target_refs.len(),
+        search_ranges
+    );
+
+    let windows: Vec<ScoredWindow> = search_ranges
         .iter()
         .flat_map(|&(range_start, range_end)| {
             let target_len = range_end.saturating_sub(range_start);
@@ -9246,7 +10565,23 @@ fn compute_scored_windows(
                     })
                 })
         })
-        .collect()
+        .collect();
+
+    let (best_score, best_start, best_len) = windows
+        .iter()
+        .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|w| (w.score, w.start_index, w.window_len))
+        .unwrap_or((-1.0, 0, 0));
+
+    debug!(
+        "      compute_scored_windows (sequential) complete: scored {} window(s). Best candidate score={:.3} at line {} (len={}).",
+        windows.len(),
+        best_score,
+        best_start + 1,
+        best_len
+    );
+
+    windows
 }
 
 impl<'a> DefaultHunkFinder<'a> {
@@ -9328,14 +10663,32 @@ impl<'a> DefaultHunkFinder<'a> {
     ) -> Result<Vec<(HunkLocation, MatchType)>, HunkApplyError> {
         let match_block = hunk.get_match_block();
         let min_span = hunk.required_match_span();
+        trace!(
+            "DefaultHunkFinder::find_candidate_locations: match block len={}, required_match_span={}, target lines={}",
+            match_block.len(),
+            min_span,
+            target_lines.len()
+        );
         let mut candidates =
             self.find_hunk_location_internal(&match_block, target_lines, hunk.old_start_line, hunk.new_start_line)?;
         if min_span > 0 {
+            let before = candidates.len();
             candidates.retain(|(loc, _)| loc.length >= min_span);
+            trace!(
+                "  Pruned candidates by min_span {}: {} -> {} candidate(s)",
+                min_span,
+                before,
+                candidates.len()
+            );
             if candidates.is_empty() {
+                warn!("  All candidate locations were shorter than required match span {}", min_span);
                 return Err(HunkApplyError::ContextNotFound);
             }
         }
+        trace!(
+            "DefaultHunkFinder::find_candidate_locations: returning {} candidate(s)",
+            candidates.len()
+        );
         Ok(candidates)
     }
 
@@ -9359,6 +10712,7 @@ impl<'a> DefaultHunkFinder<'a> {
         match_block: &[&str],
         target_lines: &[T],
         hunk_size: usize,
+        max_len: usize,
     ) -> Vec<(usize, usize)> {
         const MAX_ANCHOR_OCCURRENCES: usize = 5;
         const MIN_ANCHOR_LEN: usize = 5;
@@ -9366,69 +10720,159 @@ impl<'a> DefaultHunkFinder<'a> {
         const SEARCH_RADIUS_FACTOR: usize = 2;
         const MIN_SEARCH_RADIUS: usize = 15;
         const MAX_SEARCH_RADIUS: usize = 120;
+        const MAX_CANDIDATES_TO_TEST: usize = 30;
 
-        if hunk_size == 0 {
+        debug!(
+            "      find_search_ranges: analyzing {} match line(s) against {} target line(s).",
+            hunk_size,
+            target_lines.len()
+        );
+
+        if hunk_size == 0 || target_lines.is_empty() {
+            debug!("        Hunk size or target lines is 0. Returning full target range.");
             return vec![(0, target_lines.len())];
         }
 
-        // Iterate from the middle of the hunk outwards to find a good anchor line.
-        // The middle is often more stable than the edges.
         let mid = hunk_size / 2;
-        for i in 0..=mid {
-            let indices_to_check = [Some(mid + i), if i > 0 { Some(mid - i) } else { None }];
+        // 1. Rank candidate lines across the hunk by distinctiveness / entropy.
+        let mut candidates: Vec<(usize, usize)> = match_block
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, line)| {
+                let trimmed = line.trim();
+                if trimmed.len() < MIN_ANCHOR_LEN || is_low_entropy_line(trimmed) {
+                    return None;
+                }
+                if !trimmed.chars().any(|c| c.is_alphanumeric()) {
+                    return None;
+                }
+                // Score by length with a slight preference toward the middle
+                let dist = idx.abs_diff(mid);
+                let score = trimmed.len().min(80).saturating_sub(dist / 25);
+                Some((idx, score))
+            })
+            .collect();
 
-            for &line_idx_opt in &indices_to_check {
-                if let Some(line_idx) = line_idx_opt {
-                    if line_idx >= hunk_size {
-                        continue;
+        // Test highest entropy lines first
+        candidates.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let search_radius = (hunk_size * SEARCH_RADIUS_FACTOR)
+            .clamp(MIN_SEARCH_RADIUS, MAX_SEARCH_RADIUS);
+
+        trace!(
+            "        Identified {} high-entropy candidate anchor line(s) (search_radius={}, max candidates to test={})",
+            candidates.len(),
+            search_radius,
+            MAX_CANDIDATES_TO_TEST
+        );
+
+        let mut best_anchor: Option<(usize, Vec<usize>)> = None;
+
+        // 2. Evaluate candidates in order of distinctiveness
+        for (line_idx, score) in candidates.into_iter().take(MAX_CANDIDATES_TO_TEST) {
+            let anchor_line = match_block[line_idx].trim();
+            trace!(
+                "        Evaluating candidate anchor [hunk line {}] (score={}): '{}'",
+                line_idx + 1,
+                score,
+                anchor_line
+            );
+            let mut occurrences = Vec::with_capacity(MAX_ANCHOR_OCCURRENCES + 1);
+            for (idx, l) in target_lines.iter().enumerate() {
+                if l.as_ref().trim() == anchor_line {
+                    occurrences.push(idx);
+                    if occurrences.len() > MAX_ANCHOR_OCCURRENCES {
+                        break;
                     }
+                }
+            }
 
-                    let anchor_line = match_block[line_idx].trim();
-                    // Ignore short or empty lines as they are poor anchors.
-                    if anchor_line.len() < MIN_ANCHOR_LEN {
-                        continue;
-                    }
-
-                    // Find occurrences of the anchor line, stopping early if too common.
-                    let mut occurrences = Vec::with_capacity(MAX_ANCHOR_OCCURRENCES + 1);
-                    for (idx, l) in target_lines.iter().enumerate() {
-                        if l.as_ref().trim() == anchor_line {
-                            occurrences.push(idx);
-                            if occurrences.len() > MAX_ANCHOR_OCCURRENCES {
-                                break;
-                            }
-                        }
-                    }
-
-                    // If the line is unique enough, use it to create search ranges.
-                    if !occurrences.is_empty() && occurrences.len() <= MAX_ANCHOR_OCCURRENCES {
-                        debug!(
-                            "      Found good anchor line (hunk line {}) with {} occurrences.",
-                            line_idx + 1,
-                            occurrences.len(),
-                        );
-                        trace!("        Anchor text: '{}'", anchor_line);
-                        let mut ranges = Vec::with_capacity(occurrences.len());
-                        let search_radius = (hunk_size * SEARCH_RADIUS_FACTOR)
-                            .clamp(MIN_SEARCH_RADIUS, MAX_SEARCH_RADIUS);
-
-                        for &occurrence_idx in &occurrences {
-                            // Estimate where the hunk would start based on the anchor's position.
-                            let estimated_start = occurrence_idx.saturating_sub(line_idx);
-                            let start = estimated_start.saturating_sub(search_radius);
-                            let end = (estimated_start + hunk_size + search_radius)
-                                .min(target_lines.len());
-                            ranges.push((start, end));
-                        }
-                        // Merge any overlapping ranges created by nearby occurrences.
-                        return Self::merge_ranges(ranges);
-                    }
+            if occurrences.len() > MAX_ANCHOR_OCCURRENCES {
+                trace!(
+                    "          Candidate [hunk line {}] appeared >{} times in target file. Skipping as non-distinct.",
+                    line_idx + 1,
+                    MAX_ANCHOR_OCCURRENCES
+                );
+            } else if occurrences.is_empty() {
+                trace!(
+                    "          Candidate [hunk line {}] not found in target file.",
+                    line_idx + 1
+                );
+            } else {
+                let is_unique = occurrences.len() == 1;
+                trace!(
+                    "          Candidate [hunk line {}] matched at {} occurrence(s) in target: {:?}",
+                    line_idx + 1,
+                    occurrences.len(),
+                    occurrences
+                );
+                if best_anchor.as_ref().is_none_or(|b| occurrences.len() < b.1.len()) {
+                    trace!(
+                        "          Updating best anchor: hunk line {} with {} occurrence(s).",
+                        line_idx + 1,
+                        occurrences.len()
+                    );
+                    best_anchor = Some((line_idx, occurrences));
+                }
+                // Best possible anchor found. Stop immediately!
+                if is_unique {
+                    debug!(
+                        "        Unique anchor found at hunk line {} ('{}'). Short-circuiting anchor search.",
+                        line_idx + 1,
+                        anchor_line
+                    );
+                    break;
                 }
             }
         }
 
+        if let Some((line_idx, occurrences)) = best_anchor {
+            debug!(
+                "      Found anchor line (hunk line {}) with {} occurrences.",
+                line_idx + 1,
+                occurrences.len(),
+            );
+            trace!("        Anchor text: '{}'", match_block[line_idx].trim());
+            let mut ranges = Vec::with_capacity(occurrences.len());
+            for &occurrence_idx in &occurrences {
+                let estimated_start = occurrence_idx.saturating_sub(line_idx);
+                let start = estimated_start.saturating_sub(search_radius);
+                let end = (estimated_start + max_len + search_radius).min(target_lines.len());
+                trace!(
+                    "        Occurrence at target line {}: window estimated [{}..{}] (search radius +/-{})",
+                    occurrence_idx + 1,
+                    start + 1,
+                    end,
+                    search_radius
+                );
+                ranges.push((start, end));
+            }
+            trace!("        Raw ranges before merging: {:?}", ranges);
+            let merged = Self::merge_ranges(ranges);
+            let total_search_lines: usize = merged.iter().map(|(s, e)| e.saturating_sub(*s)).sum();
+            let reduction_pct = if !target_lines.is_empty() {
+                100.0 * (1.0 - (total_search_lines as f64 / target_lines.len() as f64))
+            } else {
+                0.0
+            };
+            debug!(
+                "      Search ranges merged: {} disjoint range(s) covering {}/{} line(s) ({:.1}% pruned): {:?}",
+                merged.len(),
+                total_search_lines,
+                target_lines.len(),
+                reduction_pct,
+                merged
+            );
+            return merged;
+        }
+
         // If no good anchor was found, we must search the entire file.
-        debug!("      No suitable anchor line found. Falling back to full file scan.");
+        debug!(
+            "      No suitable anchor line found with <= {} occurrences. Falling back to full file scan (0..{}).",
+            MAX_ANCHOR_OCCURRENCES,
+            target_lines.len()
+        );
+        trace!("        Full file scan range: [0..{}]", target_lines.len());
         vec![(0, target_lines.len())]
     }
 
@@ -9538,6 +10982,12 @@ impl<'a> DefaultHunkFinder<'a> {
         }
 
         let match_has_entropy = match_block.iter().any(|l| !is_low_entropy_line(l));
+        trace!(
+            "  find_hunk_location_internal: match_block has {} lines (entropy={}), target has {} lines",
+            match_block.len(),
+            match_has_entropy,
+            target_lines.len()
+        );
 
         trace!(
             "  find_hunk_location_internal called for a hunk with {} lines to match against {} target lines.",
@@ -9548,7 +10998,7 @@ impl<'a> DefaultHunkFinder<'a> {
         if match_block.is_empty() {
             trace!("    Match block is empty (pure addition).");
             if target_lines.is_empty() {
-                trace!("    Target is empty, match successful at (0, 0).");
+                debug!("    Pure addition into empty target file: match at (0, 0).");
                 return Ok(vec![(
                     HunkLocation {
                         start_index: 0,
@@ -9562,7 +11012,7 @@ impl<'a> DefaultHunkFinder<'a> {
             match old_start_line {
                 // Line 0 on an existing non-empty file is a file creation conflict.
                 Some(0) => {
-                    trace!("    Target is not empty for file creation (line 0). Match failed.");
+                    warn!("    Target is not empty for file creation (line 0). Match failed.");
                     return Err(HunkApplyError::ContextNotFound);
                 }
                 // Line number at or beyond EOF indicates an append to the end of the file.
@@ -9600,7 +11050,7 @@ impl<'a> DefaultHunkFinder<'a> {
                 }
                 // No line number provided (e.g. unanchored conflict marker with 0 context).
                 None => {
-                    trace!("    Pure addition has no line number hint and target is not empty. Match failed.");
+                    warn!("    Pure addition has no line number hint and target is not empty. Match failed.");
                     return Err(HunkApplyError::ContextNotFound);
                 }
             }
@@ -9608,7 +11058,7 @@ impl<'a> DefaultHunkFinder<'a> {
 
         // --- STRATEGY 1: Exact Match ---
         // The fastest and most reliable method.
-        trace!("    Attempting exact match for hunk...");
+        trace!("    Attempting exact match for hunk (match block has {} line(s))...", match_block.len());
         {
             let result = if match_block.len() <= target_lines.len() {
                 let iter = target_lines
@@ -9633,7 +11083,7 @@ impl<'a> DefaultHunkFinder<'a> {
 
             match result {
                 Ok(Some(index)) => {
-                    debug!("    Found unique exact match at index {}.", index);
+                    debug!("    Strategy 1 (Exact): found unique exact match at index {}.", index);
                     return Ok(vec![(
                         HunkLocation {
                             start_index: index,
@@ -9642,8 +11092,13 @@ impl<'a> DefaultHunkFinder<'a> {
                         MatchType::Exact,
                     )]);
                 }
-                Ok(None) => {} // No exact matches, continue to next strategy.
-                Err(matches) => return Err(HunkApplyError::AmbiguousExactMatch(matches)),
+                Ok(None) => {
+                    trace!("    Strategy 1 (Exact): no exact match found.");
+                }
+                Err(matches) => {
+                    warn!("    Strategy 1 (Exact): ambiguous match at indices {:?}", matches);
+                    return Err(HunkApplyError::AmbiguousExactMatch(matches));
+                }
             }
         }
 
@@ -9654,7 +11109,7 @@ impl<'a> DefaultHunkFinder<'a> {
 
         // --- STRATEGY 2: Exact Match (Ignoring Trailing Whitespace) ---
         // Handles minor formatting differences.
-        trace!("    Attempting exact match (ignoring trailing whitespace)...");
+        trace!("    Attempting exact match (ignoring trailing whitespace) for hunk (match block has {} line(s))...", match_block.len());
         {
             let match_stripped: Vec<_> = match_block.iter().map(|s| s.trim_end()).collect();
             let result = if match_block.len() <= target_lines.len() {
@@ -9692,8 +11147,13 @@ impl<'a> DefaultHunkFinder<'a> {
                         MatchType::ExactIgnoringWhitespace,
                     )]);
                 }
-                Ok(None) => {} // No matches, continue.
-                Err(matches) => return Err(HunkApplyError::AmbiguousExactMatch(matches)),
+                Ok(None) => {
+                    trace!("    Strategy 2 (Whitespace-insensitive): no match found.");
+                }
+                Err(matches) => {
+                    warn!("    Strategy 2 (Whitespace-insensitive): ambiguous match at indices {:?}", matches);
+                    return Err(HunkApplyError::AmbiguousExactMatch(matches));
+                }
             }
         }
 
@@ -9703,8 +11163,9 @@ impl<'a> DefaultHunkFinder<'a> {
         // slightly larger or smaller than the patch's context. This handles cases
         // where lines have been added or removed near the patch location.
         if self.options.fuzz_factor > 0.0 && !match_block.is_empty() {
-            trace!(
-                "    Exact matches failed. Attempting flexible fuzzy match (threshold={:.2})...",
+            debug!(
+                "    Strategy 3 (Fuzzy): beginning flexible window fuzzy search (threshold={:.2}, match block len={})",
+                self.options.fuzz_factor,
                 self.options.fuzz_factor
             );
             if log::log_enabled!(log::Level::Trace) {
@@ -9740,7 +11201,7 @@ impl<'a> DefaultHunkFinder<'a> {
             );
 
             // Performance heuristic: narrow down the search space using anchor lines.
-            let search_ranges = Self::find_search_ranges(match_block, &target_refs, len);
+            let search_ranges = Self::find_search_ranges(match_block, &target_refs, len, max_len);
             trace!("    Using search ranges: {:?}", search_ranges);
 
             let pre = precompute_target(&target_refs);
@@ -9832,6 +11293,11 @@ impl<'a> DefaultHunkFinder<'a> {
                 .map(|w| (w.score, w.start_index, w.window_len))
                 .collect();
             passing.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            debug!(
+                "    Strategy 3 (Fuzzy): {} window(s) met threshold {:.2}",
+                passing.len(),
+                threshold
+            );
 
             if !passing.is_empty() {
                 let mut candidates: Vec<(HunkLocation, MatchType)> = Vec::new();
@@ -9847,6 +11313,12 @@ impl<'a> DefaultHunkFinder<'a> {
                 }
 
                 if top_candidates.len() > 1 {
+                    trace!(
+                        "    Tie in top fuzzy score ({:.3}) across {} candidate locations: {:?}",
+                        top_score,
+                        top_candidates.len(),
+                        top_candidates
+                    );
                     let iter = top_candidates.iter().map(|&(start, _)| start);
                     match Self::tie_break_with_line_number(
                         iter,
@@ -9860,6 +11332,12 @@ impl<'a> DefaultHunkFinder<'a> {
                                 .find(|&&(s, _)| s == best_start)
                                 .unwrap()
                                 .1;
+                            debug!(
+                                "    Tie broken using line number hint ({:?}): selected line {} (window len {})",
+                                old_start_line,
+                                best_start + 1,
+                                best_len
+                            );
                             candidates.push((
                                 HunkLocation {
                                     start_index: best_start,
@@ -9870,6 +11348,7 @@ impl<'a> DefaultHunkFinder<'a> {
                         }
                         Ok(None) => unreachable!(),
                         Err(matches) => {
+                            warn!("    Fuzzy match ambiguity could not be resolved at lines {:?}", matches);
                             let locs = top_candidates
                                 .into_iter()
                                 .filter(|&(s, _)| matches.contains(&s))
@@ -9879,6 +11358,12 @@ impl<'a> DefaultHunkFinder<'a> {
                     }
                 } else {
                     let (start, len) = top_candidates[0];
+                    debug!(
+                        "    Top fuzzy candidate: start line {} (len={}, score={:.3})",
+                        start + 1,
+                        len,
+                        top_score
+                    );
                     candidates.push((
                         HunkLocation {
                             start_index: start,
@@ -9915,7 +11400,7 @@ impl<'a> DefaultHunkFinder<'a> {
                 }
                 return Ok(candidates);
             } else if best_ratio_at_best_score >= 0.0 {
-                // Did not meet threshold
+                warn!("    Fuzzy match failed: best score was below threshold");
                 let (start, len) = potential_matches.first().copied().unwrap_or((0, 0));
                 debug!(
                     "    Fuzzy match failed: Best location (index {}, len {}) had similarity {:.3}, which is below the threshold of {:.3}.",
@@ -9946,7 +11431,7 @@ impl<'a> DefaultHunkFinder<'a> {
             && target_lines.len() < match_block.len()
             && self.options.fuzz_factor > 0.0
         {
-            trace!("    Target file is shorter than hunk. Attempting end-of-file fuzzy match...");
+            trace!("    Strategy 4: Target file ({} lines) is shorter than hunk ({} lines). Attempting end-of-file fuzzy match...", target_lines.len(), match_block.len());
             let match_stripped: Vec<&str> = match_block.iter().map(|s| s.trim_end()).collect();
             let diff = TextDiff::from_slices(&target_refs, &match_stripped);
             let ratio = diff.ratio();
@@ -10034,7 +11519,7 @@ impl<'a> DefaultHunkFinder<'a> {
             );
 
             if !has_sufficient_entropy {
-                trace!(
+                warn!(
                     "      Ambiguous {} match: Refusing to tie-break {} matches because match block has low entropy.",
                     match_type,
                     all_matches.len()
@@ -10135,13 +11620,22 @@ impl<'a> DefaultHunkFinder<'a> {
         old_start_line: Option<usize>,
         new_start_line: Option<usize>,
     ) -> Result<Vec<(HunkLocation, MatchType)>, HunkApplyError> {
+        debug!(
+            "find_wildcard_segments_location: locating {} segment(s) across {} target lines (hint={:?})",
+            segments.len(),
+            target_lines.len(),
+            old_start_line
+        );
         if segments.is_empty() {
+            warn!("find_wildcard_segments_location: empty segments slice");
             return Err(HunkApplyError::ContextNotFound);
         }
         if segments.iter().any(|seg| is_low_entropy_segment(seg)) {
+            warn!("find_wildcard_segments_location: one or more segments consist solely of low-entropy syntax");
             return Err(HunkApplyError::ContextNotFound);
         }
         if segments.len() == 1 {
+            trace!("find_wildcard_segments_location: single segment, delegating to internal finder");
             return self.find_hunk_location_internal(segments[0], target_lines, old_start_line, new_start_line);
         }
 
@@ -10149,7 +11643,7 @@ impl<'a> DefaultHunkFinder<'a> {
         let target_loose: Vec<&str> = target_lines.iter().map(|s| s.as_ref().trim()).collect();
 
         let mut segment_matches: Vec<Vec<(usize, usize)>> = Vec::with_capacity(segments.len());
-        for seg in segments {
+        for (seg_i, seg) in segments.iter().enumerate() {
             let mut matches_for_seg = Vec::new();
             if seg.len() <= target_lines.len() {
                 for (i, window) in target_lines.windows(seg.len()).enumerate() {
@@ -10174,23 +11668,34 @@ impl<'a> DefaultHunkFinder<'a> {
                     }
                 }
             }
+            trace!(
+                "  Segment {} ({} lines): found {} match candidate(s)",
+                seg_i,
+                seg.len(),
+                matches_for_seg.len()
+            );
             if matches_for_seg.is_empty() {
+                warn!("  Segment {} failed to match anywhere in target file", seg_i);
                 return Err(HunkApplyError::ContextNotFound);
             }
             if matches_for_seg.len() > 30 {
+                trace!("  Segment {} truncated from {} to 30 match candidates", seg_i, matches_for_seg.len());
                 matches_for_seg.truncate(30);
             }
             segment_matches.push(matches_for_seg);
         }
 
         let max_gap = 250.max(segments.iter().map(|s| s.len()).sum::<usize>() * 5);
+        trace!("  Wildcard maximum allowable gap between segments: {} lines", max_gap);
         let mut all_chains = Vec::new();
         let mut current_chain = Vec::with_capacity(segments.len());
         Self::collect_wildcard_chains(0, 0, max_gap, &mut current_chain, &segment_matches, &mut all_chains);
         if all_chains.is_empty() {
+            warn!("  No valid monotonic chains connecting all {} segments within gap bound ({})", segments.len(), max_gap);
             return Err(HunkApplyError::ContextNotFound);
         }
 
+        debug!("  Found {} valid segment chain(s). Sorting candidates...", all_chains.len());
         all_chains.sort_by_key(|chain| {
             let start = chain.first().unwrap().0;
             let end = chain.last().unwrap().0 + chain.last().unwrap().1;
@@ -10199,6 +11704,12 @@ impl<'a> DefaultHunkFinder<'a> {
             let line_dist = old_start_line.map(|l| (start + 1).abs_diff(l)).unwrap_or(0);
             (line_dist, gap)
         });
+
+        for (c_idx, chain) in all_chains.iter().take(5).enumerate() {
+            let start = chain.first().unwrap().0;
+            let end = chain.last().unwrap().0 + chain.last().unwrap().1;
+            trace!("    Candidate chain {}: span [{}..{}] (total length={})", c_idx, start, end, end - start);
+        }
 
         let mut candidates = Vec::new();
         for chain in all_chains {
@@ -10233,9 +11744,11 @@ impl<'a> DefaultHunkFinder<'a> {
         all_chains: &mut Vec<Vec<(usize, usize)>>,
     ) {
         if all_chains.len() >= 100 {
+            trace!("  collect_wildcard_chains: hit maximum chain limit (100)");
             return;
         }
         if seg_idx == segment_matches.len() {
+            trace!("  collect_wildcard_chains: discovered complete chain: {:?}", current);
             all_chains.push(current.clone());
             return;
         }
@@ -10289,11 +11802,16 @@ impl<'a> HunkFinder for DefaultHunkFinder<'a> {
         hunk: &Hunk,
         target_lines: &[T],
     ) -> Result<(HunkLocation, MatchType), HunkApplyError> {
+        trace!("DefaultHunkFinder::find_location: locating hunk");
         let candidates = self.find_candidate_locations(hunk, target_lines)?;
-        candidates
+        let best = candidates
             .into_iter()
             .next()
-            .ok_or(HunkApplyError::ContextNotFound)
+            .ok_or(HunkApplyError::ContextNotFound);
+        if let Ok((ref loc, ref mtype)) = best {
+            debug!("DefaultHunkFinder::find_location: best location {:?} ({:?})", loc, mtype);
+        }
+        best
     }
 }
 
@@ -10358,6 +11876,11 @@ pub fn find_hunk_location(
     target_content: &str,
     options: &ApplyOptions,
 ) -> Result<(HunkLocation, MatchType), HunkApplyError> {
+    trace!(
+        "find_hunk_location: target content {} bytes, hunk has {} lines",
+        target_content.len(),
+        hunk.lines.len()
+    );
     let target_lines: Vec<_> = target_content.lines().collect();
     find_hunk_location_in_lines(hunk, &target_lines, options)
 }
@@ -10418,6 +11941,11 @@ pub fn find_hunk_location_in_lines<T: AsRef<str> + Sync>(
     target_lines: &[T],
     options: &ApplyOptions,
 ) -> Result<(HunkLocation, MatchType), HunkApplyError> {
+    trace!(
+        "find_hunk_location_in_lines: delegating to DefaultHunkFinder (target has {} lines, hunk has {} lines)",
+        target_lines.len(),
+        hunk.lines.len()
+    );
     let finder = DefaultHunkFinder::new(options);
     finder.find_location(hunk, target_lines)
 }
@@ -10438,6 +11966,7 @@ pub fn find_hunk_location_in_lines<T: AsRef<str> + Sync>(
 fn parse_hunk_header(line: &str) -> (Option<usize>, Option<usize>) {
     // We are interested in the original file's line number, which is the first number after '-'.
     // Example: @@ -21,8 +21,8 @@
+    trace!("parse_hunk_header: parsing '{}'", line);
     let mut parts = line.split_whitespace();
     parts.next(); // skip "@@"
     let (Some(old_part), Some(new_part)) = (parts.next(), parts.next()) else {
@@ -10451,6 +11980,7 @@ fn parse_hunk_header(line: &str) -> (Option<usize>, Option<usize>) {
         .strip_prefix('+')
         .and_then(|s| s.split(',').next())
         .and_then(|s| s.parse::<usize>().ok());
+    trace!("parse_hunk_header: extracted old_start={:?}, new_start={:?}", old_line, new_line);
     (old_line, new_line)
 }
 
@@ -10469,6 +11999,11 @@ fn parse_hunk_header(line: &str) -> (Option<usize>, Option<usize>) {
 ///
 /// A formatted string containing the annotated inline diff with word-level highlights.
 pub fn format_inline_diff<T: AsRef<str>>(expected_lines: &[&str], actual_lines: &[T]) -> String {
+    trace!(
+        "format_inline_diff: comparing {} expected line(s) with {} actual line(s)",
+        expected_lines.len(),
+        actual_lines.len()
+    );
     use colored::Colorize;
     let expected_str = expected_lines.join("\n");
     let actual_refs: Vec<&str> = actual_lines.iter().map(|s| s.as_ref()).collect();
@@ -10516,6 +12051,7 @@ pub fn format_inline_diff<T: AsRef<str>>(expected_lines: &[&str], actual_lines: 
             }
         }
     }
+    debug!("format_inline_diff: formatted inline diff generated ({} bytes, {} lines)", out.len(), out.lines().count());
     out
 }
 
@@ -10541,21 +12077,41 @@ pub fn merge_three_way(
     theirs: &str,
     labels: Option<(&str, &str, &str)>,
 ) -> (String, bool) {
+    debug!(
+        "merge_three_way: starting 3-way merge (base: {} bytes / {} lines, ours: {} bytes / {} lines, theirs: {} bytes / {} lines, labels: {:?})",
+        base.len(),
+        base.lines().count(),
+        ours.len(),
+        ours.lines().count(),
+        theirs.len(),
+        theirs.lines().count(),
+        labels
+    );
     let mut merge = similar::TextMerge::from_lines(base, ours, theirs);
     let is_conflicted = merge.is_conflicted();
     if is_conflicted {
+        debug!("merge_three_way: conflict detected, formatting with Diff3 conflict style");
         merge.conflict_style(similar::ConflictStyle::Diff3);
         if let Some((base_lbl, ours_lbl, theirs_lbl)) = labels {
             merge.labels(base_lbl, ours_lbl, theirs_lbl);
         }
+    } else {
+        debug!("merge_three_way: merged cleanly without conflicts");
     }
-    (merge.to_string(), is_conflicted)
+    let res = merge.to_string();
+    info!("merge_three_way: finished 3-way merge (conflicted={}, result length: {} bytes)", is_conflicted, res.len());
+    (res, is_conflicted)
 }
 
 /// Finds close matching file paths in a target directory when a patch specifies a missing file.
 ///
 /// Uses `similar::get_close_matches` to suggest possible intended files among existing paths in `dir`.
 pub fn suggest_close_file_paths(missing_path: &Path, base_dir: &Path, limit: usize) -> Vec<PathBuf> {
+    debug!(
+        "suggest_close_file_paths: searching for candidates close to '{}' in '{}'",
+        missing_path.display(),
+        base_dir.display()
+    );
     let mut candidates = Vec::new();
     fn visit_dir(dir: &Path, base: &Path, candidates: &mut Vec<String>, depth: usize) {
         if depth > 8 || candidates.len() > 300 {
@@ -10579,6 +12135,7 @@ pub fn suggest_close_file_paths(missing_path: &Path, base_dir: &Path, limit: usi
         }
     }
     visit_dir(base_dir, base_dir, &mut candidates, 0);
+    trace!("suggest_close_file_paths: scanned {} candidate file(s) in base directory", candidates.len());
 
     let query_rel = if missing_path.is_relative() {
         missing_path
@@ -10606,5 +12163,11 @@ pub fn suggest_close_file_paths(missing_path: &Path, base_dir: &Path, limit: usi
     let cand_refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
     let matches = similar::get_close_matches(query_str, &cand_refs, limit, 0.6);
 
+    info!(
+        "suggest_close_file_paths: query '{}' yielded {} suggestion(s): {:?}",
+        query_str,
+        matches.len(),
+        matches
+    );
     matches.into_iter().map(PathBuf::from).collect()
 }

@@ -923,3 +923,45 @@ def test_python_large_scale_inline_diff():
     assert "compute_step_79" in diff
     assert "factor: float = 2.5" in diff
     assert "verbose: bool = False" in diff
+
+
+def test_python_orphan_addition_rejected_during_fuzzy_match(tmp_path: Path):
+    target_file = tmp_path / "service.py"
+    original = textwrap.dedent("""\
+        class DataService:
+            def step_1(self): pass
+            def step_2(self): pass
+            def step_3(self): pass
+            def step_4(self): pass
+            def step_5(self): pass
+            def step_6(self): pass
+            def step_7(self): pass
+            def step_8(self): pass
+    """)
+    target_file.write_text(original)
+
+    diff = textwrap.dedent("""\
+        ```diff
+        --- a/service.py
+        +++ b/service.py
+        @@ -1,9 +1,11 @@
+         class DataService:
+             def step_1(self): pass
+             def step_2(self): pass
+             def step_3(self): pass
+             def step_4(self): pass
+             def step_5(self): pass
+             def step_6(self): pass
+             def step_7(self): pass
+             def step_8(self): pass
+             def legacy_cleanup(self):
+        +        audit_log("cleaning")
+                 pass
+        ```
+    """)
+    patch = mpatch.parse_auto(diff)[0]
+    result = patch.apply_to_file(tmp_path)
+    assert result.report.all_applied_cleanly is False
+    assert result.report.has_failures is True
+    assert result.report.failures[0].error_type == "ContextNotFound"
+    assert target_file.read_text() == original
