@@ -755,9 +755,11 @@ def test_python_wildcard_similar_functions_no_false_positive():
     patched = mpatch.patch_content(diff, original=original)
     assert "audit_admin_access(req)" in patched
     assert (
-        'def handle_user(req):\n    log("request")\n    verify_token(req)\n    return format_response(req)'
-        in patched
-    )
+        "def handle_user(req):\n"
+        '    log("request")\n'
+        "    verify_token(req)\n"
+        "    return format_response(req)"
+    ) in patched
 
 
 def test_python_wildcard_empty_lines_gap_preserved():
@@ -986,7 +988,10 @@ def test_python_large_scale_inline_diff():
         for i in range(80)
     ]
     actual = [
-        f"def compute_step_{i}(val: int, factor: float = 2.5, verbose: bool = False) -> float:"
+        (
+            f"def compute_step_{i}("
+            "val: int, factor: float = 2.5, verbose: bool = False) -> float:"
+        )
         for i in range(80)
     ]
     diff = mpatch.format_inline_diff(expected, actual)
