@@ -9257,11 +9257,8 @@ fn extract_primary_identifier(line: &str) -> Option<&str> {
     // Strip leading decorators/attributes like `@decorator`
     let mut text = trimmed;
     while text.starts_with('@') {
-        if let Some(pos) = text.find(char::is_whitespace) {
-            text = text[pos..].trim_start();
-        } else {
-            return None;
-        }
+        let pos = text.find(char::is_whitespace)?;
+        text = text[pos..].trim_start();
     }
 
     let mut words = text.split_whitespace().peekable();
