@@ -10,7 +10,6 @@ use mpatch::{
     PatchError, PatchFormat, StrictApplyError, WindowLengthIter,
 };
 use std::fs;
-use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
 #[test]
@@ -13904,13 +13903,11 @@ mod readme_examples_tests {
         let patch = parse_single_patch(diff_content)?;
         let options = ApplyOptions::exact();
 
-        let mut applied_cleanly = false;
         // Returns an Err if any hunk fails to apply
         match try_apply_patch_to_content(&patch, Some(original_content), &options) {
             Ok(result) => {
                 assert_eq!(result.new_content, "fn main() { println!(\"New\"); }\n");
                 assert!(result.report.all_applied_cleanly());
-                applied_cleanly = true;
             }
             Err(StrictApplyError::PartialApply { report }) => {
                 panic!(
@@ -13920,7 +13917,6 @@ mod readme_examples_tests {
             }
             Err(e) => panic!("Hard error: {}", e),
         }
-        assert!(applied_cleanly);
 
         let failing_diff = "--- a/main.rs\n+++ b/main.rs\n@@ -1 +1 @@\n-fn main() { println!(\"Different\"); }\n+fn main() { println!(\"New\"); }\n";
         let failing_patch = parse_single_patch(failing_diff)?;
