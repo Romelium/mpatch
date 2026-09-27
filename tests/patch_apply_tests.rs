@@ -14179,3 +14179,273 @@ mod readme_examples_tests {
         );
     }
 }
+
+
+mod polyglot_language_support_tests {
+    use super::*;
+    use indoc::indoc;
+    use mpatch::{
+        apply_patch_to_file, is_ellipsis_line, is_plausible_file_path, parse_auto,
+        patch_content_str, ApplyOptions, HunkApplyError, HunkApplyStatus,
+    };
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_c_cpp_function_definition_guards_against_hijacking() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("server.c");
+        let original = indoc! {r#"
+            int calculate_total(int count, int price) {
+                return count * price;
+            }
+
+            void handle_guest_request(int req_id) {
+                log_request(req_id);
+                process_guest();
+            }
+        "#};
+        fs::write(&file_path, original).unwrap();
+
+        // Patch targeting handle_admin_request (which does not exist in target)
+        let diff = indoc! {r#"
+            --- a/server.c
+            +++ b/server.c
+            @@ -1,5 +1,6 @@
+             void handle_admin_request(int req_id) {
+                 log_request(req_id);
+            +    grant_superuser(req_id);
+                 process_guest();
+             }
+        "#};
+
+        let patches = parse_auto(diff).unwrap();
+        let res = apply_patch_to_file(&patches[0], dir.path(), ApplyOptions::new()).unwrap();
+
+        // Must reject! C function header `void handle_admin_request` is now recognized as a definition,
+        // so its absence in target prevents grant_superuser from hijacking handle_guest_request!
+        assert!(!res.report.all_applied_cleanly());
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), original);
+    }
+
+    #[test]
+    fn test_java_csharp_methods_recognized_as_definitions() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("Service.java");
+        let original = indoc! {r#"
+            public class Service {
+                public Task<Integer> computeAsync(int val) {
+                    return Task.fromResult(val * 2);
+                }
+            }
+        "#};
+        fs::write(&file_path, original).unwrap();
+
+        let diff = indoc! {r#"
+            --- a/Service.java
+            +++ b/Service.java
+            @@ -1,4 +1,5 @@
+             public class Service {
+            -    public Task<Integer> computeAsync(int val) {
+            +    public Task<Integer> computeAsync(int val, boolean fast) {
+            +        auditCall(val);
+                     return Task.fromResult(val * 2);
+                 }
+             }
+        "#};
+
+        let patches = parse_auto(diff).unwrap();
+        let res = apply_patch_to_file(&patches[0], dir.path(), ApplyOptions::new()).unwrap();
+        assert!(res.report.all_applied_cleanly());
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("public Task<Integer> computeAsync(int val, boolean fast) {"));
+        assert!(content.contains("auditCall(val);"));
+    }
+
+    #[test]
+    fn test_rust_impl_blocks_recognized_as_definitions() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("lib.rs");
+        let original = indoc! {r#"
+            pub struct Engine;
+
+            impl Engine {
+                pub fn run(&self) {}
+            }
+        "#};
+        fs::write(&file_path, original).unwrap();
+
+        let diff = indoc! {r#"
+            --- a/lib.rs
+            +++ b/lib.rs
+            @@ -3,3 +3,4 @@
+             impl Engine {
+            +    pub fn status(&self) -> bool { true }
+                 pub fn run(&self) {}
+             }
+        "#};
+
+        let patches = parse_auto(diff).unwrap();
+        let res = apply_patch_to_file(&patches[0], dir.path(), ApplyOptions::new()).unwrap();
+        assert!(res.report.all_applied_cleanly());
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("pub fn status(&self) -> bool { true }"));
+    }
+
+    #[test]
+    fn test_ruby_lua_end_treated_as_low_entropy_ambiguity_rejected() {
+        let original = indoc! {r#"
+            def method_one
+                puts "one"
+            end
+
+            def method_two
+                puts "two"
+            end
+        "#};
+
+        // Hunk matching on lone `end` without entropy
+        let diff = indoc! {r#"
+            app.rb
+            <<<<<<< SEARCH
+            end
+            =======
+            end
+            # injected comment
+            >>>>>>> REPLACE
+        "#};
+
+        let res = patch_content_str(diff, Some(original), &ApplyOptions::exact());
+        // Must reject! Multiple `end` lines in Ruby must not be ambiguously tie-broken with line hints.
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_ruby_lua_eof_truncated_end_restored() {
+        // Target file is truncated at EOF missing its closing `end`
+        let original = "def run_worker\n    perform_task\n";
+        let diff = indoc! {r#"
+            --- a/worker.rb
+            +++ b/worker.rb
+            @@ -1,3 +1,4 @@
+             def run_worker
+                 perform_task
+             end
+            +# EOF note
+        "#};
+
+        let patch = parse_auto(diff).unwrap().remove(0);
+        let res = patch_content_str(&patch.to_string(), Some(original), &ApplyOptions::new()).unwrap();
+        assert_eq!(res, "def run_worker\n    perform_task\nend\n# EOF note\n");
+    }
+
+    #[test]
+    fn test_bash_fi_done_low_entropy_guard() {
+        let original = indoc! {r#"
+            if [ "$1" = "start" ]; then
+                echo "start"
+            fi
+
+            if [ "$1" = "stop" ]; then
+                echo "stop"
+            fi
+        "#};
+
+        let diff = indoc! {r#"
+            script.sh
+            <<<<<<< SEARCH
+            fi
+            =======
+            fi
+            echo "done"
+            >>>>>>> REPLACE
+        "#};
+
+        let res = patch_content_str(diff, Some(original), &ApplyOptions::exact());
+        assert!(res.is_err(), "Multiple `fi` endings without entropy must be rejected");
+    }
+
+    #[test]
+    fn test_lisp_clojure_definition_and_bundled_parens() {
+        let original = indoc! {r#"
+            (defn process-data [items]
+              (map transform items))
+        "#};
+
+        let diff = indoc! {r#"
+            core.clj
+            <<<<<<< SEARCH
+            (defn process-data [items]
+              (map transform items))
+            =======
+            (defn process-data [items]
+              (map transform-v2 items))
+            >>>>>>> REPLACE
+        "#};
+
+        let patched = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+        assert!(patched.contains("(map transform-v2 items)"));
+    }
+
+    #[test]
+    fn test_makefile_space_indented_recipe_converted_to_tabs() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("Makefile");
+        // Target Makefile uses hard tab for recipe
+        let original = "clean:\n\trm -f app.o\n";
+        fs::write(&file_path, original).unwrap();
+
+        // AI diff adds a line using 4 spaces under unindented rule header
+        let diff = indoc! {r#"
+            --- a/Makefile
+            +++ b/Makefile
+            @@ -1,2 +1,3 @@
+             clean:
+                 rm -f app.o
+            +    rm -f app.bin
+        "#};
+
+        let patches = parse_auto(diff).unwrap();
+        let res = apply_patch_to_file(&patches[0], dir.path(), ApplyOptions::new()).unwrap();
+        assert!(res.report.all_applied_cleanly());
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        // The newly added recipe MUST start with a tab `\t`, NOT spaces!
+        assert!(content.contains("\trm -f app.bin\n"));
+        assert!(!content.contains("    rm -f app.bin"));
+    }
+
+    #[test]
+    fn test_allman_style_and_ruby_def_not_falsely_split() {
+        let original = indoc! {r#"
+            void calculate(int a, int b)
+            {
+                int c = a + b;
+                printf("%d\n", c);
+            }
+        "#};
+
+        let diff = indoc! {r#"
+            --- a/main.c
+            +++ b/main.c
+            @@ -1,5 +1,5 @@
+             void calculate(int a, int b)
+             {
+            -    int c = a + b;
+            +    int c = a * b;
+                 printf("%d\n", c);
+             }
+        "#};
+
+        let patch = parse_auto(diff).unwrap().remove(0);
+        let res = patch_content_str(&patch.to_string(), Some(original), &ApplyOptions::new()).unwrap();
+        assert!(res.contains("int c = a * b;"));
+    }
+
+    #[test]
+    fn test_fortran_and_batch_ellipsis_support() {
+        assert!(is_ellipsis_line("! ... existing code ..."));
+        assert!(is_ellipsis_line(":: ... existing batch ..."));
+        assert!(is_plausible_file_path("src/core/module.c++"));
+    }
+}

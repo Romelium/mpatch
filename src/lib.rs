@@ -4029,6 +4029,12 @@ pub fn is_ellipsis_line(line: &str) -> bool {
     } else if let Some(rest) = candidate.strip_prefix('%') {
         candidate = rest.trim_start_matches('%').trim();
         is_comment = true;
+    } else if let Some(rest) = candidate.strip_prefix('!') {
+        candidate = rest.trim_start_matches('!').trim();
+        is_comment = true;
+    } else if let Some(rest) = candidate.strip_prefix("::") {
+        candidate = rest.trim_start_matches(':').trim();
+        is_comment = true;
     } else if candidate.to_ascii_lowercase().starts_with("rem ") {
         candidate = candidate[4..].trim();
         is_comment = true;
@@ -4487,7 +4493,7 @@ pub fn is_plausible_file_path(s: &str) -> bool {
             let ext = &s[dot_pos + 1..];
             !ext.is_empty()
                 && ext.len() <= 16
-                && ext.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                && ext.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '+')
                 && ext.chars().any(|c| c.is_ascii_alphabetic())
         } else {
             false
@@ -9089,6 +9095,24 @@ fn adjust_indentation(line: &str, hunk_indent: &str, target_indent: &str) -> Str
         line_indent.escape_debug()
     );
 
+    // Fallback when hunk_indent is empty (e.g. unindented context line like rule header or def)
+    // but target file/block uses tabs (critical for Makefiles and Go):
+    if hunk_indent.is_empty() && target_indent == "\t" {
+        if line_indent.chars().all(|c| c == ' ') && !line_indent.is_empty() {
+            let tabs = (line_indent.len() + 3) / 4;
+            let new_indent = "\t".repeat(tabs);
+            return format!("{}{}", new_indent, &line[line_indent.len()..]);
+        }
+    }
+    // Fallback when hunk_indent is empty but target uses spaces and line uses tabs:
+    if hunk_indent.is_empty() && !target_indent.is_empty() && target_indent.chars().all(|c| c == ' ') {
+        if line_indent.chars().all(|c| c == '\t') && !line_indent.is_empty() {
+            let spaces = line_indent.len() * 4;
+            let new_indent = " ".repeat(spaces);
+            return format!("{}{}", new_indent, &line[line_indent.len()..]);
+        }
+    }
+
     // Check for pure spaces to pure tabs translation (or vice versa)
     if !hunk_indent.is_empty() && !target_indent.is_empty() {
         let hunk_is_spaces = hunk_indent.chars().all(|c| c == ' ');
@@ -9249,8 +9273,51 @@ fn extract_primary_identifier(line: &str) -> Option<&str> {
         || trimmed.starts_with("--")
         || trimmed.starts_with(';')
         || trimmed.starts_with('%')
+        || trimmed.starts_with('!')
     {
         return None;
+    }
+
+    // 2. Lisp definition / call extraction: e.g. (defn calculate ...) or (calculate ...)
+    if trimmed.starts_with('(') {
+        let after_paren = trimmed[1..].trim_start();
+        let first_word = after_paren
+            .split([' ', '\t', '\n', '(', '[', '{', ')'])
+            .next()
+            .unwrap_or("");
+        let clean_first = first_word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
+        if matches!(
+            clean_first,
+            "defn"
+                | "defn-"
+                | "def"
+                | "defmacro"
+                | "defmulti"
+                | "defmethod"
+                | "defprotocol"
+                | "deftype"
+                | "defrecord"
+                | "define"
+        ) {
+            let mut words = after_paren.split_whitespace();
+            words.next(); // skip defn
+            if let Some(name_word) = words.next() {
+                let name = name_word.split([' ', '(', '[', '{', ')', ']']).next().unwrap_or(name_word);
+                let clean_name = name.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
+                if !clean_name.is_empty() {
+                    trace!("extract_primary_identifier: found Lisp definition '{}' in '{}'", clean_name, trimmed);
+                    return Some(clean_name);
+                }
+            }
+        } else if !clean_first.is_empty()
+            && !matches!(
+                clean_first,
+                "if" | "let" | "when" | "cond" | "do" | "loop" | "fn" | "quote" | "set!"
+            )
+        {
+            trace!("extract_primary_identifier: found Lisp call '{}' in '{}'", clean_first, trimmed);
+            return Some(clean_first);
+        }
     }
 
     // 2. Definition patterns across languages
@@ -9259,6 +9326,13 @@ fn extract_primary_identifier(line: &str) -> Option<&str> {
     while text.starts_with('@') {
         let pos = text.find(char::is_whitespace)?;
         text = text[pos..].trim_start();
+    }
+    while text.starts_with("#[") && text.contains(']') {
+        if let Some(pos) = text.find(']') {
+            text = text[pos + 1..].trim_start();
+        } else {
+            break;
+        }
     }
 
     let mut words = text.split_whitespace().peekable();
@@ -9292,6 +9366,13 @@ fn extract_primary_identifier(line: &str) -> Option<&str> {
                     | "suspend"
                     | "readonly"
                     | "mut"
+                    | "local"
+                    | "const"
+                    | "open"
+                    | "data"
+                    | "partial"
+                    | "native"
+                    | "synchronized"
             )
         {
             // If modifier has parentheses (e.g. pub(crate) or extern "C"), skip consumed tokens
@@ -9319,7 +9400,41 @@ fn extract_primary_identifier(line: &str) -> Option<&str> {
                 | "interface"
                 | "union"
                 | "type"
+                | "impl"
+                | "module"
+                | "defp"
+                | "defmacro"
+                | "defmacrop"
+                | "defmodule"
+                | "protocol"
+                | "actor"
+                | "extension"
+                | "sub"
+                | "proc"
+                | "record"
+                | "namespace"
         ) {
+            // Check for Rust impl: impl Trait for Struct OR impl Struct
+            if clean_word == "impl" {
+                let remaining: Vec<&str> = words.by_ref().collect();
+                if let Some(for_idx) = remaining.iter().position(|&w| w == "for") {
+                    if let Some(target_word) = remaining.get(for_idx + 1) {
+                        let name = target_word.split(['<', '{', ' ']).next().unwrap_or(target_word);
+                        let clean_name = name.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                        if !clean_name.is_empty() {
+                            return Some(clean_name);
+                        }
+                    }
+                } else if let Some(target_word) = remaining.first() {
+                    let name = target_word.split(['<', '{', ' ']).next().unwrap_or(target_word);
+                    let clean_name = name.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                    if !clean_name.is_empty() {
+                        return Some(clean_name);
+                    }
+                }
+                return None;
+            }
+
             // Check for Go receiver: func (s *Server) Name(...)
             if clean_word == "func" {
                 if let Some(&next_tok) = words.peek() {
@@ -9396,6 +9511,10 @@ fn extract_primary_identifier(line: &str) -> Option<&str> {
                     | "var"
                     | "const"
                     | "pub"
+                    | "else"
+                    | "case"
+                    | "yield"
+                    | "await"
             ) {
                 search_start = paren_pos + 1;
                 continue;
@@ -9408,6 +9527,62 @@ fn extract_primary_identifier(line: &str) -> Option<&str> {
             return Some(ident);
         }
         search_start = paren_pos + 1;
+    }
+
+    // 5. Command/call invocation without parentheses (Ruby, Shell, Haskell):
+    // E.g. `render :json => data`, `puts "hello"`, `echo "hello"`, `npm install`
+    if !trimmed.contains('=') && !trimmed.contains(';') && !trimmed.contains('{') && !trimmed.contains('}') {
+        let mut words = trimmed.split_whitespace();
+        if let Some(first_word) = words.next() {
+            let clean = first_word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+            if !clean.is_empty()
+                && clean.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                && words.next().is_some()
+            {
+                if !matches!(
+                    clean,
+                    "if" | "while"
+                        | "for"
+                        | "switch"
+                        | "match"
+                        | "catch"
+                        | "return"
+                        | "typeof"
+                        | "sizeof"
+                        | "alignof"
+                        | "decltype"
+                        | "new"
+                        | "delete"
+                        | "throw"
+                        | "assert"
+                        | "let"
+                        | "var"
+                        | "const"
+                        | "pub"
+                        | "else"
+                        | "case"
+                        | "yield"
+                        | "await"
+                        | "import"
+                        | "from"
+                        | "export"
+                        | "use"
+                        | "package"
+                        | "type"
+                        | "struct"
+                        | "class"
+                        | "fn"
+                        | "def"
+                ) {
+                    trace!(
+                        "extract_primary_identifier: found non-parenthesized call identifier '{}' in '{}'",
+                        clean,
+                        trimmed
+                    );
+                    return Some(clean);
+                }
+            }
+        }
     }
 
     None
@@ -9429,11 +9604,84 @@ fn is_definition(line: &str) -> bool {
         || trimmed.starts_with("--")
         || trimmed.starts_with(';')
         || trimmed.starts_with('%')
+        || trimmed.starts_with('!')
     {
         return false;
     }
 
-    let mut words = trimmed.split_whitespace();
+    // Lisp / Clojure / Scheme definition forms: (defn ...), (def ...), etc.
+    if trimmed.starts_with('(') {
+        let after_paren = trimmed[1..].trim_start();
+        let form = after_paren
+            .split([' ', '\t', '\n', '(', '[', '{', ')'])
+            .next()
+            .unwrap_or("");
+        if matches!(
+            form,
+            "defn"
+                | "defn-"
+                | "def"
+                | "defmacro"
+                | "defmulti"
+                | "defmethod"
+                | "defprotocol"
+                | "deftype"
+                | "defrecord"
+                | "define"
+                | "defgeneric"
+                | "defstruct"
+        ) {
+            trace!("is_definition: '{}' is a Lisp definition ({})", trimmed, form);
+            return true;
+        }
+    }
+
+    // SQL DDL statements: CREATE [OR REPLACE] PROCEDURE / FUNCTION / TABLE / etc.
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("create ") || lower.starts_with("create\t") {
+        let words: Vec<&str> = lower.split_whitespace().collect();
+        for &w in &words[1..] {
+            if matches!(
+                w,
+                "table"
+                    | "procedure"
+                    | "function"
+                    | "view"
+                    | "trigger"
+                    | "index"
+                    | "schema"
+                    | "database"
+                    | "type"
+                    | "package"
+            ) {
+                trace!("is_definition: '{}' is a SQL definition ({})", trimmed, w);
+                return true;
+            }
+            if !matches!(w, "or" | "replace" | "temp" | "temporary" | "unique") {
+                break;
+            }
+        }
+    }
+
+    // Strip decorators/attributes like `@decorator` or `#[attribute]`
+    let mut text = trimmed;
+    while text.starts_with('@') {
+        if let Some(pos) = text.find(char::is_whitespace) {
+            text = text[pos..].trim_start();
+        } else {
+            break;
+        }
+    }
+    while text.starts_with("#[") && text.contains(']') {
+        if let Some(pos) = text.find(']') {
+            text = text[pos + 1..].trim_start();
+        } else {
+            break;
+        }
+    }
+
+
+    let mut words = text.split_whitespace();
     while let Some(word) = words.next() {
         let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
         if clean.starts_with("pub")
@@ -9460,6 +9708,13 @@ fn is_definition(line: &str) -> bool {
                     | "suspend"
                     | "readonly"
                     | "mut"
+                    | "local"
+                    | "const"
+                    | "open"
+                    | "data"
+                    | "partial"
+                    | "native"
+                    | "synchronized"
             )
         {
             if word.contains('(') && !word.contains(')') {
@@ -9472,7 +9727,7 @@ fn is_definition(line: &str) -> bool {
             continue;
         }
 
-        let res = matches!(
+        if matches!(
             clean,
             "fn" | "def"
                 | "function"
@@ -9485,16 +9740,72 @@ fn is_definition(line: &str) -> bool {
                 | "interface"
                 | "union"
                 | "type"
-        );
-        if res {
+        ) {
             trace!(
                 "is_definition: '{}' is a definition header ({})",
                 trimmed,
                 clean
             );
+            return true;
         }
-        return res;
+        break;
     }
+
+    // C / C++ / Java / C# function & method definitions:
+    // E.g.: `int calculate(int x, int y) {`
+    //       `public void run() {`
+    //       `Task<int> ExecuteAsync(int x)`
+    if let Some(paren_pos) = text.find('(') {
+        if text.contains(')') {
+            let before_paren = text[..paren_pos].trim();
+            if !before_paren.contains('=')
+                && !before_paren.contains('.')
+                && !before_paren.contains("->")
+            {
+                let tokens: Vec<&str> = before_paren.split_whitespace().collect();
+                if tokens.len() >= 2 {
+                    let first_clean = tokens[0].trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                    if !matches!(
+                        first_clean,
+                        "if" | "while"
+                            | "for"
+                            | "switch"
+                            | "match"
+                            | "catch"
+                            | "return"
+                            | "typeof"
+                            | "sizeof"
+                            | "alignof"
+                            | "decltype"
+                            | "new"
+                            | "delete"
+                            | "throw"
+                            | "assert"
+                            | "let"
+                            | "var"
+                            | "else"
+                            | "case"
+                            | "yield"
+                            | "await"
+                    ) {
+                        let last_token = tokens[tokens.len() - 1];
+                        let clean_name = last_token.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != ':');
+                        if !clean_name.is_empty()
+                            && clean_name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                        {
+                            trace!(
+                                "is_definition: '{}' recognized as C/C++/Java/C# style function/method definition ('{}')",
+                                trimmed,
+                                clean_name
+                            );
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     false
 }
 
@@ -9541,21 +9852,40 @@ fn find_statement_match_in_block(
             || first_trimmed.starts_with("/*")
             || first_trimmed.starts_with('*')
             || first_trimmed.starts_with("<!--")
+            || first_trimmed.starts_with("--")
+            || first_trimmed.starts_with(';')
+            || first_trimmed.starts_with('%')
+            || first_trimmed.starts_with('!')
             || first_trimmed.ends_with('{')
             || first_trimmed.ends_with(';')
             || first_trimmed.ends_with('}')
+            || first_trimmed.ends_with(':') // Python block header or YAML mapping key
         {
             return None;
         }
-        if first_trimmed.ends_with(':')
-            && (first_trimmed.starts_with("def ")
-                || first_trimmed.starts_with("async def ")
-                || first_trimmed.starts_with("class ")
-                || first_trimmed.starts_with("if ")
-                || first_trimmed.starts_with("while ")
-                || first_trimmed.starts_with("for ")
-                || first_trimmed.starts_with("with "))
-        {
+
+        // If line 0 is a definition header with balanced parentheses, it is a complete header,
+        // not a multi-line split statement (e.g., Allman style C `void foo(int x)` or Ruby `def foo(x)`).
+        if is_definition(first_trimmed) {
+            let mut open_parens: i32 = 0;
+            let mut has_parens = false;
+            for c in first_trimmed.chars() {
+                if c == '(' || c == '[' {
+                    open_parens += 1;
+                    has_parens = true;
+                } else if c == ')' || c == ']' {
+                    open_parens -= 1;
+                }
+            }
+            if has_parens && open_parens <= 0 {
+                return None;
+            }
+        }
+
+        // Check for block-opening keywords that indicate line 0 is a complete block header in Ruby/Lua/Bash
+        let lower = first_trimmed.to_ascii_lowercase();
+        let last_word = lower.split_whitespace().last().unwrap_or("");
+        if matches!(last_word, "do" | "then" | "begin" | "repeat" | "is") {
             return None;
         }
     }
@@ -9661,7 +9991,35 @@ fn is_low_entropy_segment(seg: &[&str]) -> bool {
 /// `true` if the line consists solely of low-entropy syntax tokens, `false` otherwise.
 fn is_low_entropy_line(line: &str) -> bool {
     let trimmed = line.trim();
-    let res = matches!(trimmed, "" | "}" | "};" | "]" | "];" | ")" | ");" | "{");
+    if trimmed.is_empty() {
+        return true;
+    }
+    // Only closing brackets/braces/parentheses/semicolons (handles C, Lisp, etc.)
+    if trimmed
+        .chars()
+        .all(|c| c == '}' || c == ']' || c == ')' || c == '{' || c == ';')
+    {
+        return true;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let lower_str = lower.trim_end_matches([';', '.']).trim();
+    let res = matches!(
+        lower_str,
+        "end"
+            | "fi"
+            | "done"
+            | "esac"
+            | "pass"
+            | "end if"
+            | "end loop"
+            | "end do"
+            | "end case"
+            | "end record"
+            | "end process"
+            | "end subroutine"
+            | "end function"
+            | "end module"
+    );
     if res {
         trace!("is_low_entropy_line: line '{}' is low-entropy", trimmed);
     }
@@ -9684,6 +10042,30 @@ fn normalize_line_delimiters(s: &str) -> String {
             let before = trimmed[..pos].trim_end();
             if !before.is_empty() {
                 trimmed = before;
+            }
+        }
+    } else if let Some(pos) = trimmed.rfind("--") {
+        if pos > 0 && trimmed.as_bytes()[pos - 1].is_ascii_whitespace() {
+            let before = trimmed[..pos].trim_end();
+            if !before.is_empty() {
+                trimmed = before;
+            }
+        }
+    } else if let Some(pos) = trimmed.rfind('%') {
+        if pos > 0 && trimmed.as_bytes()[pos - 1].is_ascii_whitespace() {
+            let before = trimmed[..pos].trim_end();
+            if !before.is_empty() {
+                trimmed = before;
+            }
+        }
+    } else if let Some(pos) = trimmed.rfind(';') {
+        if pos > 0 && trimmed.as_bytes()[pos - 1].is_ascii_whitespace() {
+            let after = trimmed[pos + 1..].trim();
+            if !after.is_empty() {
+                let before = trimmed[..pos].trim_end();
+                if !before.is_empty() {
+                    trimmed = before;
+                }
             }
         }
     }
@@ -10038,6 +10420,27 @@ fn try_apply_hunk_at_location(
         let mut current_hunk_indent = "";
         let mut current_target_indent = "";
 
+        // Detect if the target file/block uses tabs, even if context lines happen to be unindented:
+        if current_target_indent.is_empty() {
+            for t_line in file_matched_slice {
+                let ind = get_indent(t_line);
+                if ind.starts_with('\t') {
+                    current_target_indent = "\t";
+                    break;
+                }
+            }
+            if current_target_indent.is_empty() {
+                let start_scan = location.start_index.saturating_sub(10);
+                let end_scan = (location.start_index + location.length + 10).min(target_lines.len());
+                for t_line in &target_lines[start_scan..end_scan] {
+                    let ind = get_indent(t_line);
+                    if ind.starts_with('\t') {
+                        current_target_indent = "\t";
+                        break;
+                    }
+                }
+            }
+        }
         for m in 0..hunk_segs.len() {
             let seg = &hunk_segs[m];
             let seg_offset = seg_offsets[m];
