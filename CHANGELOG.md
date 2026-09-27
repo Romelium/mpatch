@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Python Bindings:** Exposed `mpatch.format_inline_diff` and `mpatch.merge_three_way` with full type stubs (`mpatch.pyi`).
 - **Dependencies & Similar v3.2.0:** Upgraded `similar` from `2.7.0` to `3.2.0` with `inline` feature enabled.
 - **CLI & Diagnostics:** Added Aider search/replace format detection to CLI diagnostics and benchmark suites.
-- **Diagnostics:** Added comprehensive trace and debug instrumentation across parsing, topological anchoring, candidate backtracking, and atomic patch application pipelines.
+- **Diagnostics:** Added comprehensive trace and debug instrumentation across parsing, path plausibility validation, topological anchoring, candidate backtracking, sliding window scoring, and atomic patch application pipelines.
 
 ### Performance
 - **Fuzzy Matching:** Switched word-level sequence comparisons in `score_window`, `find_statement_match_in_block`, and `try_apply_hunk_at_location` to `similar::Algorithm::Histogram`, eliminating quadratic Myers degradations on repetitive code.

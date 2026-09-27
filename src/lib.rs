@@ -2430,11 +2430,17 @@ impl Hunk {
     /// assert_eq!(hunk.get_match_block(), vec!["context", "deleted"]);
     /// ```
     pub fn get_match_block(&self) -> Vec<&str> {
-        self.lines
+        let block: Vec<&str> = self
+            .lines
             .iter()
             .filter(|l| !l.starts_with('+'))
             .map(|l| &l[1..])
-            .collect()
+            .collect();
+        trace!(
+            "Hunk::get_match_block: extracted {} match line(s)",
+            block.len()
+        );
+        block
     }
 
     /// Extracts the lines that will replace the matched block in the target file.
@@ -2463,11 +2469,17 @@ impl Hunk {
     /// assert_eq!(hunk.get_replace_block(), vec!["context", "added"]);
     /// ```
     pub fn get_replace_block(&self) -> Vec<&str> {
-        self.lines
+        let block: Vec<&str> = self
+            .lines
             .iter()
             .filter(|l| !l.starts_with('-'))
             .map(|l| &l[1..])
-            .collect()
+            .collect();
+        trace!(
+            "Hunk::get_replace_block: extracted {} replacement line(s)",
+            block.len()
+        );
+        block
     }
 
     /// Extracts the context lines from the hunk.
@@ -2494,11 +2506,17 @@ impl Hunk {
     /// assert_eq!(hunk.context_lines(), vec!["context"]);
     /// ```
     pub fn context_lines(&self) -> Vec<&str> {
-        self.lines
+        let lines: Vec<&str> = self
+            .lines
             .iter()
             .filter(|l| l.starts_with(' '))
             .map(|l| &l[1..])
-            .collect()
+            .collect();
+        trace!(
+            "Hunk::context_lines: extracted {} context line(s)",
+            lines.len()
+        );
+        lines
     }
 
     /// Extracts the added lines from the hunk.
@@ -2525,11 +2543,17 @@ impl Hunk {
     /// assert_eq!(hunk.added_lines(), vec!["added"]);
     /// ```
     pub fn added_lines(&self) -> Vec<&str> {
-        self.lines
+        let lines: Vec<&str> = self
+            .lines
             .iter()
             .filter(|l| l.starts_with('+'))
             .map(|l| &l[1..])
-            .collect()
+            .collect();
+        trace!(
+            "Hunk::added_lines: extracted {} addition line(s)",
+            lines.len()
+        );
+        lines
     }
 
     /// Extracts the removed lines from the hunk.
@@ -2556,11 +2580,17 @@ impl Hunk {
     /// assert_eq!(hunk.removed_lines(), vec!["deleted"]);
     /// ```
     pub fn removed_lines(&self) -> Vec<&str> {
-        self.lines
+        let lines: Vec<&str> = self
+            .lines
             .iter()
             .filter(|l| l.starts_with('-'))
             .map(|l| &l[1..])
-            .collect()
+            .collect();
+        trace!(
+            "Hunk::removed_lines: extracted {} removal line(s)",
+            lines.len()
+        );
+        lines
     }
 
     /// Checks if the hunk contains any effective changes (additions or deletions).
@@ -2590,7 +2620,9 @@ impl Hunk {
     /// assert!(!hunk_without_changes.has_changes());
     /// ```
     pub fn has_changes(&self) -> bool {
-        self.lines.iter().any(|l| l.starts_with(['+', '-']))
+        let changed = self.lines.iter().any(|l| l.starts_with(['+', '-']));
+        trace!("Hunk::has_changes: {}", changed);
+        changed
     }
 
     /// Returns the minimum span (in lines of `match_block`) between the first and
@@ -3105,10 +3137,17 @@ impl Patch {
     /// assert!(patch.is_creation());
     /// ````
     pub fn is_creation(&self) -> bool {
-        self.hunks.first().is_some_and(|h| {
+        let is_create = self.hunks.first().is_some_and(|h| {
             h.old_start_line == Some(0)
                 || (h.old_start_line.is_none() && h.get_match_block().is_empty())
-        })
+        });
+        trace!(
+            "Patch::is_creation for '{}': {} (first hunk old_start_line={:?})",
+            self.file_path.display(),
+            is_create,
+            self.hunks.first().and_then(|h| h.old_start_line)
+        );
+        is_create
     }
 
     /// Checks if the patch represents a full file deletion.
@@ -3139,11 +3178,18 @@ impl Patch {
     /// assert!(patch.is_deletion());
     /// ````
     pub fn is_deletion(&self) -> bool {
-        !self.hunks.is_empty()
+        let is_delete = !self.hunks.is_empty()
             && self
                 .hunks
                 .iter()
-                .all(|h| h.new_start_line == Some(0) || h.get_replace_block().is_empty())
+                .all(|h| h.new_start_line == Some(0) || h.get_replace_block().is_empty());
+        trace!(
+            "Patch::is_deletion for '{}': {} (hunk count: {})",
+            self.file_path.display(),
+            is_delete,
+            self.hunks.len()
+        );
+        is_delete
     }
 
     /// Applies this patch to a file on disk.
@@ -3167,6 +3213,11 @@ impl Patch {
         target_dir: &Path,
         options: ApplyOptions,
     ) -> Result<PatchResult, PatchError> {
+        debug!(
+            "Patch::apply_to_file: applying patch for '{}' to directory '{}'",
+            self.file_path.display(),
+            target_dir.display()
+        );
         apply_patch_to_file(self, target_dir, options)
     }
 
@@ -3192,6 +3243,11 @@ impl Patch {
         target_dir: &Path,
         options: ApplyOptions,
     ) -> Result<PatchResult, PatchError> {
+        debug!(
+            "Patch::apply_to_file_atomic: applying patch for '{}' atomically to directory '{}'",
+            self.file_path.display(),
+            target_dir.display()
+        );
         apply_patch_to_file_atomic(self, target_dir, options)
     }
 
@@ -3212,6 +3268,10 @@ impl Patch {
         original_content: Option<&str>,
         options: &ApplyOptions,
     ) -> InMemoryResult {
+        debug!(
+            "Patch::apply_to_content: applying patch for '{}' to content in-memory",
+            self.file_path.display()
+        );
         apply_patch_to_content(self, original_content, options)
     }
 }
@@ -3968,6 +4028,10 @@ pub fn is_plausible_file_path(s: &str) -> bool {
         || (s.starts_with('*') && s.ends_with('*'))
     {
         if s.len() <= 2 {
+            trace!(
+                "is_plausible_file_path: candidate '{}' too short after trimming delimiters",
+                s
+            );
             return false;
         }
         s = s[1..s.len() - 1].trim();
@@ -3995,16 +4059,28 @@ pub fn is_plausible_file_path(s: &str) -> bool {
     }
 
     if s.is_empty() || s.len() > 260 || s.ends_with('.') {
+        trace!(
+            "is_plausible_file_path: '{}' rejected (empty, length > 260, or ends with '.')",
+            s
+        );
         return false;
     }
 
     if (s.contains(":\\") || s.contains(":/"))
         && !(s.len() >= 3 && s.as_bytes()[1] == b':' && s.as_bytes()[0].is_ascii_alphabetic())
     {
+        trace!(
+            "is_plausible_file_path: '{}' rejected (invalid colon position)",
+            s
+        );
         return false;
     }
 
     if s.contains(['\0', '<', '>', '|', '?', '"', '{', '}', ';', '=', '*']) {
+        trace!(
+            "is_plausible_file_path: '{}' rejected (contains forbidden characters)",
+            s
+        );
         return false;
     }
 
@@ -4018,6 +4094,10 @@ pub fn is_plausible_file_path(s: &str) -> bool {
         || s.contains("-=")
         || s.contains("::")
     {
+        trace!(
+            "is_plausible_file_path: '{}' rejected (contains code syntax tokens)",
+            s
+        );
         return false;
     }
 
@@ -4083,6 +4163,10 @@ pub fn is_plausible_file_path(s: &str) -> bool {
         ];
         let padded = format!(" {} ", lower);
         if STOPWORDS.iter().any(|&w| padded.contains(w)) {
+            trace!(
+                "is_plausible_file_path: '{}' rejected (contains English stop word)",
+                s
+            );
             return false;
         }
         if !s.contains('.') && !s.contains('/') && !s.contains('\\') {
@@ -4166,11 +4250,20 @@ pub fn is_plausible_file_path(s: &str) -> bool {
             | ".nvmrc"
     ) || lower_filename.starts_with(".env.");
 
-    if s.contains(char::is_whitespace) {
+    let res = if s.contains(char::is_whitespace) {
         has_valid_extension || is_known_filename
     } else {
         has_slash || has_valid_extension || is_known_filename
-    }
+    };
+    trace!(
+        "is_plausible_file_path: evaluated '{}': has_slash={}, has_valid_extension={}, is_known_filename={}, result={}",
+        s,
+        has_slash,
+        has_valid_extension,
+        is_known_filename,
+        res
+    );
+    res
 }
 
 /// Extracts a plausible file path from a line preceding or introducing an Aider block.
@@ -4493,7 +4586,8 @@ pub fn detect_patch(content: &str) -> PatchFormat {
 
         if is_diff_git || is_unified_header || is_hunk_header {
             trace!(
-                "detect_patch: found unified diff signature in line: '{}'",
+                "detect_patch: found unified diff signature in line: '{}' (in_code_block={})",
+                line,
                 line
             );
             if in_code_block {
@@ -4853,6 +4947,8 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
                         "  Inferred target file path for block from preceding text: '{}'",
                         path.display()
                     );
+                } else {
+                    trace!("  No preceding target file path found for block");
                 }
                 let block_patches = parse_generic_block_lines(
                     &block_lines,
@@ -5810,18 +5906,32 @@ where
         } else if line.starts_with(['+', '-', ' ']) {
             // Only treat this as a hunk line if we're actually inside a hunk.
             if current_hunk_old_start_line.is_some() {
+                trace!(
+                    "    Hunk line [{}]: '{}'",
+                    current_hunk_lines.len() + 1,
+                    line
+                );
                 current_hunk_lines.push(line.to_string());
+            } else {
+                trace!("    Ignored diff line outside hunk: '{}'", line);
             }
         } else if line.starts_with('\\') {
             // This line only makes sense inside a hunk.
             if current_hunk_old_start_line.is_some() {
-                trace!("  Found '\\ No newline at end of file' marker.");
+                trace!(
+                    "  Found '\\ No newline at end of file' marker on line {}.",
+                    line_idx + 1
+                );
                 if let Some(last_line) = current_hunk_lines.last() {
                     if last_line.starts_with('+') || last_line.starts_with(' ') {
                         ends_with_newline_for_section = false;
                         trace!("    Recorded ends_with_newline=false for section");
+                    } else {
+                        trace!("    Marker '\\ No newline' ignored because preceding line was not '+' or ' '");
                     }
                 }
+            } else {
+                trace!("    Ignored '\\' line outside hunk: '{}'", line);
             }
         } else if is_git_header_line(line) {
             trace!("  Ignoring Git header line: '{}'", line.trim_end());
@@ -5862,9 +5972,15 @@ where
 
     // Merge patch sections for the same file.
     if unmerged_patches.is_empty() {
+        debug!("parse_patches_from_lines: completed. 0 patch sections found.");
         return Ok(vec![]);
     }
     if unmerged_patches.len() == 1 {
+        debug!(
+            "parse_patches_from_lines: completed. Single patch section for '{}' with {} hunk(s).",
+            unmerged_patches[0].file_path.display(),
+            unmerged_patches[0].hunks.len()
+        );
         return Ok(unmerged_patches);
     }
 
@@ -5998,7 +6114,11 @@ where
     }
 
     if !(has_start && has_middle_or_end) {
-        trace!("  Conflict markers incomplete or missing. No patches created.");
+        trace!(
+            "  Conflict markers incomplete or missing (has_start={}, has_middle_or_end={}). No patches created.",
+            has_start,
+            has_middle_or_end
+        );
         return Vec::new();
     }
 
@@ -6098,6 +6218,10 @@ pub fn ensure_path_is_safe(base_dir: &Path, relative_path: &Path) -> Result<Path
     );
     let base_path =
         fs::canonicalize(base_dir).map_err(|e| map_io_error(base_dir.to_path_buf(), e))?;
+    trace!(
+        "  ensure_path_is_safe: canonicalized base directory '{}'",
+        base_path.display()
+    );
 
     // Lexical check to prevent arbitrary directory creation outside base_dir
     let mut virtual_path = base_path.clone();
@@ -6136,7 +6260,9 @@ pub fn ensure_path_is_safe(base_dir: &Path, relative_path: &Path) -> Result<Path
                     }
                 }
             }
-            std::path::Component::CurDir => {}
+            std::path::Component::CurDir => {
+                trace!("    ensure_path_is_safe: CurDir (.) ignored");
+            }
             std::path::Component::RootDir | std::path::Component::Prefix(_) => {
                 warn!(
                     "Path safety violation: path '{}' contains root or prefix component outside base directory '{}'",
@@ -6465,6 +6591,11 @@ pub fn apply_patches_to_dir_atomic(
         }
 
         let original_before_patch = staged.current_content.clone();
+        trace!(
+            "  Atomic apply: applying patch to staged content for '{}' (original len: {} bytes)",
+            patch.file_path.display(),
+            original_before_patch.as_deref().map_or(0, |s| s.len())
+        );
         let in_memory_res =
             apply_patch_to_content(patch, original_before_patch.as_deref(), &options);
         if in_memory_res.report.all_applied_cleanly() {
@@ -6633,7 +6764,8 @@ pub fn apply_patches_to_dir_atomic(
 
             if was_file {
                 debug!(
-                    "  Atomic commit: overwritten existing file '{}'",
+                    "  Atomic commit: overwritten existing file '{}' (previous len: {} bytes)",
+                    staged.safe_path.display(),
                     staged.safe_path.display()
                 );
                 applied_actions.push(AppliedCommitAction::Overwritten {
@@ -6932,6 +7064,10 @@ pub fn apply_patch_to_file(
                 );
                 fs::remove_file(&safe_target_path)
                     .map_err(|e| map_io_error(safe_target_path.clone(), e))?;
+                debug!(
+                    "  Successfully deleted empty file '{}'",
+                    safe_target_path.display()
+                );
             } else {
                 info!(
                     "  Resulting content is empty. Skipping creation of '{}'",
@@ -7196,6 +7332,7 @@ fn find_valid_chains(
     chains: &mut Vec<Vec<usize>>,
 ) {
     if chains.len() > 100 {
+        trace!("  find_valid_chains: reached limit of 100 chains, truncating search");
         return;
     }
     if j == cand_lists.len() {
@@ -7228,6 +7365,7 @@ fn find_valid_chains(
 fn resolve_hunk_line_hints<T: AsRef<str>>(hunks: &[Hunk], lines: &[T]) -> Vec<Hunk> {
     let mut resolved = hunks.to_vec();
     if resolved.is_empty() || lines.is_empty() {
+        trace!("resolve_hunk_line_hints: empty hunks or lines, returning immediately");
         return resolved;
     }
 
@@ -7305,6 +7443,17 @@ fn resolve_hunk_line_hints<T: AsRef<str>>(hunks: &[Hunk], lines: &[T]) -> Vec<Hu
             );
             anchors[i] = Some(exact_matches[0]);
             hunk.old_start_line = Some(exact_matches[0] + 1);
+        } else if exact_matches.is_empty() {
+            trace!(
+                "  Hunk {}: 0 exact matches found during initial anchor scan",
+                i + 1
+            );
+        } else {
+            trace!(
+                "  Hunk {}: {} candidate exact matches found (ambiguous without bounding)",
+                i + 1,
+                exact_matches.len()
+            );
         }
         matches_per_hunk.push(exact_matches);
     }
@@ -7368,6 +7517,14 @@ fn resolve_hunk_line_hints<T: AsRef<str>>(hunks: &[Hunk], lines: &[T]) -> Vec<Hu
                     resolved[i].old_start_line = Some(unique_match + 1);
                     changed = true;
                     continue;
+                } else {
+                    trace!(
+                        "  Hunk {}: {} match(es) within interval [{}..{}]",
+                        i + 1,
+                        bounded_matches.len(),
+                        min_bound,
+                        max_bound
+                    );
                 }
 
                 // Contiguity check: If hunk `i` is immediately adjacent to prev_anchor in the patch (`i == p + 1`),
@@ -7737,6 +7894,10 @@ impl<'a> HunkApplier<'a> {
     /// # }
     /// ```
     pub fn set_original_newline_status(&mut self, ends_with_newline: bool) {
+        trace!(
+            "HunkApplier::set_original_newline_status: original_ends_with_newline={}",
+            ends_with_newline
+        );
         self.original_ends_with_newline = ends_with_newline;
     }
 
@@ -7769,6 +7930,10 @@ impl<'a> HunkApplier<'a> {
     /// # }
     /// ```
     pub fn into_lines(self) -> Vec<String> {
+        trace!(
+            "HunkApplier::into_lines: returning {} line(s)",
+            self.current_lines.len()
+        );
         self.current_lines
     }
 
@@ -9046,7 +9211,14 @@ fn find_statement_match_in_block(
 ///
 /// `true` if every line in `seg` is low-entropy, `false` otherwise.
 fn is_low_entropy_segment(seg: &[&str]) -> bool {
-    seg.iter().all(|l| is_low_entropy_line(l))
+    let res = seg.iter().all(|l| is_low_entropy_line(l));
+    if res {
+        trace!(
+            "is_low_entropy_segment: segment with {} line(s) is low-entropy",
+            seg.len()
+        );
+    }
+    res
 }
 
 /// Checks whether a line is trivial / low-entropy syntax (e.g. closing braces, blank lines).
@@ -9063,7 +9235,11 @@ fn is_low_entropy_segment(seg: &[&str]) -> bool {
 /// `true` if the line consists solely of low-entropy syntax tokens, `false` otherwise.
 fn is_low_entropy_line(line: &str) -> bool {
     let trimmed = line.trim();
-    matches!(trimmed, "" | "}" | "};" | "]" | "];" | ")" | ");" | "{")
+    let res = matches!(trimmed, "" | "}" | "};" | "]" | "];" | ")" | ");" | "{");
+    if res {
+        trace!("is_low_entropy_line: line '{}' is low-entropy", trimmed);
+    }
+    res
 }
 
 /// Normalizes trailing delimiters (such as semicolons and commas) and trailing inline comments
@@ -9085,7 +9261,9 @@ fn normalize_line_delimiters(s: &str) -> String {
             }
         }
     }
-    trimmed.trim_end_matches([';', ',']).trim_end().to_string()
+    let res = trimmed.trim_end_matches([';', ',']).trim_end().to_string();
+    trace!("normalize_line_delimiters: '{}' -> '{}'", s, res);
+    res
 }
 
 /// Applies a single hunk to a mutable vector of lines in-place.
@@ -9735,11 +9913,9 @@ fn try_apply_hunk_at_location(
 
         // Apply initial additions using the seeded indentation
         for line in initial_additions {
-            final_lines.push(adjust_indentation(
-                line,
-                current_hunk_indent,
-                current_target_indent,
-            ));
+            let adj = adjust_indentation(line, current_hunk_indent, current_target_indent);
+            trace!("        Applied initial addition: '{}'", adj.escape_debug());
+            final_lines.push(adj);
         }
 
         let is_at_eof = (location.start_index + location.length) == target_lines.len();
@@ -9785,7 +9961,16 @@ fn try_apply_hunk_at_location(
 
                         // If it's not a removal, keep the file's version of the line (preserves local edits)
                         if !*is_removal {
+                            trace!(
+                                "        Equal: preserving target line: '{}'",
+                                file_matched_slice[new_idx].escape_debug()
+                            );
                             final_lines.push(file_matched_slice[new_idx].clone());
+                        } else {
+                            trace!(
+                                "        Equal: removing target line: '{}'",
+                                match_block_content[old_idx].escape_debug()
+                            );
                         }
                         if !additions.is_empty() {
                             trace!(
@@ -9796,11 +9981,10 @@ fn try_apply_hunk_at_location(
                         }
                         // Always insert the additions associated with this line
                         for add in additions {
-                            final_lines.push(adjust_indentation(
-                                add,
-                                current_hunk_indent,
-                                current_target_indent,
-                            ));
+                            let adj =
+                                adjust_indentation(add, current_hunk_indent, current_target_indent);
+                            trace!("        Equal: applying addition: '{}'", adj.escape_debug());
+                            final_lines.push(adj);
                         }
                     }
                 }
@@ -9926,6 +10110,10 @@ fn try_apply_hunk_at_location(
                     // We preserve them.
                     for i in 0..*new_len {
                         let new_idx = new_index + i;
+                        trace!(
+                            "        Preserving inserted line: '{}'",
+                            file_matched_slice[new_idx].escape_debug()
+                        );
                         final_lines.push(file_matched_slice[new_idx].clone());
                     }
                 }
@@ -10094,14 +10282,28 @@ fn try_apply_hunk_at_location(
                             }
 
                             if !*is_removal {
+                                trace!(
+                                    "        Replace (1-to-1): preserving context line: '{}'",
+                                    file_matched_slice[new_idx].escape_debug()
+                                );
                                 final_lines.push(file_matched_slice[new_idx].clone());
+                            } else {
+                                trace!(
+                                    "        Replace (1-to-1): removing line: '{}'",
+                                    match_block_content[old_idx].escape_debug()
+                                );
                             }
                             for add in additions {
-                                final_lines.push(adjust_indentation(
+                                let adj = adjust_indentation(
                                     add,
                                     current_hunk_indent,
                                     current_target_indent,
-                                ));
+                                );
+                                trace!(
+                                    "        Replace (1-to-1): applied addition: '{}'",
+                                    adj.escape_debug()
+                                );
+                                final_lines.push(adj);
                             }
                         }
                     } else {
@@ -10146,18 +10348,28 @@ fn try_apply_hunk_at_location(
                                 let (is_removal, additions) = &match_lines_meta[old_idx];
                                 if !*is_removal {
                                     let h_line = match_block_content[old_idx];
-                                    final_lines.push(adjust_indentation(
+                                    let adj = adjust_indentation(
                                         h_line,
                                         current_hunk_indent,
                                         current_target_indent,
-                                    ));
+                                    );
+                                    trace!(
+                                        "        Statement match: preserving context line: '{}'",
+                                        adj.escape_debug()
+                                    );
+                                    final_lines.push(adj);
                                 }
                                 for add in additions {
-                                    final_lines.push(adjust_indentation(
+                                    let adj = adjust_indentation(
                                         add,
                                         current_hunk_indent,
                                         current_target_indent,
-                                    ));
+                                    );
+                                    trace!(
+                                        "        Statement match: applied addition: '{}'",
+                                        adj.escape_debug()
+                                    );
+                                    final_lines.push(adj);
                                 }
                             }
 
@@ -10248,6 +10460,10 @@ fn try_apply_hunk_at_location(
 
                             if has_context {
                                 for i in 0..*new_len {
+                                    trace!(
+                                        "        Fallback: preserving target line: '{}'",
+                                        file_matched_slice[new_index + i].escape_debug()
+                                    );
                                     final_lines.push(file_matched_slice[new_index + i].clone());
                                 }
                             }
@@ -10256,11 +10472,16 @@ fn try_apply_hunk_at_location(
                             for i in 0..*old_len {
                                 let (_, additions) = &match_lines_meta[old_index + i];
                                 for add in additions {
-                                    final_lines.push(adjust_indentation(
+                                    let adj = adjust_indentation(
                                         add,
                                         current_hunk_indent,
                                         current_target_indent,
-                                    ));
+                                    );
+                                    trace!(
+                                        "        Fallback: applied addition: '{}'",
+                                        adj.escape_debug()
+                                    );
+                                    final_lines.push(adj);
                                 }
                             }
                         }
@@ -11313,8 +11534,14 @@ impl<'a> DefaultHunkFinder<'a> {
     /// A merged vector of non-overlapping, sorted `(start, end)` line intervals.
     fn merge_ranges(mut ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
         if ranges.is_empty() {
+            trace!("merge_ranges: empty ranges input");
             return vec![];
         }
+        trace!(
+            "merge_ranges: merging {} input range(s): {:?}",
+            ranges.len(),
+            ranges
+        );
         ranges.sort_unstable_by_key(|k| k.0);
         let mut merged = Vec::with_capacity(ranges.len());
         let mut current_range = ranges[0];
@@ -11322,6 +11549,13 @@ impl<'a> DefaultHunkFinder<'a> {
         for &(start, end) in &ranges[1..] {
             if start <= current_range.1 {
                 // Overlap or adjacent, merge them.
+                trace!(
+                    "  merge_ranges: combining [{}..{}] with [{}..{}]",
+                    current_range.0,
+                    current_range.1,
+                    start,
+                    end
+                );
                 current_range.1 = current_range.1.max(end);
             } else {
                 // No overlap, push the current range and start a new one.
@@ -11330,6 +11564,11 @@ impl<'a> DefaultHunkFinder<'a> {
             }
         }
         merged.push(current_range);
+        trace!(
+            "merge_ranges: result {} disjoint range(s): {:?}",
+            merged.len(),
+            merged
+        );
         merged
     }
 
@@ -11414,6 +11653,7 @@ impl<'a> DefaultHunkFinder<'a> {
         }
 
         if has_ellipsis {
+            trace!("find_hunk_location_internal: hunk contains ellipsis wildcard lines");
             let mut segments: Vec<&[&str]> = Vec::new();
             let mut current_start = 0;
             for (idx, line) in match_block.iter().enumerate() {
@@ -11427,6 +11667,10 @@ impl<'a> DefaultHunkFinder<'a> {
             if current_start < match_block.len() {
                 segments.push(&match_block[current_start..]);
             }
+            trace!(
+                "find_hunk_location_internal: partitioned match block into {} segment(s)",
+                segments.len()
+            );
             return self.find_wildcard_segments_location(
                 &segments,
                 target_lines,
@@ -11764,6 +12008,14 @@ impl<'a> DefaultHunkFinder<'a> {
                 passing.len(),
                 threshold
             );
+            trace!(
+                "      Top 3 passing candidates: {:?}",
+                passing
+                    .iter()
+                    .take(3)
+                    .map(|&(sc, st, ln)| (format!("{:.3}", sc), st + 1, ln))
+                    .collect::<Vec<_>>()
+            );
 
             if !passing.is_empty() {
                 let mut candidates: Vec<(HunkLocation, MatchType)> = Vec::new();
@@ -11854,6 +12106,12 @@ impl<'a> DefaultHunkFinder<'a> {
                             .iter()
                             .any(|(loc, _)| loc.start_index == start && loc.length == len)
                     {
+                        trace!(
+                            "      Adding candidate location at line {} (len={}, score={:.3})",
+                            start + 1,
+                            len,
+                            score
+                        );
                         candidates.push((
                             HunkLocation {
                                 start_index: start,
@@ -11864,9 +12122,14 @@ impl<'a> DefaultHunkFinder<'a> {
                         *count += 1;
                     }
                     if candidates.len() >= 20 {
+                        trace!("      Reached maximum candidate limit (20), stopping candidate collection");
                         break;
                     }
                 }
+                debug!(
+                    "    Strategy 3 (Fuzzy): selected {} candidate location(s)",
+                    candidates.len()
+                );
                 return Ok(candidates);
             } else if best_ratio_at_best_score >= 0.0 {
                 warn!("    Fuzzy match failed: best score was below threshold");
@@ -11965,6 +12228,12 @@ impl<'a> DefaultHunkFinder<'a> {
         match_type: &str,
         has_sufficient_entropy: bool,
     ) -> Result<Option<usize>, Vec<usize>> {
+        trace!(
+            "tie_break_with_line_number: strategy='{}', hint={:?}, entropy={}",
+            match_type,
+            start_line,
+            has_sufficient_entropy
+        );
         // --- Step 1: Check for 0 or 1 matches without allocation ---
         let first_match = match matches.next() {
             Some(m) => m,
@@ -12227,6 +12496,12 @@ impl<'a> DefaultHunkFinder<'a> {
                     loc.start_index == start_index && loc.length == length
                 })
             {
+                trace!(
+                    "    find_wildcard_segments_location: adding candidate at line {} (start={}, length={})",
+                    start_index + 1,
+                    start_index,
+                    length
+                );
                 candidates.push((
                     HunkLocation {
                         start_index,
@@ -12236,9 +12511,14 @@ impl<'a> DefaultHunkFinder<'a> {
                 ));
             }
             if candidates.len() >= 20 {
+                trace!("    find_wildcard_segments_location: reached maximum 20 candidates limit");
                 break;
             }
         }
+        debug!(
+            "find_wildcard_segments_location: returning {} candidate location(s)",
+            candidates.len()
+        );
         Ok(candidates)
     }
 
@@ -12546,8 +12826,10 @@ pub fn format_inline_diff<T: AsRef<str>>(expected_lines: &[&str], actual_lines: 
     let diff = TextDiff::from_lines(&expected_str, &actual_str);
 
     let mut out = String::new();
+    let mut change_count = 0;
     for op in diff.ops() {
         for change in diff.iter_inline_changes(op) {
+            change_count += 1;
             let sign = match change.tag() {
                 similar::ChangeTag::Delete => "-".red(),
                 similar::ChangeTag::Insert => "+".green(),
@@ -12587,9 +12869,10 @@ pub fn format_inline_diff<T: AsRef<str>>(expected_lines: &[&str], actual_lines: 
         }
     }
     debug!(
-        "format_inline_diff: formatted inline diff generated ({} bytes, {} lines)",
+        "format_inline_diff: formatted inline diff generated ({} bytes, {} lines, {} tokens)",
         out.len(),
-        out.lines().count()
+        out.lines().count(),
+        change_count
     );
     out
 }
@@ -12628,10 +12911,24 @@ pub fn merge_three_way(
     );
     let mut merge = similar::TextMerge::from_lines(base, ours, theirs);
     let is_conflicted = merge.is_conflicted();
+    let conflict_count = if is_conflicted {
+        merge.conflict_count()
+    } else {
+        0
+    };
     if is_conflicted {
-        debug!("merge_three_way: conflict detected, formatting with Diff3 conflict style");
+        debug!(
+            "merge_three_way: conflict detected ({} conflict(s)), formatting with Diff3 conflict style",
+            conflict_count
+        );
         merge.conflict_style(similar::ConflictStyle::Diff3);
         if let Some((base_lbl, ours_lbl, theirs_lbl)) = labels {
+            trace!(
+                "merge_three_way: applying custom labels ({}, {}, {})",
+                base_lbl,
+                ours_lbl,
+                theirs_lbl
+            );
             merge.labels(base_lbl, ours_lbl, theirs_lbl);
         }
     } else {
@@ -12662,6 +12959,11 @@ pub fn suggest_close_file_paths(
     let mut candidates = Vec::new();
     fn visit_dir(dir: &Path, base: &Path, candidates: &mut Vec<String>, depth: usize) {
         if depth > 8 || candidates.len() > 300 {
+            trace!(
+                "suggest_close_file_paths::visit_dir: halting recursion at depth {} (candidates: {})",
+                depth,
+                candidates.len()
+            );
             return;
         }
         if let Ok(entries) = fs::read_dir(dir) {
@@ -12669,6 +12971,10 @@ pub fn suggest_close_file_paths(
                 let path = entry.path();
                 if path.is_file() {
                     if let Ok(rel) = path.strip_prefix(base) {
+                        trace!(
+                            "  suggest_close_file_paths: found candidate file '{}'",
+                            rel.display()
+                        );
                         candidates.push(rel.to_string_lossy().into_owned());
                     }
                 } else if path.is_dir() {
@@ -12678,10 +12984,24 @@ pub fn suggest_close_file_paths(
                         && name_str != "target"
                         && name_str != "node_modules"
                     {
+                        trace!(
+                            "  suggest_close_file_paths: descending into dir '{}'",
+                            path.display()
+                        );
                         visit_dir(&path, base, candidates, depth + 1);
+                    } else {
+                        trace!(
+                            "  suggest_close_file_paths: skipping directory '{}'",
+                            path.display()
+                        );
                     }
                 }
             }
+        } else {
+            trace!(
+                "suggest_close_file_paths::visit_dir: failed to read directory '{}'",
+                dir.display()
+            );
         }
     }
     visit_dir(base_dir, base_dir, &mut candidates, 0);
