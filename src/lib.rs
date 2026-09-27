@@ -10225,6 +10225,43 @@ fn try_apply_hunk_at_location(
         let match_block_content: Vec<&str> = hunk.get_match_block();
         let file_block_content: Vec<&str> = file_matched_slice.iter().map(|s| s.as_str()).collect();
 
+        let head_context_end = if !initial_additions.is_empty() {
+            0
+        } else {
+            let mut end = 0;
+            for (i, (is_removal, additions)) in match_lines_meta.iter().enumerate() {
+                if *is_removal {
+                    break;
+                }
+                end = i + 1;
+                if !additions.is_empty() {
+                    break;
+                }
+            }
+            end
+        };
+
+        let total_substantive_head = (0..head_context_end)
+            .filter(|&i| !match_block_content[i].trim().is_empty())
+            .count();
+
+        let tail_context_start = {
+            let mut last_edit = None;
+            for (i, (is_removal, additions)) in match_lines_meta.iter().enumerate() {
+                if *is_removal || !additions.is_empty() {
+                    last_edit = Some(i);
+                }
+            }
+            match last_edit {
+                Some(idx) => idx + 1,
+                None => 0,
+            }
+        };
+
+        let total_substantive_tail = (tail_context_start..match_block_content.len())
+            .filter(|&i| !match_block_content[i].trim().is_empty())
+            .count();
+
         let match_block_trimmed_storage: Vec<String>;
         let file_block_trimmed_storage: Vec<String>;
 
@@ -10426,15 +10463,29 @@ fn try_apply_hunk_at_location(
 
                     let is_last_op = op_idx == ops.len() - 1;
 
-                    // 1. Head context cannot be missing from target file
-                    if *old_index == 0
-                        && (0..*old_len).any(|i| {
-                            let (is_removal, _) = &match_lines_meta[*old_index + i];
-                            !is_removal && !match_block_content[*old_index + i].trim().is_empty()
-                        })
-                    {
-                        warn!("    Fuzzy match rejected: Head context line(s) missing from target file.");
-                        return Err(HunkApplyError::ContextNotFound);
+                    // 1. Head context cannot be missing from target file if it contains a definition or all outer context is lost
+                    let has_substantive_head = (0..*old_len).any(|i| {
+                        let (is_removal, _) = &match_lines_meta[*old_index + i];
+                        !is_removal && !match_block_content[*old_index + i].trim().is_empty()
+                    });
+
+                    if *old_index == 0 && has_substantive_head {
+                        let has_definition = (0..*old_len).any(|i| {
+                            is_definition(match_block_content[*old_index + i])
+                        });
+                        let lost_substantive_head = (0..(*old_len).min(head_context_end))
+                            .filter(|&i| {
+                                let (is_removal, _) = &match_lines_meta[i];
+                                !*is_removal && !match_block_content[i].trim().is_empty()
+                            })
+                            .count();
+                        let all_head_lost = total_substantive_head > 0
+                            && lost_substantive_head >= total_substantive_head;
+
+                        if has_definition || all_head_lost {
+                            warn!("    Fuzzy match rejected: Head context line(s) missing from target file.");
+                            return Err(HunkApplyError::ContextNotFound);
+                        }
                     }
 
                     // 2. Tail context cannot be missing from target file (unless restoring truncated context at EOF)
@@ -10445,15 +10496,28 @@ fn try_apply_hunk_at_location(
                             .all(|i| is_low_entropy_line(match_block_content[*old_index + i]))
                         && location.length < match_block_content.len();
 
-                    if is_tail
-                        && !is_eof_restoration
-                        && (0..*old_len).any(|i| {
-                            let (is_removal, _) = &match_lines_meta[*old_index + i];
-                            !is_removal && !match_block_content[*old_index + i].trim().is_empty()
-                        })
-                    {
-                        warn!("    Fuzzy match rejected: Tail context line(s) missing from target file.");
-                        return Err(HunkApplyError::ContextNotFound);
+                    let has_substantive_tail = (0..*old_len).any(|i| {
+                        let (is_removal, _) = &match_lines_meta[*old_index + i];
+                        !is_removal && !match_block_content[*old_index + i].trim().is_empty()
+                    });
+
+                    if is_tail && !is_eof_restoration && has_substantive_tail {
+                        let has_definition = (0..*old_len).any(|i| {
+                            is_definition(match_block_content[*old_index + i])
+                        });
+                        let lost_substantive_tail = ((*old_index).max(tail_context_start)..match_block_content.len())
+                            .filter(|&i| {
+                                let (is_removal, _) = &match_lines_meta[i];
+                                !*is_removal && !match_block_content[i].trim().is_empty()
+                            })
+                            .count();
+                        let all_tail_lost = total_substantive_tail > 0
+                            && lost_substantive_tail >= total_substantive_tail;
+
+                        if has_definition || all_tail_lost {
+                            warn!("    Fuzzy match rejected: Tail context line(s) missing from target file.");
+                            return Err(HunkApplyError::ContextNotFound);
+                        }
                     }
 
                     for i in 0..*old_len {
@@ -10816,18 +10880,46 @@ fn try_apply_hunk_at_location(
                                 !is_removal && !match_block_content[old_index + i].trim().is_empty()
                             });
 
-                            // 1. Head context cannot be unaligned in replacement
+                            // 1. Head context cannot be unaligned in replacement if it contains a definition or all outer context is lost
                             if *old_index == 0 && has_substantive_context {
-                                warn!("    Fuzzy match rejected: Head context is unaligned in replacement block.");
-                                return Err(HunkApplyError::ContextNotFound);
+                                let has_definition = (0..*old_len).any(|i| {
+                                    is_definition(match_block_content[old_index + i])
+                                });
+                                let lost_substantive_head = (0..(*old_len).min(head_context_end))
+                                    .filter(|&i| {
+                                        let (is_removal, _) = &match_lines_meta[i];
+                                        !*is_removal && !match_block_content[i].trim().is_empty()
+                                    })
+                                    .count();
+                                let all_head_lost = total_substantive_head > 0
+                                    && lost_substantive_head >= total_substantive_head;
+
+                                if has_definition || all_head_lost {
+                                    warn!("    Fuzzy match rejected: Head context is unaligned in replacement block.");
+                                    return Err(HunkApplyError::ContextNotFound);
+                                }
                             }
 
-                            // 2. Tail context cannot be unaligned in replacement
+                            // 2. Tail context cannot be unaligned in replacement if it contains a definition or all outer context is lost
                             if *old_index + *old_len == match_block_content.len()
                                 && has_substantive_context
                             {
-                                warn!("    Fuzzy match rejected: Tail context is unaligned in replacement block.");
-                                return Err(HunkApplyError::ContextNotFound);
+                                let has_definition = (0..*old_len).any(|i| {
+                                    is_definition(match_block_content[old_index + i])
+                                });
+                                let lost_substantive_tail = ((*old_index).max(tail_context_start)..match_block_content.len())
+                                    .filter(|&i| {
+                                        let (is_removal, _) = &match_lines_meta[i];
+                                        !*is_removal && !match_block_content[i].trim().is_empty()
+                                    })
+                                    .count();
+                                let all_tail_lost = total_substantive_tail > 0
+                                    && lost_substantive_tail >= total_substantive_tail;
+
+                                if has_definition || all_tail_lost {
+                                    warn!("    Fuzzy match rejected: Tail context is unaligned in replacement block.");
+                                    return Err(HunkApplyError::ContextNotFound);
+                                }
                             }
 
                             // 3. Definitions cannot be unaligned in replacement

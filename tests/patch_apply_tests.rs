@@ -13332,6 +13332,156 @@ mod multi_level_fuzzy_weakness_tests {
         assert!(content.contains("fn one() {"));
         assert!(content.contains("fn two() {"));
     }
+
+    #[test]
+    fn test_fuzzy_match_tolerates_deleted_comment_at_head() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("calc.rs");
+
+        // Target file has deleted the leading comment, but fn calculate and body remain
+        let original = indoc! {r#"
+            fn calculate(a: i32, b: i32) -> i32 {
+                let result = a + b;
+                println!("result: {}", result);
+                result
+            }
+        "#};
+        fs::write(&file_path, original).unwrap();
+
+        let diff = indoc! {r#"
+            --- a/calc.rs
+            +++ b/calc.rs
+            @@ -1,6 +1,6 @@
+             // Deprecated header comment that got deleted
+             fn calculate(a: i32, b: i32) -> i32 {
+            -    let result = a + b;
+            +    let result = a * b;
+                 println!("result: {}", result);
+                 result
+             }
+        "#};
+
+        let patch = parse_auto(diff).unwrap().remove(0);
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patch, dir.path(), options).unwrap();
+
+        assert!(
+            result.report.all_applied_cleanly(),
+            "Deleted comment at head should be tolerated when remaining head context matches"
+        );
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("let result = a * b;"));
+        assert!(content.contains("fn calculate(a: i32, b: i32) -> i32 {"));
+    }
+
+    #[test]
+    fn test_fuzzy_match_tolerates_deleted_comment_at_tail() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("calc.rs");
+
+        // Target file does not have the trailing comment, but the rest of the function remains
+        let original = indoc! {r#"
+            fn calculate(a: i32, b: i32) -> i32 {
+                let result = a + b;
+                println!("result: {}", result);
+                result
+            }
+        "#};
+        fs::write(&file_path, original).unwrap();
+
+        let diff = indoc! {r#"
+            --- a/calc.rs
+            +++ b/calc.rs
+            @@ -1,7 +1,7 @@
+             fn calculate(a: i32, b: i32) -> i32 {
+            -    let result = a + b;
+            +    let result = a * b;
+                 println!("result: {}", result);
+                 result
+             }
+             // Stale footer comment deleted from target file
+        "#};
+
+        let patch = parse_auto(diff).unwrap().remove(0);
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patch, dir.path(), options).unwrap();
+
+        assert!(
+            result.report.all_applied_cleanly(),
+            "Deleted comment at tail should be tolerated when remaining tail context matches"
+        );
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("let result = a * b;"));
+    }
+
+    #[test]
+    fn test_fuzzy_match_rejects_when_all_head_outer_context_lost() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("calc.rs");
+
+        let original = indoc! {r#"
+            fn calculate(a: i32, b: i32) -> i32 {
+                let result = a + b;
+            }
+        "#};
+        fs::write(&file_path, original).unwrap();
+
+        // The only context line before the edit is a single comment, which is missing from target
+        let diff = indoc! {r#"
+            --- a/calc.rs
+            +++ b/calc.rs
+            @@ -1,3 +1,3 @@
+             // Sole outer head context line
+            -    let result = a + b;
+            +    let result = a * b;
+             }
+        "#};
+
+        let patch = parse_auto(diff).unwrap().remove(0);
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patch, dir.path(), options).unwrap();
+
+        assert!(
+            !result.report.all_applied_cleanly(),
+            "Should reject when all outer context lines at the head are lost"
+        );
+    }
+
+    #[test]
+    fn test_fuzzy_match_rejects_when_all_tail_outer_context_lost() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("calc.rs");
+
+        let original = indoc! {r#"
+            fn calculate(a: i32, b: i32) -> i32 {
+                let result = a + b;
+        "#};
+        fs::write(&file_path, original).unwrap();
+
+        // The only context line after the edit is a single comment, which is missing from target
+        let diff = indoc! {r#"
+            --- a/calc.rs
+            +++ b/calc.rs
+            @@ -1,3 +1,3 @@
+             fn calculate(a: i32, b: i32) -> i32 {
+            -    let result = a + b;
+            +    let result = a * b;
+             // Sole outer tail context line
+        "#};
+
+        let patch = parse_auto(diff).unwrap().remove(0);
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patch, dir.path(), options).unwrap();
+
+        assert!(
+            !result.report.all_applied_cleanly(),
+            "Should reject when all outer context lines at the tail are lost"
+        );
+    }
 }
 
 mod window_length_iter_tests {
