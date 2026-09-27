@@ -2,7 +2,7 @@ use indoc::indoc;
 use mpatch::{
     apply_hunk_to_lines, apply_patch_to_file, apply_patch_to_lines, apply_patches_to_dir,
     apply_patches_to_dir_atomic, detect_patch, find_hunk_location, find_hunk_location_in_lines,
-    format_inline_diff, invert_patches, merge_patches, merge_three_way, parse_aider, parse_auto,
+    format_inline_diff, invert_patches, is_comment_line, merge_patches, merge_three_way, parse_aider, parse_auto,
     parse_diffs, parse_patches, parse_patches_from_lines, parse_single_patch, patch_content_str,
     suggest_close_file_paths, try_apply_patch_to_content, try_apply_patch_to_file,
     try_apply_patch_to_lines, window_lengths, ApplyOptions, DefaultHunkFinder, Hunk,
@@ -14663,4 +14663,247 @@ mod polyglot_language_support_tests {
         let res = patch_content_str(&patch.to_string(), Some(original), &ApplyOptions::new()).unwrap();
         assert!(res.contains("log_read()"));
     }
+}
+
+mod asymmetric_context_drift_tests {
+    use indoc::indoc;
+    use mpatch::{apply_patch_to_file, parse_auto, patch_content_str, ApplyOptions};
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_report_data_reproduction_cleanly_applies() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("main.rs");
+
+        // Faithful layout of src/main.rs: Anonymizer ends at line 367, ReportData is at 370,
+        // log_failed_hunks starts at 372, and TeeWriter is located 50 lines downstream at line 421.
+        let mut original = String::from(indoc! {r#"
+            impl Anonymizer {
+                fn anonymize<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
+                    result
+                }
+            }
+
+            /// A tuple containing the shared handle to the report file, a map of original file contents, and the anonymizer.
+            type ReportData = (Arc<Mutex<File>>, HashMap<PathBuf, String>, Anonymizer);
+
+            /// Logs the reasons why hunks failed to apply.
+            ///
+            /// # Arguments
+            fn log_failed_hunks(apply_result: &mpatch::ApplyResult) {
+                println!("failed");
+            }
+        "#});
+
+        for i in 0..45 {
+            original.push_str(&format!("// Intermediate code line {}\n", i));
+        }
+        original.push_str(indoc! {r#"
+            /// A "Tee" writer that sends output to both stderr and a shared file.
+            /// This is used in debug report mode (`-vvvv`) to show logs on the console
+            struct TeeWriter {
+                file: Arc<Mutex<File>>,
+            }
+        "#});
+
+        fs::write(&file_path, &original).unwrap();
+
+        // The exact patch that previously failed with ContextNotFound
+        let diff = indoc! {r#"
+            --- a/main.rs
+            +++ b/main.rs
+            @@ -419,8 +419,13 @@
+                 }
+             }
+
+            -/// A tuple containing the shared handle to the report file, a map of original file contents, and the anonymizer.
+            -type ReportData = (Arc<Mutex<File>>, HashMap<PathBuf, String>, Anonymizer);
+            +/// A struct containing the shared handle to the report file, original file contents, anonymizer, and logging flag.
+            +struct ReportData {
+            +    file: Arc<Mutex<File>>,
+            +    original_contents: HashMap<PathBuf, String>,
+            +    anonymizer: Anonymizer,
+            +    file_logging_enabled: Arc<AtomicBool>,
+            +}
+
+             /// A "Tee" writer that sends output to both stderr and a shared file.
+             /// This is used in debug report mode (`-vvvv`) to show logs on the console
+        "#};
+
+        let patches = parse_auto(diff).unwrap();
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+        assert!(
+            result.report.all_applied_cleanly(),
+            "Hunk must cleanly apply despite tail doc comment context pointing to downstream TeeWriter"
+        );
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("struct ReportData {"));
+        assert!(content.contains("file_logging_enabled: Arc<AtomicBool>,"));
+        assert!(!content.contains("type ReportData = (Arc<Mutex<File>>"));
+        // Downstream log_failed_hunks and TeeWriter must remain intact
+        assert!(content.contains("fn log_failed_hunks(apply_result: &mpatch::ApplyResult) {"));
+        assert!(content.contains("struct TeeWriter {"));
+    }
+
+    #[test]
+    fn test_tail_comment_drift_with_verified_removal_and_head_context() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let original = indoc! {r#"
+            fn setup() {
+                let mut pool = create_pool();
+                configure_pool(&mut pool);
+            }
+
+            const MAX_CONNS: usize = 128;
+
+            // In target file, the following comment was modified or replaced
+            // by a new feature flag comment
+            // Feature: dynamic autoscaling enabled
+            fn worker() {}
+        "#};
+
+        // Patch expects old trailing comment
+        let diff = indoc! {r#"
+            --- a/pool.rs
+            +++ b/pool.rs
+            @@ -3,5 +3,5 @@
+                 configure_pool(&mut pool);
+             }
+
+            -const MAX_CONNS: usize = 128;
+            +const MAX_CONNS: usize = 256;
+
+            // Default static connection cap
+        "#};
+
+        let patched = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+        assert!(patched.contains("const MAX_CONNS: usize = 256;"));
+        assert!(patched.contains("Feature: dynamic autoscaling enabled"));
+    }
+
+    #[test]
+    fn test_head_comment_drift_with_verified_removal_and_tail_context() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let original = indoc! {r#"
+            // Updated documentation for service timeout
+            pub const SERVICE_TIMEOUT: u64 = 30;
+
+            pub fn run_service() {
+                start();
+            }
+        "#};
+
+        let diff = indoc! {r#"
+            --- a/service.rs
+            +++ b/service.rs
+            @@ -1,5 +1,5 @@
+             // Stale legacy doc comment
+            -pub const SERVICE_TIMEOUT: u64 = 30;
+            +pub const SERVICE_TIMEOUT: u64 = 60;
+
+             pub fn run_service() {
+        "#};
+
+        let patched = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+        assert!(patched.contains("pub const SERVICE_TIMEOUT: u64 = 60;"));
+        assert!(patched.contains("Updated documentation for service timeout"));
+    }
+
+    #[test]
+    fn test_tail_drift_rejected_when_definition_is_lost() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let original = indoc! {r#"
+            fn process_item() {
+                let x = 1;
+            }
+
+            fn completely_different_worker() {}
+        "#};
+
+        // Patch tail has `fn target_worker() {}` which does not exist in target.
+        // Because `fn target_worker` is a definition, tail drift must NOT be permitted.
+        let diff = indoc! {r#"
+            --- a/worker.rs
+            +++ b/worker.rs
+            @@ -1,6 +1,6 @@
+             fn process_item() {
+            -    let x = 1;
+            +    let x = 2;
+             }
+
+             fn target_worker() {}
+        "#};
+
+        let res = patch_content_str(diff, Some(original), &ApplyOptions::new());
+        assert!(
+            res.is_err(),
+            "Losing a function definition in the tail must still be rejected"
+        );
+    }
+}
+
+#[test]
+fn test_is_comment_line_soundness() {
+    // Valid comments across language families
+    assert!(is_comment_line("// standard line comment"));
+    assert!(is_comment_line("/// doc comment"));
+    assert!(is_comment_line("/* block comment */"));
+    assert!(is_comment_line(" * middle of javadoc"));
+    assert!(is_comment_line(" */"));
+    assert!(is_comment_line("<!-- html comment -->"));
+    assert!(is_comment_line("-->"));
+    assert!(is_comment_line("{/* jsx comment */}"));
+    assert!(is_comment_line("*/}\n"));
+    assert!(is_comment_line("{- haskell comment -}"));
+    assert!(is_comment_line("-}"));
+    assert!(is_comment_line("(* ocaml comment *)"));
+    assert!(is_comment_line("*)"));
+    assert!(is_comment_line("/+ d comment +/"));
+    assert!(is_comment_line("+/"));
+    assert!(is_comment_line("\"\"\"python docstring\"\"\""));
+    assert!(is_comment_line("'''python docstring'''"));
+    assert!(is_comment_line("# python comment"));
+    assert!(is_comment_line("# include user details in response"));
+    assert!(is_comment_line("# define default port"));
+    assert!(is_comment_line("# pragma: no cover"));
+    assert!(is_comment_line("-- sql comment"));
+    assert!(is_comment_line(";; lisp comment"));
+    assert!(is_comment_line("% erlang comment"));
+    assert!(is_comment_line("! fortran comment"));
+    assert!(is_comment_line(":: batch comment"));
+    assert!(is_comment_line("rem batch comment"));
+
+    // Code constructs that MUST NOT be classified as comments
+    assert!(!is_comment_line(""));
+    assert!(!is_comment_line("   "));
+    assert!(!is_comment_line("*ptr = 5;"));
+    assert!(!is_comment_line("*x += 1;"));
+    assert!(!is_comment_line("*(p + 1) = 2;"));
+    assert!(!is_comment_line("*const u8"));
+    assert!(!is_comment_line("*mut c_void"));
+    assert!(!is_comment_line("* { box-sizing: border-box; }"));
+    assert!(!is_comment_line("#include <stdio.h>"));
+    assert!(!is_comment_line("#include \"config.h\""));
+    assert!(!is_comment_line("#define MAX_CONNS 128"));
+    assert!(!is_comment_line("#ifdef DEBUG"));
+    assert!(!is_comment_line("#pragma once"));
+    assert!(!is_comment_line("#[derive(Debug)]"));
+    assert!(!is_comment_line("#![no_std]"));
+    assert!(!is_comment_line("#app { color: red; }"));
+    assert!(!is_comment_line("--count;"));
+    assert!(!is_comment_line("--i;"));
+    assert!(!is_comment_line("::std::mem::drop(x);"));
+    assert!(!is_comment_line("::mpatch::parse_auto(diff);"));
+    assert!(!is_comment_line("!is_valid"));
+    assert!(!is_comment_line("!(x && y)"));
+    assert!(!is_comment_line("!important"));
+    assert!(!is_comment_line(";[a, b] = [c, d];"));
+    assert!(!is_comment_line(";(function() {})()"));
+    assert!(!is_comment_line("/* comment */ do_action(); /* end */"));
+    assert!(!is_comment_line("<!-- comment --> <Button />"));
 }

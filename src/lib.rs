@@ -9807,6 +9807,7 @@ fn is_definition(line: &str) -> bool {
                             "except", "elif", "select", "where", "from", "insert", "update",
                             "having", "join", "and", "or", "set", "media", "supports", "keyframes",
                             "see", "note", "in", "at", "on", "by", "to", "when", "print", "echo",
+                            "define", "include", "pragma",
                         ];
                         if !NON_DEF_FIRST_TOKENS.contains(&first_lower.as_str()) {
                             let last_token = tokens[tokens.len() - 1];
@@ -9826,6 +9827,418 @@ fn is_definition(line: &str) -> bool {
                 }
             }
         }
+    }
+
+    false
+}
+
+/// Checks whether a line consists purely of a comment, documentation comment, or comment banner.
+///
+/// Recognizes single-line, multi-line, docstring, and banner comments across a wide range of
+/// programming, scripting, markup, and configuration languages:
+/// - C, C++, C#, Java, JavaScript, TypeScript, Rust, Go, Swift, Kotlin, Dart, PHP, Scala (`//`, `///`, `//!`, `/*`, `*/`, `* `)
+/// - Python, Ruby, Shell, Perl, R, YAML, TOML, Elixir, Julia, Dockerfile, Makefile, CMake (`#`, `##`, `#!`, `"""`, `'''`)
+/// - HTML, XML, Markdown, SGML (`<!--`, `-->`)
+/// - React / JSX / TSX (`{/*`, `*/}`)
+/// - SQL, Lua, Haskell, Ada, AppleScript, VHDL (`-- `, `--`, `---`, `--[`)
+/// - Haskell, Elm, Agda (`{-`, `-}`)
+/// - OCaml, ML, F#, Pascal, Delphi, Coq (`(*`, `*)`)
+/// - Lisp, Scheme, Clojure, Racket, Assembly, INI (`;;`, `; `)
+/// - Erlang, LaTeX, MATLAB, Octave, Prolog (`% `, `%%`)
+/// - Fortran (`! `, `!--`, `!*`, `!$`)
+/// - DOS / Windows Batch (`rem `, `:: `)
+/// - D language (`/+`, `+/`)
+///
+/// Strictly distinguishes comments from code constructs that start with punctuation, such as:
+/// - C/C++ pointer dereferences (`*ptr = 5;`, `*(p + 1)`)
+/// - C/C++ preprocessor directives (`#include`, `#define`, `#ifdef`)
+/// - Rust attributes (`#[derive(...)]`, `#![no_std]`)
+/// - C/C++/Java/JS pre-decrements (`--count;`, `--i;`)
+/// - C++/Rust global scope paths (`::std::mem::drop`, `::mpatch::parse_auto`)
+/// - Boolean NOT and macro calls (`!is_valid`, `!(x && y)`, `![alt](url)`)
+/// - CSS selectors (`* {`, `#app {`, `!important`)
+/// - JavaScript defensive semicolons (`;(function() { ... })()`, `;[a, b] = ...`)
+///
+/// # Arguments
+///
+/// * `line` - A string slice containing the single line of text to evaluate.
+///
+/// # Returns
+///
+/// `true` if the line consists purely of a comment, `false` otherwise (including for blank lines).
+pub fn is_comment_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    // Fast-path single-byte filter: skips 95%+ of regular code statements in sub-nanosecond time
+    let first = trimmed.as_bytes()[0];
+    if first != b'/'
+        && first != b'*'
+        && first != b'#'
+        && first != b'<'
+        && first != b'-'
+        && first != b'{'
+        && first != b'('
+        && first != b';'
+        && first != b'%'
+        && first != b'!'
+        && first != b':'
+        && first != b'"'
+        && first != b'\''
+        && first != b'r'
+        && first != b'R'
+        && first != b'+'
+    {
+        return false;
+    }
+
+    is_comment_line_trimmed(trimmed)
+}
+
+fn is_comment_line_trimmed(trimmed: &str) -> bool {
+    // 1. C-family line comments: //, ///, //!, ////
+    if trimmed.starts_with("//") {
+        return true;
+    }
+
+    // 2. C-family block comments: /* ... */ or /* or */
+    // Note: uses non-greedy find to avoid masking code between inline comments
+    if trimmed.starts_with("/*") {
+        if let Some(first_end) = trimmed[2..].find("*/") {
+            let after = trimmed[2 + first_end + 2..].trim();
+            return after.is_empty() || is_comment_line(after);
+        }
+        return true;
+    }
+
+    // 3. Asterisk-prefixed comments:
+    // Handles JSX closing `*/}`, C closing `*/`, OCaml closing `*)`, block continuation `* `, and banners `***`
+    if trimmed.starts_with('*') {
+        if trimmed.starts_with("*/}") {
+            let after = trimmed[3..].trim();
+            return after.is_empty() || is_comment_line(after);
+        }
+        if trimmed.starts_with("*/") {
+            let after = trimmed[2..].trim();
+            return after.is_empty() || is_comment_line(after);
+        }
+        if trimmed.starts_with("*)") {
+            let after = trimmed[2..].trim();
+            return after.is_empty() || is_comment_line(after);
+        }
+        if trimmed.chars().all(|c| c == '*') {
+            return true;
+        }
+        if trimmed.starts_with("* ") || trimmed.starts_with("*\t") {
+            let after = trimmed[1..].trim();
+            // Guard against CSS universal selector: `* { ... }` or `*:hover`
+            if after.starts_with('{') && after.ends_with('}') && after.contains(':') {
+                return false;
+            }
+            if after.starts_with(':') && after.ends_with('{') {
+                return false;
+            }
+            // Guard against C multiplication / pointer assignment: `* ptr = 5;`
+            let words: Vec<&str> = after.split_whitespace().collect();
+            if words.len() >= 2
+                && matches!(words[1], "=" | "+=" | "-=" | "*=" | "/=" | "&=" | "|=")
+                && after.ends_with(';')
+            {
+                return false;
+            }
+            return true;
+        }
+        if trimmed.starts_with("** ") || trimmed.starts_with("**\t") {
+            return true;
+        }
+        return false;
+    }
+
+    // 4. JSX / TSX comments: {/* ... */}
+    if trimmed.starts_with("{/*") {
+        if let Some(first_end) = trimmed[3..].find("*/}") {
+            let after = trimmed[3 + first_end + 3..].trim();
+            return after.is_empty() || is_comment_line(after);
+        }
+        return true;
+    }
+
+    // 5. HTML / XML comments: <!-- ... --> or -->
+    if trimmed.starts_with("<!--") {
+        if let Some(first_end) = trimmed[4..].find("-->") {
+            let after = trimmed[4 + first_end + 3..].trim();
+            return after.is_empty() || is_comment_line(after);
+        }
+        return true;
+    }
+    if trimmed.starts_with("-->") {
+        let after = trimmed[3..].trim();
+        return after.is_empty() || is_comment_line(after);
+    }
+
+    // 6. Python / Julia docstrings: """ ... """ or ''' ... '''
+    if trimmed.starts_with("\"\"\"") {
+        if let Some(first_end) = trimmed[3..].find("\"\"\"") {
+            let after = trimmed[3 + first_end + 3..].trim();
+            return after.is_empty() || is_comment_line(after);
+        }
+        return true;
+    }
+    if trimmed.starts_with("'''") {
+        if let Some(first_end) = trimmed[3..].find("'''") {
+            let after = trimmed[3 + first_end + 3..].trim();
+            return after.is_empty() || is_comment_line(after);
+        }
+        return true;
+    }
+
+    // 7. Hash comments: Python, Shell, Ruby, Perl, YAML, TOML, Dockerfile, Makefile, etc.
+    if trimmed.starts_with('#') {
+        // Rust outer/inner attributes: #[derive(...)] or #![no_std]
+        if trimmed.starts_with("#[") || trimmed.starts_with("#![") {
+            return false;
+        }
+
+        let after_hash = trimmed[1..].trim_start();
+        let directive = after_hash
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .next()
+            .unwrap_or("");
+
+        // Check C / C++ / C# preprocessor directives vs Python/Shell conversational comments
+        if matches!(
+            directive,
+            "include"
+                | "define"
+                | "ifdef"
+                | "ifndef"
+                | "endif"
+                | "pragma"
+                | "if"
+                | "elif"
+                | "else"
+                | "error"
+                | "warning"
+                | "line"
+                | "import"
+                | "using"
+                | "region"
+                | "endregion"
+                | "nullable"
+        ) {
+            // In Python: `# pragma: no cover` or `# warning: check this`
+            if trimmed.contains(':') && !after_hash.starts_with("include") {
+                return true;
+            }
+            // In C/C++: `#include` must be followed by `<` or `"`
+            if directive == "include" {
+                let rest = after_hash["include".len()..].trim_start();
+                if rest.starts_with('<') || rest.starts_with('"') {
+                    return false;
+                }
+                return true; // e.g. `# include user profile in response`
+            }
+            // In C/C++: `#define` without space is code, e.g. `#define FOO 42`
+            if directive == "define" {
+                if trimmed.starts_with("#define") {
+                    return false;
+                }
+                let words: Vec<&str> = after_hash.split_whitespace().collect();
+                if words.len() >= 3 && !after_hash.contains('(') {
+                    return true;
+                }
+                return false;
+            }
+            // In Python: `# if x > 0:` or `# else:` (ends with `:`)
+            if matches!(directive, "if" | "elif" | "else") {
+                if trimmed.ends_with(':') || trimmed.contains(": #") || trimmed.contains(":\t#") {
+                    return true;
+                }
+                const ENGLISH_WORDS: &[&str] = &[
+                    "we", "you", "they", "the", "a", "an", "this", "that", "these", "those",
+                    "need", "want", "should", "would", "could", "can", "must", "might", "may",
+                    "there", "here", "is", "are", "was", "were", "be", "been", "have", "has",
+                    "had", "do", "does", "did", "to", "in", "on", "at", "by", "for", "with",
+                    "from", "then", "not", "so",
+                ];
+                let words: Vec<&str> = after_hash.split_whitespace().collect();
+                if words.iter().skip(1).any(|w| {
+                    let clean = w
+                        .trim_matches(|c: char| !c.is_ascii_alphabetic())
+                        .to_ascii_lowercase();
+                    ENGLISH_WORDS.contains(&clean.as_str())
+                }) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // CSS / SCSS ID selectors: `#app {`, `#main,`, `#header > div`
+        if !trimmed.starts_with("# ")
+            && !trimmed.starts_with("#\t")
+            && !trimmed.starts_with("##")
+            && !trimmed.starts_with("#!")
+        {
+            if trimmed.ends_with('{')
+                || trimmed.ends_with(',')
+                || trimmed.contains(" {")
+                || trimmed.contains(" > ")
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    // 8. SQL, Lua, Haskell, Ada, VHDL line comments: -- or closing -}
+    if trimmed.starts_with('-') {
+        if trimmed.starts_with("-}") {
+            let after = trimmed[2..].trim();
+            return after.is_empty() || is_comment_line(after);
+        }
+        if trimmed.starts_with("--") {
+            if trimmed == "--"
+                || trimmed.starts_with("-- ")
+                || trimmed.starts_with("--\t")
+                || trimmed.starts_with("---")
+                || trimmed.starts_with("--[")
+                || trimmed.starts_with("--!")
+                || trimmed.starts_with("-->")
+            {
+                return true;
+            }
+            // Pre-decrement in C, C++, Java, JS, PHP, C#: `--count;`, `--i;`, `--(p->ref);`
+            let after = &trimmed[2..];
+            if after.starts_with(|c: char| {
+                c.is_ascii_alphanumeric()
+                    || c == '_'
+                    || c == '('
+                    || c == '*'
+                    || c == '&'
+                    || c == ':'
+            }) {
+                return false;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    // 9. Haskell / Elm / Agda block comments: {- ... -}
+    if trimmed.starts_with("{-") {
+        if let Some(first_end) = trimmed[2..].find("-}") {
+            let after = trimmed[2 + first_end + 2..].trim();
+            return after.is_empty() || is_comment_line(after);
+        }
+        return true;
+    }
+
+    // 10. OCaml / Pascal / ML comments: (* ... *)
+    if trimmed.starts_with("(*") {
+        if let Some(first_end) = trimmed[2..].find("*)") {
+            let after = trimmed[2 + first_end + 2..].trim();
+            return after.is_empty() || is_comment_line(after);
+        }
+        return true;
+    }
+
+    // 11. D language comments: /+ ... +/ or +/
+    if trimmed.starts_with("/+") {
+        if let Some(first_end) = trimmed[2..].find("+/") {
+            let after = trimmed[2 + first_end + 2..].trim();
+            return after.is_empty() || is_comment_line(after);
+        }
+        return true;
+    }
+    if trimmed.starts_with("+/") {
+        let after = trimmed[2..].trim();
+        return after.is_empty() || is_comment_line(after);
+    }
+
+    // 12. Lisp, Scheme, Clojure, Assembly, INI comments: ;
+    if trimmed.starts_with(';') {
+        if trimmed.starts_with(";;")
+            || trimmed.starts_with("; ")
+            || trimmed.starts_with(";\t")
+            || trimmed.starts_with(";-")
+            || trimmed.starts_with(";=")
+            || trimmed.starts_with(";*")
+            || trimmed.starts_with(";!")
+        {
+            return true;
+        }
+        let after = &trimmed[1..];
+        // Defensive semicolons in JS: `;(function() ... )()`, `;[a, b] = ...`
+        if after.starts_with('(')
+            || after.starts_with('[')
+            || after.starts_with('{')
+            || after.starts_with('!')
+            || after.starts_with('+')
+            || after.starts_with('~')
+            || after.starts_with('"')
+            || after.starts_with('\'')
+        {
+            return false;
+        }
+        if after.trim().is_empty() {
+            return false;
+        }
+        if !after.contains('=') && !after.contains("();") {
+            return true;
+        }
+        return false;
+    }
+
+    // 13. Erlang, LaTeX, MATLAB, Octave, Prolog comments: %
+    if trimmed.starts_with('%') {
+        if trimmed.starts_with("% ")
+            || trimmed.starts_with("%\t")
+            || trimmed.starts_with("%%")
+            || trimmed.starts_with("%-")
+            || trimmed.starts_with("%=")
+            || trimmed.starts_with("%*")
+            || trimmed == "%"
+        {
+            return true;
+        }
+    }
+
+    // 14. Fortran comments: !
+    if trimmed.starts_with('!') {
+        if trimmed == "!"
+            || trimmed.starts_with("! ")
+            || trimmed.starts_with("!\t")
+            || trimmed.starts_with("!--")
+            || trimmed.starts_with("!*")
+            || trimmed.starts_with("!$")
+        {
+            return true;
+        }
+        if trimmed.len() >= 3 && trimmed[1..].chars().all(|c| c == '=' || c == '!' || c == '-') {
+            return true;
+        }
+        return false;
+    }
+
+    // 15. DOS / Windows Batch label comments: ::
+    if trimmed.starts_with("::") {
+        let after = &trimmed[2..];
+        // If followed by an identifier character in C++/Rust, it's a global scoped path
+        if !after.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_') {
+            return true;
+        }
+    }
+
+    // 16. DOS / Windows Batch REM comments: REM, rem
+    if trimmed.eq_ignore_ascii_case("rem")
+        || trimmed.to_ascii_lowercase().starts_with("rem ")
+        || trimmed.to_ascii_lowercase().starts_with("rem\t")
+    {
+        return true;
     }
 
     false
@@ -10818,6 +11231,35 @@ fn try_apply_hunk_at_location(
         let is_at_eof = (location.start_index + location.length) == target_lines.len();
         let ops = diff.ops().to_vec();
 
+        // Precompute whether all removal lines in the hunk matched cleanly in an Equal operation
+        let has_removals = match_lines_meta.iter().any(|(is_removal, _)| *is_removal);
+        let all_removals_verified = has_removals
+            && match_lines_meta
+                .iter()
+                .enumerate()
+                .all(|(idx, (is_removal, _))| {
+                    if !*is_removal {
+                        true
+                    } else {
+                        ops.iter().any(|op| match op {
+                            similar::DiffOp::Equal { old_index, len, .. } => {
+                                idx >= *old_index && idx < *old_index + *len
+                            }
+                            _ => false,
+                        })
+                    }
+                });
+
+        let head_substantive_verified = (0..head_context_end).any(|idx| {
+            !match_block_content[idx].trim().is_empty()
+                && ops.iter().any(|op| match op {
+                    similar::DiffOp::Equal { old_index, len, .. } => {
+                        idx >= *old_index && idx < *old_index + *len
+                    }
+                    _ => false,
+                })
+        });
+
         for (op_idx, op) in ops.iter().enumerate() {
             match op {
                 similar::DiffOp::Equal {
@@ -10946,9 +11388,22 @@ fn try_apply_hunk_at_location(
                         let all_tail_lost = total_substantive_tail > 0
                             && lost_substantive_tail >= total_substantive_tail;
 
-                        if has_definition || all_tail_lost {
+                        let tail_is_pure_comments = (0..*old_len).all(|i| {
+                            let line = match_block_content[*old_index + i].trim();
+                            line.is_empty() || is_comment_line(line)
+                        });
+
+                        let allow_tail_drift = !is_at_eof
+                            && !has_definition
+                            && all_removals_verified
+                            && (head_substantive_verified || head_context_end == 0)
+                            && tail_is_pure_comments;
+
+                        if (has_definition || all_tail_lost) && !allow_tail_drift {
                             warn!("    Fuzzy match rejected: Tail context line(s) missing from target file.");
                             return Err(HunkApplyError::ContextNotFound);
+                        } else if all_tail_lost {
+                            trace!("    Tail context drift permitted: verified removals and head context matched (pure_comments=true)");
                         }
                     }
 
@@ -11154,7 +11609,13 @@ fn try_apply_hunk_at_location(
                                         !h_norm.is_empty() && h_norm == t_norm
                                     };
 
-                                    if !is_delimiter_match {
+                                    let is_ignorable_comment_drift = !is_at_eof
+                                        && all_removals_verified
+                                        && (head_substantive_verified || head_context_end == 0)
+                                        && (old_idx >= tail_context_start)
+                                        && is_comment_line(old_trimmed);
+
+                                    if !is_delimiter_match && !is_ignorable_comment_drift {
                                         warn!(
                                         "    Fuzzy match rejected: Context line {:?} differs completely from target line {:?}.",
                                         match_block_content[old_idx],
@@ -11347,9 +11808,22 @@ fn try_apply_hunk_at_location(
                                 let all_tail_lost = total_substantive_tail > 0
                                     && lost_substantive_tail >= total_substantive_tail;
 
-                                if has_definition || all_tail_lost {
+                                let tail_is_pure_comments = (0..*old_len).all(|i| {
+                                    let line = match_block_content[old_index + i].trim();
+                                    line.is_empty() || is_comment_line(line)
+                                });
+
+                                let allow_tail_drift = !is_at_eof
+                                    && !has_definition
+                                    && all_removals_verified
+                                    && (head_substantive_verified || head_context_end == 0)
+                                    && tail_is_pure_comments;
+
+                                if (has_definition || all_tail_lost) && !allow_tail_drift {
                                     warn!("    Fuzzy match rejected: Tail context is unaligned in replacement block.");
                                     return Err(HunkApplyError::ContextNotFound);
+                                } else if all_tail_lost {
+                                    trace!("    Tail context replacement drift permitted: verified removals and head context matched");
                                 }
                             }
 
