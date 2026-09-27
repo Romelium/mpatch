@@ -321,15 +321,6 @@ def run_tool_diagnostics(
         issues.append("Tool 'rustc' is not installed or not found in PATH.")
     else:
         print(f"  ✔ rustc:        {rustc_out}")
-        # Enforce PyO3 MSRV (Rust 1.83.0+)
-        m = re.search(r"rustc\s+(\d+)\.(\d+)\.(\d+)", rustc_out)
-        if m:
-            maj, min_ver = int(m.group(1)), int(m.group(2))
-            if (maj, min_ver) < (1, 83):
-                issues.append(
-                    f"Rust 1.83.0+ is required by mpatch and PyO3 (detected: {rustc_out}). "
-                    "Update using 'rustup update'."
-                )
 
     if not skip_tests:
         # Check rustfmt component
