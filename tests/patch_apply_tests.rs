@@ -7502,7 +7502,7 @@ mod entropy_and_orphan_guards {
             original_content.push_str(&format!("    let step_{} = {};\n", i, i));
         }
         original_content.push_str("}\n\n");
-        for i in 0..20 {
+        for i in 0..60 {
             original_content.push_str(&format!("/// Intervening doc comment {}\n", i));
         }
         original_content.push_str("fn func_two(arg: u32) {\n    step_2();\n}\n");
@@ -12215,6 +12215,186 @@ fn test_cli_near_miss_inline_diagnostic_output() {
         stderr.contains("worker_task"),
         "Expected diff lines in stderr, got: {}",
         stderr
+    );
+}
+
+#[test]
+fn test_large_hunk_large_file_fuzzy_match_with_anchor() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("large_service.rs");
+
+    // Generate a 10,000-line file with realistic code
+    let mut lines = Vec::with_capacity(10_000);
+    for i in 0..10_000 {
+        lines.push(format!("    let stage_{} = execute_step({});", i, i));
+    }
+    fs::write(&file_path, lines.join("\n") + "\n").unwrap();
+
+    // Create a 500-line hunk targeting lines 5,000..5,500
+    let mut patch_lines = vec![
+        "--- a/large_service.rs".to_string(),
+        "+++ b/large_service.rs".to_string(),
+        "@@ -5000,500 +5000,500 @@".to_string(),
+    ];
+    for i in 5000..5500 {
+        if i == 5250 {
+            patch_lines.push(format!("-    let stage_{} = execute_step({});", i, i));
+            patch_lines.push(format!("+    let stage_{} = execute_step_optimized({});", i, i));
+        } else {
+            patch_lines.push(format!("     let stage_{} = execute_step({});", i, i));
+        }
+    }
+
+    let patch = mpatch::parse_auto(&patch_lines.join("\n")).unwrap().remove(0);
+    let options = ApplyOptions::new(); // Fuzz factor 0.70
+    let result = apply_patch_to_file(&patch, dir.path(), options).unwrap();
+
+    assert!(
+        result.report.all_applied_cleanly(),
+        "500-line hunk in 10,000-line file should apply cleanly"
+    );
+    let content = fs::read_to_string(&file_path).unwrap();
+    assert!(content.contains("let stage_5250 = execute_step_optimized(5250);"));
+}
+
+#[test]
+fn test_large_hunk_large_file_coincidental_anchor_fallback() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("service_collision.rs");
+
+    let mut lines = Vec::with_capacity(10_000);
+    for i in 0..10_000 {
+        if i == 1_000 {
+            // Coincidental anchor collision line early in the file
+            lines.push("    let unique_marker_token = 0xDEADBEEF;".to_string());
+        } else if i >= 8_000 && i < 8_500 {
+            lines.push(format!("    let core_calc_{} = compute_val({});", i, i));
+        } else {
+            lines.push(format!("    let noise_{} = dummy_step({});", i, i));
+        }
+    }
+    fs::write(&file_path, lines.join("\n") + "\n").unwrap();
+
+    // Hunk has unique_marker_token (which collides with line 1,000), but the true 500-line
+    // body is at lines 8,000..8,500.
+    let mut patch_lines = vec![
+        "--- a/service_collision.rs".to_string(),
+        "+++ b/service_collision.rs".to_string(),
+        "@@ -8000,500 +8000,500 @@".to_string(),
+    ];
+    for i in 8000..8500 {
+        if i == 8005 {
+            patch_lines.push("     let unique_marker_token = 0xDEADBEEF;".to_string());
+        } else if i == 8250 {
+            patch_lines.push(format!("-    let core_calc_{} = compute_val({});", i, i));
+            patch_lines.push(format!("+    let core_calc_{} = compute_val_fast({});", i, i));
+        } else {
+            patch_lines.push(format!("     let core_calc_{} = compute_val({});", i, i));
+        }
+    }
+
+    let patch = mpatch::parse_auto(&patch_lines.join("\n")).unwrap().remove(0);
+    let options = ApplyOptions::new();
+
+    let timeout = if cfg!(debug_assertions) {
+        std::time::Duration::from_secs(10)
+    } else {
+        std::time::Duration::from_secs(5)
+    };
+    let start_time = std::time::Instant::now();
+
+    // Run patch application on a worker thread bounded by a 5-second hard timeout
+    let (tx, rx) = std::sync::mpsc::channel();
+    let target_dir = dir.path().to_path_buf();
+    let patch_clone = patch.clone();
+    std::thread::spawn(move || {
+        let res = apply_patch_to_file(&patch_clone, &target_dir, options);
+        let _ = tx.send(res);
+    });
+
+    let result = rx
+        .recv_timeout(timeout)
+        .unwrap_or_else(|_| panic!("test_large_hunk_large_file_coincidental_anchor_fallback took too long (> {:?})", timeout))
+        .unwrap();
+
+    let elapsed = start_time.elapsed();
+    assert!(
+        elapsed < timeout,
+        "Test execution exceeded timeout: {:?} >= {:?}",
+        elapsed,
+        timeout
+    );
+
+    assert!(
+        result.report.all_applied_cleanly(),
+        "Tiered fallback must recover from coincidental anchor collision and find the true match"
+    );
+    let content = fs::read_to_string(&file_path).unwrap();
+    assert!(content.contains("let core_calc_8250 = compute_val_fast(8250);"));
+}
+
+#[test]
+fn test_large_hunk_non_matching_fast_rejection() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("unrelated_file.rs");
+
+    let lines: Vec<String> = (0..10_000).map(|i| format!("fn handler_{}() {{}}", i)).collect();
+    fs::write(&file_path, lines.join("\n") + "\n").unwrap();
+
+    // 500-line hunk from completely different codebase
+    let mut patch_lines = vec![
+        "--- a/unrelated_file.rs".to_string(),
+        "+++ b/unrelated_file.rs".to_string(),
+        "@@ -1,500 +1,500 @@".to_string(),
+    ];
+    for i in 0..500 {
+        if i == 250 {
+            patch_lines.push(format!("-SELECT column_{} FROM database_table_{};", i, i));
+            patch_lines.push(format!("+SELECT column_{} FROM database_table_mod_{};", i, i));
+        } else {
+            if i == 250 {
+                patch_lines.push(format!("-SELECT column_{} FROM database_table_{};", i, i));
+                patch_lines.push(format!("+SELECT column_{} FROM database_table_mod_{};", i, i));
+            } else {
+                patch_lines.push(format!(" SELECT column_{} FROM database_table_{};", i, i));
+            }
+        }
+    }
+
+    let patch = mpatch::parse_auto(&patch_lines.join("\n")).unwrap().remove(0);
+    let options = ApplyOptions::new();
+
+    let timeout = std::time::Duration::from_secs(5);
+    let start_time = std::time::Instant::now();
+
+    // Run patch application on a worker thread bounded by a 5-second hard timeout
+    let (tx, rx) = std::sync::mpsc::channel();
+    let target_dir = dir.path().to_path_buf();
+    let patch_clone = patch.clone();
+    std::thread::spawn(move || {
+        let res = apply_patch_to_file(&patch_clone, &target_dir, options);
+        let _ = tx.send(res);
+    });
+
+    let result = rx
+        .recv_timeout(timeout)
+        .unwrap_or_else(|_| panic!("test_large_hunk_non_matching_fast_rejection took too long (> {:?})", timeout))
+        .unwrap();
+
+    let elapsed = start_time.elapsed();
+    assert!(
+        elapsed < timeout,
+        "Test execution exceeded timeout: {:?} >= {:?}",
+        elapsed,
+        timeout
+    );
+
+    assert!(
+        !result.report.all_applied_cleanly(),
+        "Unrelated 500-line hunk must fail cleanly"
     );
 }
 
