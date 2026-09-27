@@ -27,6 +27,13 @@
 //!   formatting differences to prevent multi-line refactoring mismatches.
 //! - **Wildcard & Ellipsis Matching**: Recognizing code omissions (`...`, `// ... existing code ...`)
 //!   across single and multi-segment hunks, reconstructing multi-line code gaps while preserving untouched code.
+//! - **Atomic Application**: Staging multi-file changes in-memory and committing
+//!   to disk if and only if all hunks across all patches apply cleanly. If any hunk fails,
+//!   the filesystem remains completely untouched.
+//! - **Three-Way Merge**: Performing line-level 3-way merges with Diff3 conflict markers
+//!   when integrating divergent changes against a common ancestor.
+//! - **Inline Diffs & Path Suggestions**: Sub-line word-level diff visualization and
+//!   fuzzy path suggestions for misspelled or moved target files.
 //!
 //! ## Supported Formats
 //!
@@ -157,6 +164,63 @@
 //! # }
 //! ````
 //!
+//! ## Atomic (All-or-Nothing) Patch Application
+//!
+//! When applying changes across multiple files or hunks, you can guarantee that the
+//! filesystem is never left in a partially patched state by using [`apply_patches_to_dir_atomic()`]
+//! or [`apply_patch_to_file_atomic()`]. Changes are committed if and only if all hunks succeed:
+//!
+//! ````rust
+//! use mpatch::{parse_auto, apply_patches_to_dir_atomic, ApplyOptions};
+//! use std::fs;
+//! use tempfile::tempdir;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let dir = tempdir()?;
+//! let file1 = dir.path().join("file1.txt");
+//! let file2 = dir.path().join("file2.txt");
+//! fs::write(&file1, "foo\n")?;
+//! fs::write(&file2, "bar\n")?;
+//!
+//! let diff = r#"
+//! --- a/file1.txt
+//! +++ b/file1.txt
+//! @@ -1 +1 @@
+//! -foo
+//! +foo_updated
+//! --- a/file2.txt
+//! +++ b/file2.txt
+//! @@ -1 +1 @@
+//! -bar
+//! +bar_updated
+//! "#;
+//!
+//! let patches = parse_auto(diff)?;
+//! let batch = apply_patches_to_dir_atomic(&patches, dir.path(), ApplyOptions::exact());
+//!
+//! assert!(batch.all_applied_cleanly());
+//! assert_eq!(fs::read_to_string(&file1)?, "foo_updated\n");
+//! assert_eq!(fs::read_to_string(&file2)?, "bar_updated\n");
+//! # Ok(())
+//! # }
+//! ````
+//!
+//! ## Three-Way Line Merging
+//!
+//! For merging divergent branches or resolving AI suggestions against an ancestor:
+//!
+//! ````rust
+//! use mpatch::merge_three_way;
+//!
+//! let base   = "Apples\nBananas\nCherries\n";
+//! let ours   = "Apples\nBlueberries\nCherries\n";
+//! let theirs = "Apples\nBananas\nCranberries\n";
+//!
+//! let (merged, is_conflicted) = merge_three_way(base, ours, theirs, None);
+//! assert!(!is_conflicted);
+//! assert_eq!(merged, "Apples\nBlueberries\nCranberries\n");
+//! ````
+//!
 //! ## Key Concepts
 //!
 //! ### The Patching Workflow
@@ -197,25 +261,31 @@
 //! - [`apply_patch_to_file()`]: The most convenient function for applying a single
 //!   patch to a file. It handles reading the original file and writing the new content
 //!   back to disk. If the patch results in empty content, the file is deleted.
+//! - [`apply_patch_to_file_atomic()`]: Applies a single patch to a file atomically,
+//!   modifying disk only if all hunks apply cleanly.
 //! - [`apply_patch_to_content()`]: A pure function for in-memory operations. It takes
 //!   the original content as a string and returns the new content.
 //! - [`apply_patch_to_lines()`]: Similar to `apply_patch_to_content()`, but operates
 //!   directly on a slice of lines, avoiding string allocations.
 //!
-//! Each of these also has a "strict" `try_` variant (e.g., [`try_apply_patch_to_file()`])
-//! that treats partial applications as an error, simplifying the common apply-or-fail
-//! workflow.
+//! Each of these also has a "strict" `try_` variant (e.g., [`try_apply_patch_to_file()`],
+//! [`try_apply_patch_to_file_atomic()`], [`try_apply_patches_to_dir()`], and
+//! [`try_apply_patches_to_dir_atomic()`]) that treats partial applications as an error,
+//! simplifying the common apply-or-fail workflow.
 //!
 //! You can also manipulate patches before application:
 //!
 //! - [`invert_patches()`]: Reverses a list of patches (swapping additions and deletions).
 //!
-//! ### Granular Application
+//! ### Granular Application & Utilities
 //!
 //! - [`apply_hunk_to_lines()`]: Applies a single hunk to a mutable vector of lines in-place, with automatic candidate backtracking.
 //! - [`find_hunk_location()`]: Finds the location to apply a hunk to a given text content without modifying it.
 //! - [`find_hunk_location_in_lines()`]: Finds the location to apply a hunk to a slice of lines without modifying it.
 //! - [`DefaultHunkFinder`]: The default, built-in search strategy for locating hunks and candidate match locations.
+//! - [`format_inline_diff()`]: Formats an inline word-level diff with colored ANSI highlights.
+//! - [`merge_three_way()`]: Performs a 3-way line merge with Diff3 conflict markers.
+//! - [`suggest_close_file_paths()`]: Finds close matching file paths in a target directory when a patch specifies a missing file.
 //! - [`is_ellipsis_line()`]: Tests whether a line represents an omitted code ellipsis wildcard.
 //! - [`is_plausible_file_path()`]: Validates whether a candidate string represents a plausible file path.
 //! - [`extract_file_path_from_line()`]: Extracts a target file path from conversational headings or preceding markdown lines.
@@ -375,6 +445,39 @@
 //! let result = try_apply_patch_to_content(&patch, Some(original_content), &options);
 //!
 //! assert!(matches!(result, Err(StrictApplyError::PartialApply { .. })));
+//! # Ok(())
+//! # }
+//! ````
+//!
+//! ### Atomic (All-or-Nothing) Batch Application
+//!
+//! For batch operations where any failure across any file must leave the entire filesystem
+//! untouched, use [`try_apply_patches_to_dir_atomic()`]:
+//!
+//! ````rust
+//! use mpatch::{parse_auto, try_apply_patches_to_dir_atomic, ApplyOptions};
+//! use tempfile::tempdir;
+//! use std::fs;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let dir = tempdir()?;
+//! let file_path = dir.path().join("server.rs");
+//! fs::write(&file_path, "fn start() {}\n")?;
+//!
+//! let diff = r#"
+//! --- a/server.rs
+//! +++ b/server.rs
+//! @@ -1 +1 @@
+//! -fn start() {}
+//! +fn start() { init(); }
+//! "#;
+//!
+//! let patches = parse_auto(diff)?;
+//! let options = ApplyOptions::exact();
+//!
+//! // Only writes to disk if all patches and hunks apply cleanly
+//! let batch = try_apply_patches_to_dir_atomic(&patches, dir.path(), options)?;
+//! assert!(batch.all_applied_cleanly());
 //! # Ok(())
 //! # }
 //! ````
@@ -840,13 +943,52 @@ pub enum StrictApplyError {
 /// This enum is returned by functions like [`try_apply_patches_to_dir()`] and
 /// [`try_apply_patches_to_dir_atomic()`], which treat partial applications or hard errors
 /// across any patch in a batch as an error.
+///
+/// # Examples
+///
+/// ```rust
+/// # use mpatch::{parse_auto, try_apply_patches_to_dir_atomic, ApplyOptions, StrictBatchApplyError};
+/// # use tempfile::tempdir;
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let dir = tempdir()?;
+/// let diff = "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-wrong\n+new\n";
+/// let patches = parse_auto(diff)?;
+/// let options = ApplyOptions::exact();
+///
+/// let result = try_apply_patches_to_dir_atomic(&patches, dir.path(), options);
+/// assert!(matches!(result, Err(StrictBatchApplyError::Failed { .. })));
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum StrictBatchApplyError {
     /// One or more patch operations failed or applied partially.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use mpatch::{BatchResult, StrictBatchApplyError};
+    /// let batch = BatchResult { results: vec![] };
+    /// let err = StrictBatchApplyError::Failed { batch_result: batch };
+    /// match err {
+    ///     StrictBatchApplyError::Failed { batch_result } => assert!(batch_result.all_succeeded()),
+    /// }
+    /// ```
     #[error("One or more patch operations failed. See batch result for details.")]
     Failed {
         /// The aggregated results of the batch operations.
+        ///
+        /// # Examples
+        ///
+        /// ```rust
+        /// # use mpatch::{BatchResult, StrictBatchApplyError};
+        /// let batch = BatchResult { results: vec![] };
+        /// let err = StrictBatchApplyError::Failed { batch_result: batch };
+        /// if let StrictBatchApplyError::Failed { batch_result } = err {
+        ///     assert_eq!(batch_result.results.len(), 0);
+        /// }
+        /// ```
         batch_result: BatchResult,
     },
 }
@@ -2127,6 +2269,25 @@ impl BatchResult {
     /// # Returns
     ///
     /// `true` if every patch succeeded and every hunk in every patch applied cleanly, `false` otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use mpatch::{parse_auto, apply_patches_to_dir_atomic, ApplyOptions};
+    /// # use tempfile::tempdir;
+    /// # use std::fs;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let dir = tempdir()?;
+    /// let file_path = dir.path().join("file.txt");
+    /// fs::write(&file_path, "old\n")?;
+    /// let diff = "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n";
+    /// let patches = parse_auto(diff)?;
+    ///
+    /// let batch = apply_patches_to_dir_atomic(&patches, dir.path(), ApplyOptions::exact());
+    /// assert!(batch.all_applied_cleanly());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn all_applied_cleanly(&self) -> bool {
         self.results
             .iter()
@@ -2138,6 +2299,22 @@ impl BatchResult {
     /// # Returns
     ///
     /// `true` if any patch had a hard error or any hunk failed to apply, `false` otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use mpatch::{parse_auto, apply_patches_to_dir_atomic, ApplyOptions};
+    /// # use tempfile::tempdir;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let dir = tempdir()?;
+    /// let diff = "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-missing\n+new\n";
+    /// let patches = parse_auto(diff)?;
+    ///
+    /// let batch = apply_patches_to_dir_atomic(&patches, dir.path(), ApplyOptions::exact());
+    /// assert!(batch.has_failures());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn has_failures(&self) -> bool {
         !self.all_applied_cleanly()
     }
@@ -3208,6 +3385,27 @@ impl Patch {
     /// # Errors
     ///
     /// Returns `Err(`[`PatchError`]`)` on hard errors like I/O failures or path traversal.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use mpatch::{parse_single_patch, ApplyOptions};
+    /// # use tempfile::tempdir;
+    /// # use std::fs;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let dir = tempdir()?;
+    /// let file_path = dir.path().join("hello.txt");
+    /// fs::write(&file_path, "Hello, world!\n")?;
+    ///
+    /// let diff = "--- a/hello.txt\n+++ b/hello.txt\n@@ -1 +1 @@\n-Hello, world!\n+Hello, mpatch!\n";
+    /// let patch = parse_single_patch(diff)?;
+    /// let result = patch.apply_to_file(dir.path(), ApplyOptions::exact())?;
+    ///
+    /// assert!(result.report.all_applied_cleanly());
+    /// assert_eq!(fs::read_to_string(&file_path)?, "Hello, mpatch!\n");
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn apply_to_file(
         &self,
         target_dir: &Path,
@@ -3238,6 +3436,27 @@ impl Patch {
     /// # Errors
     ///
     /// Returns `Err(`[`PatchError`]`)` on hard errors like I/O failures or path traversal.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use mpatch::{parse_single_patch, ApplyOptions};
+    /// # use tempfile::tempdir;
+    /// # use std::fs;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let dir = tempdir()?;
+    /// let file_path = dir.path().join("app.txt");
+    /// fs::write(&file_path, "line 1\nline 2\n")?;
+    ///
+    /// let diff = "--- a/app.txt\n+++ b/app.txt\n@@ -1,2 +1,2 @@\n line 1\n-line 2\n+line two\n";
+    /// let patch = parse_single_patch(diff)?;
+    /// let result = patch.apply_to_file_atomic(dir.path(), ApplyOptions::exact())?;
+    ///
+    /// assert!(result.report.all_applied_cleanly());
+    /// assert_eq!(fs::read_to_string(&file_path)?, "line 1\nline two\n");
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn apply_to_file_atomic(
         &self,
         target_dir: &Path,
@@ -3263,6 +3482,22 @@ impl Patch {
     /// # Returns
     ///
     /// An [`InMemoryResult`] containing the new content and report.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use mpatch::{parse_single_patch, ApplyOptions};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let diff = "--- a/greeting.txt\n+++ b/greeting.txt\n@@ -1 +1 @@\n-Hello\n+Hi\n";
+    /// let patch = parse_single_patch(diff)?;
+    /// let options = ApplyOptions::exact();
+    /// let result = patch.apply_to_content(Some("Hello\n"), &options);
+    ///
+    /// assert!(result.report.all_applied_cleanly());
+    /// assert_eq!(result.new_content, "Hi\n");
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn apply_to_content(
         &self,
         original_content: Option<&str>,
@@ -6801,6 +7036,27 @@ pub fn apply_patches_to_dir_atomic(
 /// # Errors
 ///
 /// Returns `Err(`[`StrictBatchApplyError::Failed`]`)` if any patch had a hard error or any hunk failed.
+///
+/// # Examples
+///
+/// ```rust
+/// # use mpatch::{parse_auto, try_apply_patches_to_dir_atomic, ApplyOptions};
+/// # use tempfile::tempdir;
+/// # use std::fs;
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let dir = tempdir()?;
+/// let file_path = dir.path().join("data.txt");
+/// fs::write(&file_path, "value = 1\n")?;
+///
+/// let diff = "--- a/data.txt\n+++ b/data.txt\n@@ -1 +1 @@\n-value = 1\n+value = 2\n";
+/// let patches = parse_auto(diff)?;
+/// let batch = try_apply_patches_to_dir_atomic(&patches, dir.path(), ApplyOptions::exact())?;
+///
+/// assert!(batch.all_applied_cleanly());
+/// assert_eq!(fs::read_to_string(&file_path)?, "value = 2\n");
+/// # Ok(())
+/// # }
+/// ```
 pub fn try_apply_patches_to_dir_atomic(
     patches: &[Patch],
     target_dir: &Path,
@@ -6837,6 +7093,27 @@ pub fn try_apply_patches_to_dir_atomic(
 /// # Errors
 ///
 /// Returns `Err(`[`StrictBatchApplyError::Failed`]`)` if any patch had a hard error or any hunk failed.
+///
+/// # Examples
+///
+/// ```rust
+/// # use mpatch::{parse_auto, try_apply_patches_to_dir, ApplyOptions};
+/// # use tempfile::tempdir;
+/// # use std::fs;
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let dir = tempdir()?;
+/// let file_path = dir.path().join("server.txt");
+/// fs::write(&file_path, "port = 8080\n")?;
+///
+/// let diff = "--- a/server.txt\n+++ b/server.txt\n@@ -1 +1 @@\n-port = 8080\n+port = 9090\n";
+/// let patches = parse_auto(diff)?;
+/// let batch = try_apply_patches_to_dir(&patches, dir.path(), ApplyOptions::exact())?;
+///
+/// assert!(batch.all_applied_cleanly());
+/// assert_eq!(fs::read_to_string(&file_path)?, "port = 9090\n");
+/// # Ok(())
+/// # }
+/// ```
 pub fn try_apply_patches_to_dir(
     patches: &[Patch],
     target_dir: &Path,
@@ -7293,6 +7570,43 @@ pub fn apply_patch_to_file_atomic(
 ///
 /// If any hunk fails to apply, the file on disk remains completely unmodified and an
 /// `Err(`[`StrictApplyError::PartialApply`]`)` is returned.
+///
+/// # Arguments
+///
+/// * `patch` - The [`Patch`] object to apply.
+/// * `target_dir` - The base directory where the patch should be applied.
+/// * `options` - Configuration for the patch operation.
+///
+/// # Returns
+///
+/// A [`PatchResult`] if all hunks applied cleanly.
+///
+/// # Errors
+///
+/// - Returns `Err(`[`StrictApplyError::PartialApply`]`)` if any hunk failed to apply. The file on disk
+///   remains completely unmodified.
+/// - Returns `Err(`[`StrictApplyError::Patch`]`)` for hard errors like I/O problems or a missing target file.
+///
+/// # Examples
+///
+/// ```rust
+/// # use mpatch::{parse_single_patch, try_apply_patch_to_file_atomic, ApplyOptions};
+/// # use tempfile::tempdir;
+/// # use std::fs;
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let dir = tempdir()?;
+/// let file_path = dir.path().join("config.toml");
+/// fs::write(&file_path, "timeout = 30\n")?;
+///
+/// let diff = "--- a/config.toml\n+++ b/config.toml\n@@ -1 +1 @@\n-timeout = 30\n+timeout = 60\n";
+/// let patch = parse_single_patch(diff)?;
+/// let result = try_apply_patch_to_file_atomic(&patch, dir.path(), ApplyOptions::exact())?;
+///
+/// assert!(result.report.all_applied_cleanly());
+/// assert_eq!(fs::read_to_string(&file_path)?, "timeout = 60\n");
+/// # Ok(())
+/// # }
+/// ```
 pub fn try_apply_patch_to_file_atomic(
     patch: &Patch,
     target_dir: &Path,
@@ -12813,6 +13127,18 @@ fn parse_hunk_header(line: &str) -> (Option<usize>, Option<usize>) {
 /// # Returns
 ///
 /// A formatted string containing the annotated inline diff with word-level highlights.
+///
+/// # Examples
+///
+/// ```rust
+/// use mpatch::format_inline_diff;
+///
+/// let expected = vec!["fn compute(x: i32) -> i32 {"];
+/// let actual = vec!["fn compute(x: i64) -> i32 {"];
+/// let diff = format_inline_diff(&expected, &actual);
+///
+/// assert!(diff.contains("compute"));
+/// ```
 pub fn format_inline_diff<T: AsRef<str>>(expected_lines: &[&str], actual_lines: &[T]) -> String {
     trace!(
         "format_inline_diff: comparing {} expected line(s) with {} actual line(s)",
@@ -12893,6 +13219,31 @@ pub fn format_inline_diff<T: AsRef<str>>(expected_lines: &[&str], actual_lines: 
 /// # Returns
 ///
 /// A tuple `(merged_text, is_conflicted)` where `is_conflicted` is `true` if any conflict occurred.
+///
+/// # Examples
+///
+/// ```rust
+/// use mpatch::merge_three_way;
+///
+/// let base = "alpha\nbeta\ngamma\n";
+/// let ours = "alpha\nbeta_local\ngamma\n";
+/// let theirs = "alpha\nbeta\ngamma_remote\n";
+///
+/// let (merged, is_conflicted) = merge_three_way(base, ours, theirs, None);
+/// assert!(!is_conflicted);
+/// assert_eq!(merged, "alpha\nbeta_local\ngamma_remote\n");
+///
+/// // Conflicting 3-way merge with labels:
+/// let (conflict_merged, is_conflicted) = merge_three_way(
+///     "val = 1\n",
+///     "val = 2\n",
+///     "val = 3\n",
+///     Some(("base", "ours", "theirs")),
+/// );
+/// assert!(is_conflicted);
+/// assert!(conflict_merged.contains("<<<<<<< ours"));
+/// assert!(conflict_merged.contains(">>>>>>> theirs"));
+/// ```
 pub fn merge_three_way(
     base: &str,
     ours: &str,
@@ -12946,6 +13297,38 @@ pub fn merge_three_way(
 /// Finds close matching file paths in a target directory when a patch specifies a missing file.
 ///
 /// Uses `similar::get_close_matches` to suggest possible intended files among existing paths in `dir`.
+/// Skips common non-source directories (such as `target`, `node_modules`, and hidden dot-directories).
+///
+/// # Arguments
+///
+/// * `missing_path` - The relative or absolute path of the missing target file.
+/// * `base_dir` - The root directory to search within.
+/// * `limit` - The maximum number of close match suggestions to return.
+///
+/// # Returns
+///
+/// A vector of [`PathBuf`] candidates relative to `base_dir`, sorted by similarity.
+///
+/// # Examples
+///
+/// ```rust
+/// use mpatch::suggest_close_file_paths;
+/// use std::path::Path;
+/// use tempfile::tempdir;
+/// use std::fs;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let dir = tempdir()?;
+/// let file_path = dir.path().join("calculator.rs");
+/// fs::write(&file_path, "fn add() {}\n")?;
+///
+/// // Search for a typo: "calculate.rs" instead of "calculator.rs"
+/// let suggestions = suggest_close_file_paths(Path::new("calculate.rs"), dir.path(), 3);
+/// assert_eq!(suggestions.len(), 1);
+/// assert_eq!(suggestions[0], Path::new("calculator.rs"));
+/// # Ok(())
+/// # }
+/// ```
 pub fn suggest_close_file_paths(
     missing_path: &Path,
     base_dir: &Path,
