@@ -5158,31 +5158,30 @@ pub fn parse_auto(content: &str) -> Result<Vec<Patch>, ParseError> {
 /// assert_eq!(patches[0].hunks.len(), 1);
 /// ````
 pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
-    debug!("Starting to parse diffs from content (Markdown mode).");
     let mut all_patches = Vec::new();
     let mut lines = content.lines().enumerate().peekable();
-    let mut preceding_lines: Vec<&str> = Vec::new();
-    let mut last_seen_file_path: Option<PathBuf> = None;
+
+    // 1. Structural Section Scope: Set by headings, lasts until next major heading
+    let mut section_file_path: Option<PathBuf> = None;
+
+    // 2. Sliding window of preceding lines outside code blocks (O(1) pop_front)
+    const MAX_PRECEDING_LINES: usize = 50;
+    let mut preceding_lines: std::collections::VecDeque<&str> =
+        std::collections::VecDeque::with_capacity(MAX_PRECEDING_LINES);
+
+    // 3. Fallback for consecutive hunks in the same file
+    let mut last_patched_file: Option<PathBuf> = None;
 
     while let Some((line_index, line_text)) = lines.next() {
-        let trimmed = line_text.trim_start();
+        let trimmed = line_text.trim();
+
+        // --- Case A: Fenced Code Block ---
         if trimmed.starts_with("```") && count_leading_backticks(trimmed) >= 3 {
             let fence_len = count_leading_backticks(trimmed);
-            let opening_indent = line_text.len() - trimmed.len();
-            let block_info = trimmed[fence_len..].trim();
-
-            trace!(
-                "parse_diffs: found code block start at line {}: fence_len={}, indent={}, info='{}'",
-                line_index + 1,
-                fence_len,
-                opening_indent,
-                block_info
-            );
+            let opening_indent = line_text.len() - line_text.trim_start().len();
             let diff_block_start_line = line_index + 1;
 
             let mut block_lines = Vec::new();
-
-            // Consume lines until end of block
             while let Some((_, line)) = lines.peek() {
                 let inner_trimmed = line.trim_start();
                 let current_indent = line.len() - inner_trimmed.len();
@@ -5190,12 +5189,7 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
                     && count_leading_backticks(inner_trimmed) >= fence_len
                     && current_indent <= opening_indent
                 {
-                    trace!(
-                        "parse_diffs: closing code block for start line {} at line {}",
-                        diff_block_start_line,
-                        line_index + 1
-                    );
-                    lines.next(); // Consume the closing fence
+                    lines.next();
                     break;
                 }
                 let (_, line) = lines.next().unwrap();
@@ -5203,62 +5197,78 @@ pub fn parse_diffs(content: &str) -> Result<Vec<Patch>, ParseError> {
             }
 
             if has_patch_signature_at_level_1(&block_lines) {
-                debug!(
-                    "Parsing diff block starting on line {}.",
-                    diff_block_start_line
-                );
-                let detected_path = preceding_lines
+                // Resolution Order:
+                // 1. Path in immediate lead-in text (sliding window)
+                // 2. Path in enclosing section heading (no line limit!)
+                // 3. Last patched file in this section
+                let lead_in_path = preceding_lines
                     .iter()
                     .rev()
                     .find_map(|l| extract_file_path_from_line(l));
-                if let Some(ref path) = detected_path {
-                    last_seen_file_path = Some(path.clone());
-                }
-                let default_file_path = detected_path.or_else(|| last_seen_file_path.clone());
 
-                if let Some(ref path) = default_file_path {
-                    trace!(
-                        "  Inferred target file path for block from preceding text: '{}'",
-                        path.display()
-                    );
-                } else {
-                    trace!("  No preceding target file path found for block");
+                if let Some(ref path) = lead_in_path {
+                    section_file_path = Some(path.clone());
+                    last_patched_file = Some(path.clone());
                 }
-                let block_patches = parse_generic_block_lines(
-                    &block_lines,
-                    diff_block_start_line,
-                    default_file_path,
-                )?;
-                for p in &block_patches {
-                    if p.file_path != Path::new("patch_target") {
-                        last_seen_file_path = Some(p.file_path.clone());
+
+                let target_path = lead_in_path
+                    .or_else(|| section_file_path.clone())
+                    .or_else(|| last_patched_file.clone());
+
+                let block_patches =
+                    parse_generic_block_lines(&block_lines, diff_block_start_line, target_path)?;
+
+                if !block_patches.is_empty() {
+                    for p in &block_patches {
+                        if p.file_path != Path::new("patch_target") {
+                            last_patched_file = Some(p.file_path.clone());
+                            section_file_path = Some(p.file_path.clone());
+                        }
                     }
+                    all_patches.extend(block_patches);
+
+                    // Only clear preceding lines when a patch was actually produced!
+                    preceding_lines.clear();
                 }
-                debug!(
-                    "  Extracted {} patch(es) from block starting on line {}.",
-                    block_patches.len(),
-                    diff_block_start_line
-                );
-                all_patches.extend(block_patches);
             } else {
                 trace!(
-                    "Skipping code block starting on line {} (no patch markers found).",
+                    "Skipping non-patch code block starting on line {}. Preceding lines preserved.",
                     diff_block_start_line
                 );
+                // Non-patch block: do NOT clear preceding_lines so the lead-in context is preserved!
             }
-            preceding_lines.clear();
-        } else {
-            if preceding_lines.len() >= 15 {
-                preceding_lines.remove(0);
-            }
-            preceding_lines.push(line_text);
+            continue;
         }
+
+        // --- Case B: Headings & Section Dividers ---
+        if trimmed.starts_with('#') {
+            if let Some(path) = extract_file_path_from_line(trimmed) {
+                // Heading explicitly declared a file target
+                section_file_path = Some(path.clone());
+                last_patched_file = Some(path);
+            } else {
+                // A major heading (# or ##) without a file path begins a new unrelated topic
+                let heading_level = trimmed.chars().take_while(|&c| c == '#').count();
+                if heading_level <= 2 {
+                    section_file_path = None;
+                    last_patched_file = None;
+                    preceding_lines.clear();
+                }
+            }
+        } else if trimmed == "---" || trimmed == "***" {
+            // Thematic break / horizontal rule resets section scope
+            section_file_path = None;
+            last_patched_file = None;
+            preceding_lines.clear();
+        }
+
+        // --- Case C: Regular Prose Lines ---
+        if preceding_lines.len() >= MAX_PRECEDING_LINES {
+            preceding_lines.pop_front();
+        }
+        preceding_lines.push_back(line_text);
     }
 
-    debug!(
-        "Finished parsing. Found {} patch(es) in total.",
-        all_patches.len()
-    );
     Ok(merge_patches(all_patches))
 }
 

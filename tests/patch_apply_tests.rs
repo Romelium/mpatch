@@ -15013,3 +15013,215 @@ mod sound_language_heuristics_tests {
         ));
     }
 }
+
+mod structural_path_scoping_tests {
+    use indoc::indoc;
+    use mpatch::parse_diffs;
+
+    #[test]
+    fn test_heading_scope_persists_across_long_explanations() {
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        // 35 lines of explanation between the section heading and the code block.
+        // Under the old 15-line limit, the file path would be evicted.
+        let mut content = String::from("### File: `src/services/billing.rs`\n\n");
+        content.push_str("Detailed instructions for billing service refactor:\n");
+        for i in 1..=35 {
+            content.push_str(&format!(
+                "{}. Step {} explanation and verification notes\n",
+                i, i
+            ));
+        }
+        content.push_str(indoc! {r#"
+
+            ```rust
+            <<<<<<< SEARCH
+            fn charge_customer(id: u64) {
+                process_legacy(id);
+            }
+            =======
+            fn charge_customer(id: u64) {
+                process_v2(id);
+            }
+            >>>>>>> REPLACE
+            ```
+        "#});
+
+        let patches = parse_diffs(&content).unwrap();
+        assert_eq!(patches.len(), 1);
+        assert_eq!(
+            patches[0].file_path.to_str().unwrap(),
+            "src/services/billing.rs"
+        );
+        assert_eq!(
+            patches[0].hunks[0].added_lines(),
+            vec!["    process_v2(id);"]
+        );
+    }
+
+    #[test]
+    fn test_non_patch_code_block_does_not_clear_file_path() {
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        // Illustrative bash command block sits between the file mention and the diff block.
+        // Under the old implementation, ```bash caused `preceding_lines.clear()`.
+        let content = indoc! {r#"
+            In `src/core/engine.rs`, run pre-checks before applying the fix:
+
+            ```bash
+            $ cargo check --workspace
+            ```
+
+            Now apply the following update:
+
+            ```rust
+            <<<<<<< SEARCH
+            pub const MAX_RETRIES: u32 = 3;
+            =======
+            pub const MAX_RETRIES: u32 = 5;
+            >>>>>>> REPLACE
+            ```
+        "#};
+
+        let patches = parse_diffs(content).unwrap();
+        assert_eq!(patches.len(), 1);
+        assert_eq!(patches[0].file_path.to_str().unwrap(), "src/core/engine.rs");
+        assert_eq!(
+            patches[0].hunks[0].added_lines(),
+            vec!["pub const MAX_RETRIES: u32 = 5;"]
+        );
+    }
+
+    #[test]
+    fn test_major_heading_without_path_resets_section_scope() {
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        // Section 1 patches file1.rs.
+        // Section 2 introduces an unrelated topic with a major heading (`## Next Steps`).
+        // An unheaded conflict block in Section 2 must NOT inherit file1.rs.
+        let content = indoc! {r#"
+            ### File: `src/file1.rs`
+            ```diff
+            --- a/src/file1.rs
+            +++ b/src/file1.rs
+            @@ -1 +1 @@
+            -old1
+            +new1
+            ```
+
+            ## Next Steps and Follow-up Actions
+
+            Here is an unanchored conflict resolution:
+            ```
+            <<<<
+            old_conflict
+            ====
+            new_conflict
+            >>>>
+            ```
+        "#};
+
+        let patches = parse_diffs(content).unwrap();
+        assert_eq!(patches.len(), 2);
+
+        // Block 1 targets file1.rs
+        assert_eq!(patches[0].file_path.to_str().unwrap(), "src/file1.rs");
+
+        // Block 2 must NOT leak file1.rs; it cleanly resets and falls back to patch_target
+        assert_eq!(patches[1].file_path.to_str().unwrap(), "patch_target");
+    }
+
+    #[test]
+    fn test_thematic_break_resets_scope() {
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        let content = indoc! {r#"
+            Update `src/module_a.rs`:
+            ```
+            <<<<<<< SEARCH
+            fn a() {}
+            =======
+            fn a_mod() {}
+            >>>>>>> REPLACE
+            ```
+
+            ---
+
+            ```
+            <<<<
+            old
+            ====
+            new
+            >>>>
+            ```
+        "#};
+
+        let patches = parse_diffs(content).unwrap();
+        assert_eq!(patches.len(), 2);
+        assert_eq!(patches[0].file_path.to_str().unwrap(), "src/module_a.rs");
+        assert_eq!(patches[1].file_path.to_str().unwrap(), "patch_target");
+    }
+
+    #[test]
+    fn test_paragraph_blank_line_prevents_distant_mention_false_positives() {
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        // Paragraph 1 mentions an incidental file in passing.
+        // A blank line separates it from Paragraph 2.
+        // Paragraph 2 contains no file path, followed by a generic conflict block.
+        let content = indoc! {r#"
+            Note that we previously deprecated `src/legacy/old_service.py` in v1.2.
+
+            Please apply the following conflict resolution:
+            ```
+            <<<<
+            legacy_item
+            ====
+            updated_item
+            >>>>
+            ```
+        "#};
+
+        let patches = parse_diffs(content).unwrap();
+        assert_eq!(patches.len(), 1);
+
+        // Must NOT grab the passing reference to `src/legacy/old_service.py` across the paragraph break
+        assert_eq!(patches[0].file_path.to_str().unwrap(), "patch_target");
+    }
+
+    #[test]
+    fn test_subheading_preserves_active_section_file() {
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        // Sub-headings (###, ####) under the file section should preserve the section's target file.
+        let content = indoc! {r#"
+            ## File: `src/pipeline.rs`
+
+            ### Part 1: Initial Setup
+            ```
+            <<<<<<< SEARCH
+            init_a();
+            =======
+            init_a_v2();
+            >>>>>>> REPLACE
+            ```
+
+            ### Part 2: Worker Loop
+            ```
+            <<<<<<< SEARCH
+            init_b();
+            =======
+            init_b_v2();
+            >>>>>>> REPLACE
+            ```
+        "#};
+
+        let patches = parse_diffs(content).unwrap();
+        // Since both hunks target the same file, `merge_patches` consolidates them into a single Patch
+        assert_eq!(patches.len(), 1);
+        assert_eq!(patches[0].file_path.to_str().unwrap(), "src/pipeline.rs");
+        assert_eq!(patches[0].hunks.len(), 2);
+        assert_eq!(patches[0].hunks[0].added_lines(), vec!["init_a_v2();"]);
+        assert_eq!(patches[0].hunks[1].added_lines(), vec!["init_b_v2();"]);
+    }
+}
