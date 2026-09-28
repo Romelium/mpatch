@@ -14907,3 +14907,86 @@ fn test_is_comment_line_soundness() {
     assert!(!is_comment_line("/* comment */ do_action(); /* end */"));
     assert!(!is_comment_line("<!-- comment --> <Button />"));
 }
+
+mod sound_language_heuristics_tests {
+    use indoc::indoc;
+    use mpatch::{
+        apply_patch_to_file, is_comment_line, is_plausible_file_path, parse_auto,
+        patch_content_str, ApplyOptions,
+    };
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_yaml_type_property_not_rejected_as_definition_mismatch() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("config.yaml");
+        let original = indoc! {r#"
+            service:
+              kind: standard
+              port: 8080
+              timeout: 30
+        "#};
+        fs::write(&file_path, original).unwrap();
+
+        // The patch context had `type: standard` instead of `kind: standard`
+        let diff = indoc! {r#"
+            --- a/config.yaml
+            +++ b/config.yaml
+            @@ -1,4 +1,4 @@
+             service:
+               type: standard
+            -  port: 8080
+            +  port: 9090
+               timeout: 30
+        "#};
+
+        let patches = parse_auto(diff).unwrap();
+        let res = apply_patch_to_file(&patches[0], dir.path(), ApplyOptions::new()).unwrap();
+        assert!(
+            res.report.all_applied_cleanly(),
+            "YAML `type:` property must not be misclassified as a type definition and reject context drift"
+        );
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("port: 9090"));
+        assert!(content.contains("kind: standard"));
+    }
+
+    #[test]
+    fn test_prose_parentheses_not_locked_by_primary_identifier() {
+        let original = indoc! {r#"
+            # Architecture Overview
+            Step A (initialization)
+            Detail line 1
+            Detail line 2
+        "#};
+        let diff = indoc! {r#"
+            --- a/doc.md
+            +++ b/doc.md
+            @@ -1,4 +1,4 @@
+             # Architecture Overview
+             Step B (initialization)
+            -Detail line 1
+            +Detail line 1 modified
+             Detail line 2
+        "#};
+
+        let res = patch_content_str(diff, Some(original), &ApplyOptions::new()).unwrap();
+        assert!(res.contains("Detail line 1 modified"));
+    }
+
+    #[test]
+    fn test_css_universal_selector_on_its_own_line_is_not_comment() {
+        assert!(
+            !is_comment_line("* {"),
+            "CSS universal selector `* {{` on its own line must not be classified as Javadoc comment"
+        );
+    }
+
+    #[test]
+    fn test_foreign_language_prompts_not_mistaken_for_file_paths() {
+        assert!(is_plausible_file_path("src/components/My Component/Button.tsx"));
+        assert!(!is_plausible_file_path("Por favor revisa el archivo siguiente"));
+        assert!(!is_plausible_file_path("Bitte überprüfe die folgende Datei"));
+    }
+}

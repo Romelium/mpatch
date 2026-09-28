@@ -4403,80 +4403,37 @@ pub fn is_plausible_file_path(s: &str) -> bool {
         return false;
     }
 
+    let has_slash = s.contains('/') || s.contains('\\');
+
     if s.contains(char::is_whitespace) {
-        if s.chars().filter(|c| c.is_whitespace()).count() > 3 {
+        // An unquoted candidate string containing whitespace cannot be a sentence:
+        // 1. Must not contain sentence punctuation (?, !, ;, ,)
+        // 2. Must not contain more than 2 spaces
+        // 3. If it contains directory separators, whitespace must reside inside folder components,
+        //    not as conversational leading/trailing phrases.
+        if s.contains(['?', '!', ';', ',']) {
             return false;
         }
-        let lower = s.to_ascii_lowercase();
-        const STOPWORDS: &[&str] = &[
-            " the ",
-            " is ",
-            " to ",
-            " in ",
-            " for ",
-            " and ",
-            " or ",
-            " we ",
-            " this ",
-            " that ",
-            " with ",
-            " here ",
-            " update ",
-            " change ",
-            " code ",
-            " file ",
-            " replace ",
-            " search ",
-            " below ",
-            " following ",
-            " should ",
-            " would ",
-            " could ",
-            " can ",
-            " please ",
-            " you ",
-            " my ",
-            " your ",
-            " our ",
-            " have ",
-            " has ",
-            " had ",
-            " will ",
-            " make ",
-            " need ",
-            " want ",
-            " like ",
-            " see ",
-            " use ",
-            " using ",
-            " from ",
-            " into ",
-            " about ",
-            " edit ",
-            " modify ",
-            " at ",
-            " error ",
-            " warning ",
-            " modified ",
-            " by ",
-            " on ",
-            " version ",
-            " release ",
-        ];
-        let padded = format!(" {} ", lower);
-        if STOPWORDS.iter().any(|&w| padded.contains(w)) {
+        if s.chars().filter(|c| c.is_whitespace()).count() > 2 {
             trace!(
                 "is_plausible_file_path: '{}' rejected (contains English stop word)",
                 s
             );
             return false;
         }
+        if has_slash {
+            if let Some(first_slash) = s.find(['/', '\\']) {
+                let first_seg = s[..first_slash].trim_start();
+                if first_seg.chars().filter(|c| c.is_whitespace()).count() > 1 {
+                    return false;
+                }
+            }
+        }
         if !s.contains('.') && !s.contains('/') && !s.contains('\\') {
             return false;
         }
     }
 
-    let has_slash = s.contains('/') || s.contains('\\');
     if s.starts_with('.') && !has_slash {
         let rest = &s[1..];
         if !rest.is_empty()
@@ -9519,10 +9476,18 @@ fn extract_primary_identifier(line: &str) -> Option<&str> {
     while let Some(rel_paren) = trimmed[search_start..].find('(') {
         let paren_pos = search_start + rel_paren;
         let before_paren = &trimmed[..paren_pos];
+        let has_whitespace_before_paren = before_paren.chars().last().is_some_and(|c| c.is_whitespace());
         let ident = before_paren
             .rsplit(|c: char| !c.is_alphanumeric() && c != '_')
             .next()
             .unwrap_or("");
+
+        // In prose, single uppercase letters or capitalized words separated from '(' by spaces
+        // (e.g. `Step A (init)` or `Figure 1 (left)`) are prose, not function calls.
+        if has_whitespace_before_paren && (ident.len() <= 1 || ident.chars().all(|c| c.is_ascii_uppercase())) {
+            search_start = paren_pos + 1;
+            continue;
+        }
 
         if !ident.is_empty()
             && ident
@@ -9716,6 +9681,11 @@ fn is_definition(line: &str) -> bool {
 
     let mut words = text.split_whitespace();
     while let Some(word) = words.next() {
+        // If the token itself ends with a colon, equals, or quotes, it is a key, assignment, or string literal.
+        if word.ends_with(':') || word.ends_with('=') || word.starts_with('"') || word.starts_with('\'') {
+            return false;
+        }
+
         let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
         if clean.starts_with("pub")
             || matches!(
@@ -9774,6 +9744,19 @@ fn is_definition(line: &str) -> bool {
                 | "union"
                 | "type"
         ) {
+            // Definition keywords must be followed by an alphanumeric identifier (the defined name),
+            // NOT by a colon ':' (mapping key) or equals sign '=' (variable assignment).
+            if let Some(next_tok) = words.next() {
+                if next_tok.starts_with(':') || next_tok.starts_with('=') {
+                    return false;
+                }
+                let clean_next = next_tok.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                if clean_next.is_empty() || !clean_next.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_') {
+                    return false;
+                }
+            } else {
+                return false;
+            }
             trace!(
                 "is_definition: '{}' is a definition header ({})",
                 trimmed,
@@ -9933,11 +9916,8 @@ fn is_comment_line_trimmed(trimmed: &str) -> bool {
         }
         if trimmed.starts_with("* ") || trimmed.starts_with("*\t") {
             let after = trimmed[1..].trim();
-            // Guard against CSS universal selector: `* { ... }` or `*:hover`
-            if after.starts_with('{') && after.ends_with('}') && after.contains(':') {
-                return false;
-            }
-            if after.starts_with(':') && after.ends_with('{') {
+            // Block openings or pseudo-selectors in CSS (e.g. `* {`, `*:hover`, `*[attr]`) are code, never comments!
+            if after.starts_with('{') || after.starts_with(':') || after.starts_with('[') {
                 return false;
             }
             // Guard against C multiplication / pointer assignment: `* ptr = 5;`
