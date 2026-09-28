@@ -9282,8 +9282,8 @@ fn extract_primary_identifier(line: &str) -> Option<&str> {
     }
 
     // 2. Lisp definition / call extraction: e.g. (defn calculate ...) or (calculate ...)
-    if trimmed.starts_with('(') {
-        let after_paren = trimmed[1..].trim_start();
+    if let Some(after_paren) = trimmed.strip_prefix('(') {
+        let after_paren = after_paren.trim_start();
         let first_word = after_paren
             .split([' ', '\t', '\n', '(', '[', '{', ')'])
             .next()
@@ -9644,8 +9644,8 @@ fn is_definition(line: &str) -> bool {
     }
 
     // Lisp / Clojure / Scheme definition forms: (defn ...), (def ...), etc.
-    if trimmed.starts_with('(') {
-        let after_paren = trimmed[1..].trim_start();
+    if let Some(after_paren) = trimmed.strip_prefix('(') {
+        let after_paren = after_paren.trim_start();
         let form = after_paren
             .split([' ', '\t', '\n', '(', '[', '{', ')'])
             .next()
@@ -9986,9 +9986,9 @@ fn is_comment_line_trimmed(trimmed: &str) -> bool {
 
     // 2. C-family block comments: /* ... */ or /* or */
     // Note: uses non-greedy find to avoid masking code between inline comments
-    if trimmed.starts_with("/*") {
-        if let Some(first_end) = trimmed[2..].find("*/") {
-            let after = trimmed[2 + first_end + 2..].trim();
+    if let Some(rest) = trimmed.strip_prefix("/*") {
+        if let Some(first_end) = rest.find("*/") {
+            let after = rest[first_end + 2..].trim();
             return after.is_empty() || is_comment_line(after);
         }
         return true;
@@ -9996,24 +9996,24 @@ fn is_comment_line_trimmed(trimmed: &str) -> bool {
 
     // 3. Asterisk-prefixed comments:
     // Handles JSX closing `*/}`, C closing `*/`, OCaml closing `*)`, block continuation `* `, and banners `***`
-    if trimmed.starts_with('*') {
-        if trimmed.starts_with("*/}") {
-            let after = trimmed[3..].trim();
+    if let Some(after_star) = trimmed.strip_prefix('*') {
+        if let Some(after) = trimmed.strip_prefix("*/}") {
+            let after = after.trim();
             return after.is_empty() || is_comment_line(after);
         }
-        if trimmed.starts_with("*/") {
-            let after = trimmed[2..].trim();
+        if let Some(after) = trimmed.strip_prefix("*/") {
+            let after = after.trim();
             return after.is_empty() || is_comment_line(after);
         }
-        if trimmed.starts_with("*)") {
-            let after = trimmed[2..].trim();
+        if let Some(after) = trimmed.strip_prefix("*)") {
+            let after = after.trim();
             return after.is_empty() || is_comment_line(after);
         }
         if trimmed.chars().all(|c| c == '*') {
             return true;
         }
         if trimmed.starts_with("* ") || trimmed.starts_with("*\t") {
-            let after = trimmed[1..].trim();
+            let after = after_star.trim();
             // Block openings or pseudo-selectors in CSS (e.g. `* {`, `*:hover`, `*[attr]`) are code, never comments!
             if after.starts_with('{') || after.starts_with(':') || after.starts_with('[') {
                 return false;
@@ -10035,51 +10035,51 @@ fn is_comment_line_trimmed(trimmed: &str) -> bool {
     }
 
     // 4. JSX / TSX comments: {/* ... */}
-    if trimmed.starts_with("{/*") {
-        if let Some(first_end) = trimmed[3..].find("*/}") {
-            let after = trimmed[3 + first_end + 3..].trim();
+    if let Some(rest) = trimmed.strip_prefix("{/*") {
+        if let Some(first_end) = rest.find("*/}") {
+            let after = rest[first_end + 3..].trim();
             return after.is_empty() || is_comment_line(after);
         }
         return true;
     }
 
     // 5. HTML / XML comments: <!-- ... --> or -->
-    if trimmed.starts_with("<!--") {
-        if let Some(first_end) = trimmed[4..].find("-->") {
-            let after = trimmed[4 + first_end + 3..].trim();
+    if let Some(rest) = trimmed.strip_prefix("<!--") {
+        if let Some(first_end) = rest.find("-->") {
+            let after = rest[first_end + 3..].trim();
             return after.is_empty() || is_comment_line(after);
         }
         return true;
     }
-    if trimmed.starts_with("-->") {
-        let after = trimmed[3..].trim();
+    if let Some(after) = trimmed.strip_prefix("-->") {
+        let after = after.trim();
         return after.is_empty() || is_comment_line(after);
     }
 
     // 6. Python / Julia docstrings: """ ... """ or ''' ... '''
-    if trimmed.starts_with("\"\"\"") {
-        if let Some(first_end) = trimmed[3..].find("\"\"\"") {
-            let after = trimmed[3 + first_end + 3..].trim();
+    if let Some(rest) = trimmed.strip_prefix("\"\"\"") {
+        if let Some(first_end) = rest.find("\"\"\"") {
+            let after = rest[first_end + 3..].trim();
             return after.is_empty() || is_comment_line(after);
         }
         return true;
     }
-    if trimmed.starts_with("'''") {
-        if let Some(first_end) = trimmed[3..].find("'''") {
-            let after = trimmed[3 + first_end + 3..].trim();
+    if let Some(rest) = trimmed.strip_prefix("'''") {
+        if let Some(first_end) = rest.find("'''") {
+            let after = rest[first_end + 3..].trim();
             return after.is_empty() || is_comment_line(after);
         }
         return true;
     }
 
     // 7. Hash comments: Python, Shell, Ruby, Perl, YAML, TOML, Dockerfile, Makefile, etc.
-    if trimmed.starts_with('#') {
+    if let Some(after_hash) = trimmed.strip_prefix('#') {
         // Rust outer/inner attributes: #[derive(...)] or #![no_std]
         if trimmed.starts_with("#[") || trimmed.starts_with("#![") {
             return false;
         }
 
-        let after_hash = trimmed[1..].trim_start();
+        let after_hash = after_hash.trim_start();
         let directive = after_hash
             .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
             .next()
@@ -10172,8 +10172,8 @@ fn is_comment_line_trimmed(trimmed: &str) -> bool {
 
     // 8. SQL, Lua, Haskell, Ada, VHDL line comments: -- or closing -}
     if trimmed.starts_with('-') {
-        if trimmed.starts_with("-}") {
-            let after = trimmed[2..].trim();
+        if let Some(after) = trimmed.strip_prefix("-}") {
+            let after = after.trim();
             return after.is_empty() || is_comment_line(after);
         }
         if let Some(after) = trimmed.strip_prefix("--") {
@@ -10204,33 +10204,33 @@ fn is_comment_line_trimmed(trimmed: &str) -> bool {
     }
 
     // 9. Haskell / Elm / Agda block comments: {- ... -}
-    if trimmed.starts_with("{-") {
-        if let Some(first_end) = trimmed[2..].find("-}") {
-            let after = trimmed[2 + first_end + 2..].trim();
+    if let Some(rest) = trimmed.strip_prefix("{-") {
+        if let Some(first_end) = rest.find("-}") {
+            let after = rest[first_end + 2..].trim();
             return after.is_empty() || is_comment_line(after);
         }
         return true;
     }
 
     // 10. OCaml / Pascal / ML comments: (* ... *)
-    if trimmed.starts_with("(*") {
-        if let Some(first_end) = trimmed[2..].find("*)") {
-            let after = trimmed[2 + first_end + 2..].trim();
+    if let Some(rest) = trimmed.strip_prefix("(*") {
+        if let Some(first_end) = rest.find("*)") {
+            let after = rest[first_end + 2..].trim();
             return after.is_empty() || is_comment_line(after);
         }
         return true;
     }
 
     // 11. D language comments: /+ ... +/ or +/
-    if trimmed.starts_with("/+") {
-        if let Some(first_end) = trimmed[2..].find("+/") {
-            let after = trimmed[2 + first_end + 2..].trim();
+    if let Some(rest) = trimmed.strip_prefix("/+") {
+        if let Some(first_end) = rest.find("+/") {
+            let after = rest[first_end + 2..].trim();
             return after.is_empty() || is_comment_line(after);
         }
         return true;
     }
-    if trimmed.starts_with("+/") {
-        let after = trimmed[2..].trim();
+    if let Some(after) = trimmed.strip_prefix("+/") {
+        let after = after.trim();
         return after.is_empty() || is_comment_line(after);
     }
 
@@ -10281,7 +10281,7 @@ fn is_comment_line_trimmed(trimmed: &str) -> bool {
     }
 
     // 14. Fortran comments: !
-    if trimmed.starts_with('!') {
+    if let Some(after_excl) = trimmed.strip_prefix('!') {
         if trimmed == "!"
             || trimmed.starts_with("! ")
             || trimmed.starts_with("!\t")
@@ -10291,11 +10291,7 @@ fn is_comment_line_trimmed(trimmed: &str) -> bool {
         {
             return true;
         }
-        if trimmed.len() >= 3
-            && trimmed[1..]
-                .chars()
-                .all(|c| c == '=' || c == '!' || c == '-')
-        {
+        if trimmed.len() >= 3 && after_excl.chars().all(|c| c == '=' || c == '!' || c == '-') {
             return true;
         }
         return false;
