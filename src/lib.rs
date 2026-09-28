@@ -4450,7 +4450,9 @@ pub fn is_plausible_file_path(s: &str) -> bool {
             let ext = &s[dot_pos + 1..];
             !ext.is_empty()
                 && ext.len() <= 16
-                && ext.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '+')
+                && ext
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '+')
                 && ext.chars().any(|c| c.is_ascii_alphabetic())
         } else {
             false
@@ -5700,92 +5702,92 @@ where
                     );
                     state = State::Outside;
 
-            let file_path = active_file_path
-                .clone()
-                .unwrap_or_else(|| PathBuf::from("patch_target"));
+                    let file_path = active_file_path
+                        .clone()
+                        .unwrap_or_else(|| PathBuf::from("patch_target"));
 
-            while search_lines.first().is_some_and(|l| is_ellipsis_line(l))
-                && replace_lines.first().is_some_and(|l| is_ellipsis_line(l))
-            {
-                search_lines.remove(0);
-                replace_lines.remove(0);
-            }
-            while search_lines.last().is_some_and(|l| is_ellipsis_line(l))
-                && replace_lines.last().is_some_and(|l| is_ellipsis_line(l))
-            {
-                search_lines.pop();
-                replace_lines.pop();
-            }
+                    while search_lines.first().is_some_and(|l| is_ellipsis_line(l))
+                        && replace_lines.first().is_some_and(|l| is_ellipsis_line(l))
+                    {
+                        search_lines.remove(0);
+                        replace_lines.remove(0);
+                    }
+                    while search_lines.last().is_some_and(|l| is_ellipsis_line(l))
+                        && replace_lines.last().is_some_and(|l| is_ellipsis_line(l))
+                    {
+                        search_lines.pop();
+                        replace_lines.pop();
+                    }
 
-            let s_has = search_lines.iter().any(|l| is_ellipsis_line(l));
-            let r_has = replace_lines.iter().any(|l| is_ellipsis_line(l));
-            if s_has && r_has {
-                let s_segs = split_lines_by_ellipsis(&search_lines);
-                let r_segs = split_lines_by_ellipsis(&replace_lines);
-                let changed_indices: Vec<usize> = s_segs
-                    .iter()
-                    .zip(r_segs.iter())
-                    .enumerate()
-                    .filter_map(|(i, (s, r))| if s != r { Some(i) } else { None })
-                    .collect();
+                    let s_has = search_lines.iter().any(|l| is_ellipsis_line(l));
+                    let r_has = replace_lines.iter().any(|l| is_ellipsis_line(l));
+                    if s_has && r_has {
+                        let s_segs = split_lines_by_ellipsis(&search_lines);
+                        let r_segs = split_lines_by_ellipsis(&replace_lines);
+                        let changed_indices: Vec<usize> = s_segs
+                            .iter()
+                            .zip(r_segs.iter())
+                            .enumerate()
+                            .filter_map(|(i, (s, r))| if s != r { Some(i) } else { None })
+                            .collect();
 
-                if s_segs.len() == r_segs.len() && changed_indices.len() > 1 {
-                    debug!(
+                        if s_segs.len() == r_segs.len() && changed_indices.len() > 1 {
+                            debug!(
                         "  Aider search/replace has {} wildcard segment(s) with {} modified site(s) for '{}'",
                         s_segs.len(),
                         changed_indices.len(),
                         file_path.display()
                     );
-                    for &idx in &changed_indices {
-                        let mut s_sub = s_segs[idx].clone();
-                        let mut r_sub = r_segs[idx].clone();
+                            for &idx in &changed_indices {
+                                let mut s_sub = s_segs[idx].clone();
+                                let mut r_sub = r_segs[idx].clone();
 
-                        if idx > 0
-                            && !changed_indices.contains(&(idx - 1))
-                            && !s_segs[idx - 1].is_empty()
-                        {
-                            let mut new_s = s_segs[idx - 1].clone();
-                            new_s.push("...".to_string());
-                            new_s.append(&mut s_sub);
-                            s_sub = new_s;
+                                if idx > 0
+                                    && !changed_indices.contains(&(idx - 1))
+                                    && !s_segs[idx - 1].is_empty()
+                                {
+                                    let mut new_s = s_segs[idx - 1].clone();
+                                    new_s.push("...".to_string());
+                                    new_s.append(&mut s_sub);
+                                    s_sub = new_s;
 
-                            let mut new_r = r_segs[idx - 1].clone();
-                            new_r.push("...".to_string());
-                            new_r.append(&mut r_sub);
-                            r_sub = new_r;
+                                    let mut new_r = r_segs[idx - 1].clone();
+                                    new_r.push("...".to_string());
+                                    new_r.append(&mut r_sub);
+                                    r_sub = new_r;
+                                }
+
+                                let hunk = create_hunk_from_search_replace(&s_sub, &r_sub);
+                                if hunk.has_changes() {
+                                    unmerged_patches.push(Patch {
+                                        file_path: file_path.clone(),
+                                        hunks: vec![hunk],
+                                        ends_with_newline: true,
+                                    });
+                                }
+                            }
+                            search_lines.clear();
+                            replace_lines.clear();
+                            continue;
                         }
+                    }
 
-                        let hunk = create_hunk_from_search_replace(&s_sub, &r_sub);
-                        if hunk.has_changes() {
-                            unmerged_patches.push(Patch {
-                                file_path: file_path.clone(),
-                                hunks: vec![hunk],
-                                ends_with_newline: true,
-                            });
-                        }
+                    let hunk = create_hunk_from_search_replace(&search_lines, &replace_lines);
+                    if hunk.has_changes() || !search_lines.is_empty() || !replace_lines.is_empty() {
+                        debug!(
+                            "  Adding Aider patch hunk with {} line(s) for '{}'",
+                            hunk.lines.len(),
+                            file_path.display()
+                        );
+                        unmerged_patches.push(Patch {
+                            file_path,
+                            hunks: vec![hunk],
+                            ends_with_newline: true,
+                        });
                     }
                     search_lines.clear();
                     replace_lines.clear();
                     continue;
-                }
-            }
-
-            let hunk = create_hunk_from_search_replace(&search_lines, &replace_lines);
-            if hunk.has_changes() || !search_lines.is_empty() || !replace_lines.is_empty() {
-                debug!(
-                    "  Adding Aider patch hunk with {} line(s) for '{}'",
-                    hunk.lines.len(),
-                    file_path.display()
-                );
-                unmerged_patches.push(Patch {
-                    file_path,
-                    hunks: vec![hunk],
-                    ends_with_newline: true,
-                });
-            }
-            search_lines.clear();
-            replace_lines.clear();
-            continue;
                 }
                 replace_lines.push(line.to_string());
             }
@@ -9085,24 +9087,29 @@ fn adjust_indentation(line: &str, hunk_indent: &str, target_indent: &str) -> Str
 
     // Fallback when hunk_indent is empty (e.g. unindented context line like rule header or def)
     // but target file/block uses tabs (critical for Makefiles and Go):
-    if hunk_indent.is_empty() && target_indent == "\t" {
-        if line_indent.chars().all(|c| c == ' ') && !line_indent.is_empty() {
-            let tabs = if line_indent.len() % 4 != 0 && line_indent.len() % 2 == 0 {
-                (line_indent.len() + 1) / 2
-            } else {
-                (line_indent.len() + 3) / 4
-            };
-            let new_indent = "\t".repeat(tabs);
-            return format!("{}{}", new_indent, &line[line_indent.len()..]);
-        }
+    if hunk_indent.is_empty()
+        && target_indent == "\t"
+        && line_indent.chars().all(|c| c == ' ')
+        && !line_indent.is_empty()
+    {
+        let tabs = if !line_indent.len().is_multiple_of(4) && line_indent.len().is_multiple_of(2) {
+            line_indent.len().div_ceil(2)
+        } else {
+            line_indent.len().div_ceil(4)
+        };
+        let new_indent = "\t".repeat(tabs);
+        return format!("{}{}", new_indent, &line[line_indent.len()..]);
     }
     // Fallback when hunk_indent is empty but target uses spaces and line uses tabs:
-    if hunk_indent.is_empty() && !target_indent.is_empty() && target_indent.chars().all(|c| c == ' ') {
-        if line_indent.chars().all(|c| c == '\t') && !line_indent.is_empty() {
-            let spaces = line_indent.len() * 4;
-            let new_indent = " ".repeat(spaces);
-            return format!("{}{}", new_indent, &line[line_indent.len()..]);
-        }
+    if hunk_indent.is_empty()
+        && !target_indent.is_empty()
+        && target_indent.chars().all(|c| c == ' ')
+        && line_indent.chars().all(|c| c == '\t')
+        && !line_indent.is_empty()
+    {
+        let spaces = line_indent.len() * 4;
+        let new_indent = " ".repeat(spaces);
+        return format!("{}{}", new_indent, &line[line_indent.len()..]);
     }
 
     // Check for pure spaces to pure tabs translation (or vice versa)
@@ -9281,7 +9288,8 @@ fn extract_primary_identifier(line: &str) -> Option<&str> {
             .split([' ', '\t', '\n', '(', '[', '{', ')'])
             .next()
             .unwrap_or("");
-        let clean_first = first_word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
+        let clean_first =
+            first_word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
         if matches!(
             clean_first,
             "defn"
@@ -9298,10 +9306,18 @@ fn extract_primary_identifier(line: &str) -> Option<&str> {
             let mut words = after_paren.split_whitespace();
             words.next(); // skip defn
             if let Some(name_word) = words.next() {
-                let name = name_word.split([' ', '(', '[', '{', ')', ']']).next().unwrap_or(name_word);
-                let clean_name = name.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
+                let name = name_word
+                    .split([' ', '(', '[', '{', ')', ']'])
+                    .next()
+                    .unwrap_or(name_word);
+                let clean_name =
+                    name.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
                 if !clean_name.is_empty() {
-                    trace!("extract_primary_identifier: found Lisp definition '{}' in '{}'", clean_name, trimmed);
+                    trace!(
+                        "extract_primary_identifier: found Lisp definition '{}' in '{}'",
+                        clean_name,
+                        trimmed
+                    );
                     return Some(clean_name);
                 }
             }
@@ -9311,7 +9327,11 @@ fn extract_primary_identifier(line: &str) -> Option<&str> {
                 "if" | "let" | "when" | "cond" | "do" | "loop" | "fn" | "quote" | "set!"
             )
         {
-            trace!("extract_primary_identifier: found Lisp call '{}' in '{}'", clean_first, trimmed);
+            trace!(
+                "extract_primary_identifier: found Lisp call '{}' in '{}'",
+                clean_first,
+                trimmed
+            );
             return Some(clean_first);
         }
     }
@@ -9415,14 +9435,21 @@ fn extract_primary_identifier(line: &str) -> Option<&str> {
                 let remaining: Vec<&str> = words.by_ref().collect();
                 if let Some(for_idx) = remaining.iter().position(|&w| w == "for") {
                     if let Some(target_word) = remaining.get(for_idx + 1) {
-                        let name = target_word.split(['<', '{', ' ']).next().unwrap_or(target_word);
-                        let clean_name = name.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                        let name = target_word
+                            .split(['<', '{', ' '])
+                            .next()
+                            .unwrap_or(target_word);
+                        let clean_name =
+                            name.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
                         if !clean_name.is_empty() {
                             return Some(clean_name);
                         }
                     }
                 } else if let Some(target_word) = remaining.first() {
-                    let name = target_word.split(['<', '{', ' ']).next().unwrap_or(target_word);
+                    let name = target_word
+                        .split(['<', '{', ' '])
+                        .next()
+                        .unwrap_or(target_word);
                     let clean_name = name.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
                     if !clean_name.is_empty() {
                         return Some(clean_name);
@@ -9476,7 +9503,10 @@ fn extract_primary_identifier(line: &str) -> Option<&str> {
     while let Some(rel_paren) = trimmed[search_start..].find('(') {
         let paren_pos = search_start + rel_paren;
         let before_paren = &trimmed[..paren_pos];
-        let has_whitespace_before_paren = before_paren.chars().last().is_some_and(|c| c.is_whitespace());
+        let has_whitespace_before_paren = before_paren
+            .chars()
+            .last()
+            .is_some_and(|c| c.is_whitespace());
         let ident = before_paren
             .rsplit(|c: char| !c.is_alphanumeric() && c != '_')
             .next()
@@ -9484,7 +9514,9 @@ fn extract_primary_identifier(line: &str) -> Option<&str> {
 
         // In prose, single uppercase letters or capitalized words separated from '(' by spaces
         // (e.g. `Step A (init)` or `Figure 1 (left)`) are prose, not function calls.
-        if has_whitespace_before_paren && (ident.len() <= 1 || ident.chars().all(|c| c.is_ascii_uppercase())) {
+        if has_whitespace_before_paren
+            && (ident.len() <= 1 || ident.chars().all(|c| c.is_ascii_uppercase()))
+        {
             search_start = paren_pos + 1;
             continue;
         }
@@ -9535,44 +9567,48 @@ fn extract_primary_identifier(line: &str) -> Option<&str> {
 
     // 5. Command/call invocation without parentheses (Ruby, Shell, Haskell):
     // E.g. `render :json => data`, `puts "hello"`, `echo "hello"`, `npm install`
-    if !trimmed.contains('=') && !trimmed.contains(';') && !trimmed.contains('{') && !trimmed.contains('}') {
-        if !trimmed.ends_with('.')
-            && !trimmed.starts_with("- ")
-            && !trimmed.starts_with("* ")
-            && !trimmed.starts_with("+ ")
-            && !trimmed.starts_with("> ")
-        {
-            let mut words = trimmed.split_whitespace();
-            if let Some(first_word) = words.next() {
-                if !first_word.ends_with(':') {
-                    let clean = first_word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
-                    let clean_lower = clean.to_ascii_lowercase();
-                    if !clean.is_empty()
-                        && clean.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
-                        && words.next().is_some()
-                    {
-                        const NON_CALL_WORDS: &[&str] = &[
-                            "if", "while", "for", "switch", "match", "catch", "return", "typeof",
-                            "sizeof", "alignof", "decltype", "new", "delete", "throw", "assert",
-                            "let", "var", "const", "pub", "else", "case", "yield", "await",
-                            "import", "from", "export", "use", "package", "type", "struct",
-                            "class", "fn", "def", "select", "where", "having", "join",
-                            "the", "a", "an", "this", "that", "these", "those", "please", "note",
-                            "see", "in", "on", "at", "to", "by", "with", "we", "you", "they",
-                            "it", "all", "some", "any", "each", "every", "there", "here", "when",
-                            "where", "why", "how", "what", "which", "who", "is", "are", "was",
-                            "were", "be", "been", "being", "have", "has", "had", "do", "does",
-                            "did", "can", "could", "shall", "should", "will", "would", "may",
-                            "might", "must",
-                        ];
-                        if !NON_CALL_WORDS.contains(&clean_lower.as_str()) {
-                            trace!(
+    if !trimmed.contains('=')
+        && !trimmed.contains(';')
+        && !trimmed.contains('{')
+        && !trimmed.contains('}')
+        && !trimmed.ends_with('.')
+        && !trimmed.starts_with("- ")
+        && !trimmed.starts_with("* ")
+        && !trimmed.starts_with("+ ")
+        && !trimmed.starts_with("> ")
+    {
+        let mut words = trimmed.split_whitespace();
+        if let Some(first_word) = words.next() {
+            if !first_word.ends_with(':') {
+                let clean = first_word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                let clean_lower = clean.to_ascii_lowercase();
+                if !clean.is_empty()
+                    && clean
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_alphabetic() || c == '_')
+                    && words.next().is_some()
+                {
+                    const NON_CALL_WORDS: &[&str] = &[
+                        "if", "while", "for", "switch", "match", "catch", "return", "typeof",
+                        "sizeof", "alignof", "decltype", "new", "delete", "throw", "assert", "let",
+                        "var", "const", "pub", "else", "case", "yield", "await", "import", "from",
+                        "export", "use", "package", "type", "struct", "class", "fn", "def",
+                        "select", "where", "having", "join", "the", "a", "an", "this", "that",
+                        "these", "those", "please", "note", "see", "in", "on", "at", "to", "by",
+                        "with", "we", "you", "they", "it", "all", "some", "any", "each", "every",
+                        "there", "here", "when", "where", "why", "how", "what", "which", "who",
+                        "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
+                        "do", "does", "did", "can", "could", "shall", "should", "will", "would",
+                        "may", "might", "must",
+                    ];
+                    if !NON_CALL_WORDS.contains(&clean_lower.as_str()) {
+                        trace!(
                                 "extract_primary_identifier: found non-parenthesized call identifier '{}' in '{}'",
                                 clean,
                                 trimmed
                             );
-                            return Some(clean);
-                        }
+                        return Some(clean);
                     }
                 }
             }
@@ -9629,7 +9665,11 @@ fn is_definition(line: &str) -> bool {
                 | "defgeneric"
                 | "defstruct"
         ) {
-            trace!("is_definition: '{}' is a Lisp definition ({})", trimmed, form);
+            trace!(
+                "is_definition: '{}' is a Lisp definition ({})",
+                trimmed,
+                form
+            );
             return true;
         }
     }
@@ -9678,11 +9718,14 @@ fn is_definition(line: &str) -> bool {
         }
     }
 
-
     let mut words = text.split_whitespace();
     while let Some(word) = words.next() {
         // If the token itself ends with a colon, equals, or quotes, it is a key, assignment, or string literal.
-        if word.ends_with(':') || word.ends_with('=') || word.starts_with('"') || word.starts_with('\'') {
+        if word.ends_with(':')
+            || word.ends_with('=')
+            || word.starts_with('"')
+            || word.starts_with('\'')
+        {
             return false;
         }
 
@@ -9751,7 +9794,12 @@ fn is_definition(line: &str) -> bool {
                     return false;
                 }
                 let clean_next = next_tok.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
-                if clean_next.is_empty() || !clean_next.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_') {
+                if clean_next.is_empty()
+                    || !clean_next
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_alphabetic() || c == '_')
+                {
                     return false;
                 }
             } else {
@@ -9781,22 +9829,72 @@ fn is_definition(line: &str) -> bool {
                 {
                     let tokens: Vec<&str> = before_paren.split_whitespace().collect();
                     if tokens.len() >= 2 {
-                        let first_clean = tokens[0].trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                        let first_clean =
+                            tokens[0].trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
                         let first_lower = first_clean.to_ascii_lowercase();
                         const NON_DEF_FIRST_TOKENS: &[&str] = &[
-                            "if", "while", "for", "switch", "match", "catch", "return", "typeof",
-                            "sizeof", "alignof", "decltype", "new", "delete", "throw", "assert",
-                            "let", "var", "else", "case", "yield", "await", "with", "raise",
-                            "except", "elif", "select", "where", "from", "insert", "update",
-                            "having", "join", "and", "or", "set", "media", "supports", "keyframes",
-                            "see", "note", "in", "at", "on", "by", "to", "when", "print", "echo",
-                            "define", "include", "pragma",
+                            "if",
+                            "while",
+                            "for",
+                            "switch",
+                            "match",
+                            "catch",
+                            "return",
+                            "typeof",
+                            "sizeof",
+                            "alignof",
+                            "decltype",
+                            "new",
+                            "delete",
+                            "throw",
+                            "assert",
+                            "let",
+                            "var",
+                            "else",
+                            "case",
+                            "yield",
+                            "await",
+                            "with",
+                            "raise",
+                            "except",
+                            "elif",
+                            "select",
+                            "where",
+                            "from",
+                            "insert",
+                            "update",
+                            "having",
+                            "join",
+                            "and",
+                            "or",
+                            "set",
+                            "media",
+                            "supports",
+                            "keyframes",
+                            "see",
+                            "note",
+                            "in",
+                            "at",
+                            "on",
+                            "by",
+                            "to",
+                            "when",
+                            "print",
+                            "echo",
+                            "define",
+                            "include",
+                            "pragma",
                         ];
                         if !NON_DEF_FIRST_TOKENS.contains(&first_lower.as_str()) {
                             let last_token = tokens[tokens.len() - 1];
-                            let clean_name = last_token.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != ':');
+                            let clean_name = last_token.trim_matches(|c: char| {
+                                !c.is_alphanumeric() && c != '_' && c != ':'
+                            });
                             if !clean_name.is_empty()
-                                && clean_name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                                && clean_name
+                                    .chars()
+                                    .next()
+                                    .is_some_and(|c| c.is_alphabetic() || c == '_')
                             {
                                 trace!(
                                     "is_definition: '{}' recognized as C/C++/Java/C# style function/method definition ('{}')",
@@ -10061,14 +10159,12 @@ fn is_comment_line_trimmed(trimmed: &str) -> bool {
             && !trimmed.starts_with("#\t")
             && !trimmed.starts_with("##")
             && !trimmed.starts_with("#!")
-        {
-            if trimmed.ends_with('{')
+            && (trimmed.ends_with('{')
                 || trimmed.ends_with(',')
                 || trimmed.contains(" {")
-                || trimmed.contains(" > ")
-            {
-                return false;
-            }
+                || trimmed.contains(" > "))
+        {
+            return false;
         }
 
         return true;
@@ -10080,7 +10176,7 @@ fn is_comment_line_trimmed(trimmed: &str) -> bool {
             let after = trimmed[2..].trim();
             return after.is_empty() || is_comment_line(after);
         }
-        if trimmed.starts_with("--") {
+        if let Some(after) = trimmed.strip_prefix("--") {
             if trimmed == "--"
                 || trimmed.starts_with("-- ")
                 || trimmed.starts_with("--\t")
@@ -10092,7 +10188,6 @@ fn is_comment_line_trimmed(trimmed: &str) -> bool {
                 return true;
             }
             // Pre-decrement in C, C++, Java, JS, PHP, C#: `--count;`, `--i;`, `--(p->ref);`
-            let after = &trimmed[2..];
             if after.starts_with(|c: char| {
                 c.is_ascii_alphanumeric()
                     || c == '_'
@@ -10140,7 +10235,7 @@ fn is_comment_line_trimmed(trimmed: &str) -> bool {
     }
 
     // 12. Lisp, Scheme, Clojure, Assembly, INI comments: ;
-    if trimmed.starts_with(';') {
+    if let Some(after) = trimmed.strip_prefix(';') {
         if trimmed.starts_with(";;")
             || trimmed.starts_with("; ")
             || trimmed.starts_with(";\t")
@@ -10151,7 +10246,6 @@ fn is_comment_line_trimmed(trimmed: &str) -> bool {
         {
             return true;
         }
-        let after = &trimmed[1..];
         // Defensive semicolons in JS: `;(function() ... )()`, `;[a, b] = ...`
         if after.starts_with('(')
             || after.starts_with('[')
@@ -10174,17 +10268,16 @@ fn is_comment_line_trimmed(trimmed: &str) -> bool {
     }
 
     // 13. Erlang, LaTeX, MATLAB, Octave, Prolog comments: %
-    if trimmed.starts_with('%') {
-        if trimmed.starts_with("% ")
+    if trimmed.starts_with('%')
+        && (trimmed.starts_with("% ")
             || trimmed.starts_with("%\t")
             || trimmed.starts_with("%%")
             || trimmed.starts_with("%-")
             || trimmed.starts_with("%=")
             || trimmed.starts_with("%*")
-            || trimmed == "%"
-        {
-            return true;
-        }
+            || trimmed == "%")
+    {
+        return true;
     }
 
     // 14. Fortran comments: !
@@ -10198,15 +10291,18 @@ fn is_comment_line_trimmed(trimmed: &str) -> bool {
         {
             return true;
         }
-        if trimmed.len() >= 3 && trimmed[1..].chars().all(|c| c == '=' || c == '!' || c == '-') {
+        if trimmed.len() >= 3
+            && trimmed[1..]
+                .chars()
+                .all(|c| c == '=' || c == '!' || c == '-')
+        {
             return true;
         }
         return false;
     }
 
     // 15. DOS / Windows Batch label comments: ::
-    if trimmed.starts_with("::") {
-        let after = &trimmed[2..];
+    if let Some(after) = trimmed.strip_prefix("::") {
         // If followed by an identifier character in C++/Rust, it's a global scoped path
         if !after.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_') {
             return true;
@@ -10278,7 +10374,8 @@ fn find_statement_match_in_block(
             || first_trimmed.ends_with('{')
             || first_trimmed.ends_with(';')
             || first_trimmed.ends_with('}')
-            || first_trimmed.ends_with(':') // Python block header or YAML mapping key
+            || first_trimmed.ends_with(':')
+        // Python block header or YAML mapping key
         {
             return None;
         }
@@ -10855,7 +10952,8 @@ fn try_apply_hunk_at_location(
             }
             if current_target_indent.is_empty() {
                 let start_scan = location.start_index.saturating_sub(10);
-                let end_scan = (location.start_index + location.length + 10).min(target_lines.len());
+                let end_scan =
+                    (location.start_index + location.length + 10).min(target_lines.len());
                 for t_line in &target_lines[start_scan..end_scan] {
                     let ind = get_indent(t_line);
                     if ind.starts_with('\t') {
@@ -14110,7 +14208,9 @@ impl<'a> DefaultHunkFinder<'a> {
             warn!("find_wildcard_segments_location: empty segments slice");
             return Err(HunkApplyError::ContextNotFound);
         }
-        if segments.first().is_some_and(|seg| is_low_entropy_segment(seg))
+        if segments
+            .first()
+            .is_some_and(|seg| is_low_entropy_segment(seg))
             || segments.iter().all(|seg| is_low_entropy_segment(seg))
         {
             warn!("find_wildcard_segments_location: leading segment or all segments consist solely of low-entropy syntax");

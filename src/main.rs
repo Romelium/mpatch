@@ -713,7 +713,9 @@ fn write_report_footer(
     // 2. Disable file logging in TeeWriter so no subsequent logs
     // (from discrepancy checks, diff generation, etc.) touch the file mutex
     // or leak into the markdown report outside the log block.
-    report_data.file_logging_enabled.store(false, Ordering::SeqCst);
+    report_data
+        .file_logging_enabled
+        .store(false, Ordering::SeqCst);
 
     let file_arc = &report_data.file;
     let original_contents = &report_data.original_contents;
@@ -721,7 +723,9 @@ fn write_report_footer(
 
     // Scope 1: Write initial headers and final file states
     {
-        let Ok(mut file) = file_arc.lock() else { return; };
+        let Ok(mut file) = file_arc.lock() else {
+            return;
+        };
 
         // Use `let _ = ...` to ignore potential write errors during cleanup.
         let _ = writeln!(file, "````"); // Close the log block
@@ -791,7 +795,9 @@ fn write_report_footer(
     } // Lock released here
 
     let Some(batch_result) = batch_result else {
-        let Ok(mut file) = file_arc.lock() else { return; };
+        let Ok(mut file) = file_arc.lock() else {
+            return;
+        };
         let _ = writeln!(
             file,
             "*Discrepancy check was skipped as patch application did not complete.*"
@@ -845,12 +851,11 @@ fn write_report_footer(
                 } else {
                     let original_norm = format_normalized_patch(original_patch);
                     let recreated_norm = format_normalized_patch(&recreated_patch);
-                    let diff_text =
-                        similar::TextDiff::from_lines(&original_norm, &recreated_norm)
-                            .unified_diff()
-                            .context_radius(3)
-                            .header("Original Input Patch", "Regenerated Patch")
-                            .to_string();
+                    let diff_text = similar::TextDiff::from_lines(&original_norm, &recreated_norm)
+                        .unified_diff()
+                        .context_radius(3)
+                        .header("Original Input Patch", "Regenerated Patch")
+                        .to_string();
 
                     section_output.push_str("\n- **Result:** <span style='color:red;'>FAILURE</span>\n- **Details:** The regenerated patch does not match the input patch. This may indicate an issue with how a fuzzy match was applied.\n\n");
                     section_output.push_str("**Diff (Original vs. Regenerated):**\n");

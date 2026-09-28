@@ -2,12 +2,12 @@ use indoc::indoc;
 use mpatch::{
     apply_hunk_to_lines, apply_patch_to_file, apply_patch_to_lines, apply_patches_to_dir,
     apply_patches_to_dir_atomic, detect_patch, find_hunk_location, find_hunk_location_in_lines,
-    format_inline_diff, invert_patches, is_comment_line, merge_patches, merge_three_way, parse_aider, parse_auto,
-    parse_diffs, parse_patches, parse_patches_from_lines, parse_single_patch, patch_content_str,
-    suggest_close_file_paths, try_apply_patch_to_content, try_apply_patch_to_file,
-    try_apply_patch_to_lines, window_lengths, ApplyOptions, DefaultHunkFinder, Hunk,
-    HunkApplyError, HunkApplyStatus, HunkFinder, HunkLocation, MatchType, ParseError, Patch,
-    PatchError, PatchFormat, StrictApplyError, WindowLengthIter,
+    format_inline_diff, invert_patches, is_comment_line, merge_patches, merge_three_way,
+    parse_aider, parse_auto, parse_diffs, parse_patches, parse_patches_from_lines,
+    parse_single_patch, patch_content_str, suggest_close_file_paths, try_apply_patch_to_content,
+    try_apply_patch_to_file, try_apply_patch_to_lines, window_lengths, ApplyOptions,
+    DefaultHunkFinder, Hunk, HunkApplyError, HunkApplyStatus, HunkFinder, HunkLocation, MatchType,
+    ParseError, Patch, PatchError, PatchFormat, StrictApplyError, WindowLengthIter,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -5320,7 +5320,10 @@ fn test_nested_indented_aider_fences_inside_replacement_block() {
     let patches = parse_diffs(&content).unwrap();
     assert_eq!(patches.len(), 1);
     assert_eq!(patches[0].file_path.to_str(), Some("tests/mock.rs"));
-    assert!(patches[0].hunks[0].added_lines().iter().any(|l| l.contains("alu.v")));
+    assert!(patches[0].hunks[0]
+        .added_lines()
+        .iter()
+        .any(|l| l.contains("alu.v")));
 }
 
 #[test]
@@ -14284,7 +14287,10 @@ mod readme_examples_tests {
                 break;
             }
         }
-        assert!(found_report, "Expected mpatch-debug-report-*.md to be created");
+        assert!(
+            found_report,
+            "Expected mpatch-debug-report-*.md to be created"
+        );
     }
 
     #[test]
@@ -14311,14 +14317,17 @@ mod readme_examples_tests {
         "#};
 
         let patches = parse_diffs(content).unwrap();
-        assert_eq!(patches.len(), 1, "Consecutive blocks should inherit file path and be merged into one patch");
+        assert_eq!(
+            patches.len(),
+            1,
+            "Consecutive blocks should inherit file path and be merged into one patch"
+        );
         assert_eq!(patches[0].file_path.to_str().unwrap(), "src/utils.rs");
         assert_eq!(patches[0].hunks.len(), 2);
         assert_eq!(patches[0].hunks[0].added_lines(), vec!["fn one() { 10 }"]);
         assert_eq!(patches[0].hunks[1].added_lines(), vec!["fn two() { 20 }"]);
     }
 }
-
 
 mod polyglot_language_support_tests {
     use indoc::indoc;
@@ -14473,7 +14482,8 @@ mod polyglot_language_support_tests {
         "#};
 
         let patch = parse_auto(diff).unwrap().remove(0);
-        let res = patch_content_str(&patch.to_string(), Some(original), &ApplyOptions::new()).unwrap();
+        let res =
+            patch_content_str(&patch.to_string(), Some(original), &ApplyOptions::new()).unwrap();
         assert_eq!(res, "def run_worker\n    perform_task\nend\n# EOF note\n");
     }
 
@@ -14500,7 +14510,10 @@ mod polyglot_language_support_tests {
         "#};
 
         let res = patch_content_str(diff, Some(original), &ApplyOptions::exact());
-        assert!(res.is_err(), "Multiple `fi` endings without entropy must be rejected");
+        assert!(
+            res.is_err(),
+            "Multiple `fi` endings without entropy must be rejected"
+        );
     }
 
     #[test]
@@ -14576,7 +14589,8 @@ mod polyglot_language_support_tests {
         "#};
 
         let patch = parse_auto(diff).unwrap().remove(0);
-        let res = patch_content_str(&patch.to_string(), Some(original), &ApplyOptions::new()).unwrap();
+        let res =
+            patch_content_str(&patch.to_string(), Some(original), &ApplyOptions::new()).unwrap();
         assert!(res.contains("int c = a * b;"));
     }
 
@@ -14618,7 +14632,8 @@ mod polyglot_language_support_tests {
              Proceed with installation.
         "#};
         let patch = parse_auto(diff).unwrap().remove(0);
-        let res = patch_content_str(&patch.to_string(), Some(original), &ApplyOptions::new()).unwrap();
+        let res =
+            patch_content_str(&patch.to_string(), Some(original), &ApplyOptions::new()).unwrap();
         assert!(res.contains("Kindly verify that the server is active."));
     }
 
@@ -14639,7 +14654,8 @@ mod polyglot_language_support_tests {
              WHERE active = true;
         "#};
         let patch = parse_auto(diff).unwrap().remove(0);
-        let res = patch_content_str(&patch.to_string(), Some(original), &ApplyOptions::new()).unwrap();
+        let res =
+            patch_content_str(&patch.to_string(), Some(original), &ApplyOptions::new()).unwrap();
         assert!(res.contains("SELECT count(id) AS total_orders FROM orders"));
     }
 
@@ -14660,7 +14676,8 @@ mod polyglot_language_support_tests {
                      return f.read()
         "#};
         let patch = parse_auto(diff).unwrap().remove(0);
-        let res = patch_content_str(&patch.to_string(), Some(original), &ApplyOptions::new()).unwrap();
+        let res =
+            patch_content_str(&patch.to_string(), Some(original), &ApplyOptions::new()).unwrap();
         assert!(res.contains("log_read()"));
     }
 }
@@ -14985,8 +15002,14 @@ mod sound_language_heuristics_tests {
 
     #[test]
     fn test_foreign_language_prompts_not_mistaken_for_file_paths() {
-        assert!(is_plausible_file_path("src/components/My Component/Button.tsx"));
-        assert!(!is_plausible_file_path("Por favor revisa el archivo siguiente"));
-        assert!(!is_plausible_file_path("Bitte überprüfe die folgende Datei"));
+        assert!(is_plausible_file_path(
+            "src/components/My Component/Button.tsx"
+        ));
+        assert!(!is_plausible_file_path(
+            "Por favor revisa el archivo siguiente"
+        ));
+        assert!(!is_plausible_file_path(
+            "Bitte überprüfe die folgende Datei"
+        ));
     }
 }
