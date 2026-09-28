@@ -1,13 +1,14 @@
 use indoc::indoc;
 use mpatch::{
     apply_hunk_to_lines, apply_patch_to_file, apply_patch_to_lines, apply_patches_to_dir,
-    apply_patches_to_dir_atomic, detect_patch, find_hunk_location, find_hunk_location_in_lines,
-    format_inline_diff, invert_patches, is_comment_line, merge_patches, merge_three_way,
-    parse_aider, parse_auto, parse_diffs, parse_patches, parse_patches_from_lines,
-    parse_single_patch, patch_content_str, suggest_close_file_paths, try_apply_patch_to_content,
-    try_apply_patch_to_file, try_apply_patch_to_lines, window_lengths, ApplyOptions,
-    DefaultHunkFinder, Hunk, HunkApplyError, HunkApplyStatus, HunkFinder, HunkLocation, MatchType,
-    ParseError, Patch, PatchError, PatchFormat, StrictApplyError, WindowLengthIter,
+    apply_patches_to_dir_atomic, detect_patch, extract_file_path_from_line, find_hunk_location,
+    find_hunk_location_in_lines, format_inline_diff, invert_patches, is_comment_line,
+    merge_patches, merge_three_way, parse_aider, parse_auto, parse_diffs, parse_patches,
+    parse_patches_from_lines, parse_single_patch, patch_content_str, suggest_close_file_paths,
+    try_apply_patch_to_content, try_apply_patch_to_file, try_apply_patch_to_lines, window_lengths,
+    ApplyOptions, DefaultHunkFinder, Hunk, HunkApplyError, HunkApplyStatus, HunkFinder,
+    HunkLocation, MatchType, ParseError, Patch, PatchError, PatchFormat, StrictApplyError,
+    WindowLengthIter,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -9197,12 +9198,52 @@ mod wildcard_and_path_tests {
         assert!(is_plausible_file_path("\"src/main.rs\""));
         assert!(is_plausible_file_path("src/main.rs:42:10"));
         assert!(is_plausible_file_path("schema.typescript"));
+        assert!(is_plausible_file_path(
+            "src/components/My Custom Navigation Bar/Menu.tsx"
+        ));
+        assert!(is_plausible_file_path(
+            "C:/Users/Jane Doe/Documents/Visual Studio 2022/App/main.rs"
+        ));
+        assert!(is_plausible_file_path(
+            "New Game Project/assets/textures/player.png"
+        ));
+        assert!(is_plausible_file_path(
+            "docs/Getting Started Guide With Rust.md"
+        ));
+        assert!(is_plausible_file_path(
+            "\"docs/Getting Started Guide With Rust.md\""
+        ));
+        assert!(is_plausible_file_path("Meeting Notes - 2026-06-02.md"));
+
+        // Deep/long path (> 260 bytes)
+        let deep_path = format!("packages/enterprise-dashboard/src/modules/customer-management/{}/OrderTransactionHistoryAuditEntity.kt", "a".repeat(200));
+        assert!(is_plausible_file_path(&deep_path));
+        assert!(is_plausible_file_path("src/ユーザ管理画面/プロフィール編集モーダル/アカウント設定ダイアログ/詳細情報確認画面.tsx"));
 
         assert!(!is_plausible_file_path("Here is the code in main.rs"));
         assert!(!is_plausible_file_path("Please check the following file:"));
         assert!(!is_plausible_file_path("https://example.com/file.rs"));
         assert!(!is_plausible_file_path(""));
         assert!(!is_plausible_file_path("..."));
+    }
+
+    #[test]
+    fn test_extract_file_path_from_line_with_multi_space_paths() {
+        let path1 = extract_file_path_from_line(
+            "In file `src/components/My Custom Navigation Bar/Menu.tsx`, update:",
+        );
+        assert_eq!(
+            path1.unwrap().to_str().unwrap(),
+            "src/components/My Custom Navigation Bar/Menu.tsx"
+        );
+
+        let path2 = extract_file_path_from_line(
+            "Update \"C:/Users/Jane Doe/Documents/Visual Studio 2022/App/main.rs\":",
+        );
+        assert_eq!(
+            path2.unwrap().to_str().unwrap(),
+            "C:/Users/Jane Doe/Documents/Visual Studio 2022/App/main.rs"
+        );
     }
 
     #[test]

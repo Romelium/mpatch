@@ -4322,6 +4322,13 @@ pub fn normalize_candidate_path(s: &str) -> Option<PathBuf> {
 /// ```
 pub fn is_plausible_file_path(s: &str) -> bool {
     let mut s = s.trim();
+    let was_delimited = (s.starts_with('"') && s.ends_with('"'))
+        || (s.starts_with('\'') && s.ends_with('\''))
+        || (s.starts_with('`') && s.ends_with('`'))
+        || (s.starts_with('(') && s.ends_with(')'))
+        || (s.starts_with('[') && s.ends_with(']'))
+        || (s.starts_with('*') && s.ends_with('*'));
+
     while (s.starts_with('"') && s.ends_with('"'))
         || (s.starts_with('\'') && s.ends_with('\''))
         || (s.starts_with('`') && s.ends_with('`'))
@@ -4360,9 +4367,9 @@ pub fn is_plausible_file_path(s: &str) -> bool {
         s = rest.trim();
     }
 
-    if s.is_empty() || s.len() > 260 || s.ends_with('.') {
+    if s.is_empty() || s.len() > 4096 || s.ends_with('.') {
         trace!(
-            "is_plausible_file_path: '{}' rejected (empty, length > 260, or ends with '.')",
+            "is_plausible_file_path: '{}' rejected (empty, length > 4096, or ends with '.')",
             s
         );
         return false;
@@ -4406,30 +4413,100 @@ pub fn is_plausible_file_path(s: &str) -> bool {
     let has_slash = s.contains('/') || s.contains('\\');
 
     if s.contains(char::is_whitespace) {
-        // An unquoted candidate string containing whitespace cannot be a sentence:
-        // 1. Must not contain sentence punctuation (?, !, ;, ,)
-        // 2. Must not contain more than 2 spaces
-        // 3. If it contains directory separators, whitespace must reside inside folder components,
-        //    not as conversational leading/trailing phrases.
-        if s.contains(['?', '!', ';', ',']) {
-            return false;
-        }
-        if s.chars().filter(|c| c.is_whitespace()).count() > 2 {
+        if s.contains(['\n', '\r']) {
             trace!(
-                "is_plausible_file_path: '{}' rejected (contains English stop word)",
+                "is_plausible_file_path: '{}' rejected (contains newline)",
                 s
             );
             return false;
         }
-        if has_slash {
-            if let Some(first_slash) = s.find(['/', '\\']) {
-                let first_seg = s[..first_slash].trim_start();
-                if first_seg.chars().filter(|c| c.is_whitespace()).count() > 1 {
-                    return false;
-                }
+
+        // Candidate strings containing whitespace must not contain sentence punctuation
+        if s.contains(['?', '!', ';', ',']) {
+            trace!(
+                "is_plausible_file_path: '{}' rejected (contains sentence punctuation)",
+                s
+            );
+            return false;
+        }
+
+        if !was_delimited {
+            const CONVERSATIONAL_STOP_WORDS: &[&str] = &[
+                "is",
+                "are",
+                "was",
+                "were",
+                "be",
+                "been",
+                "being",
+                "have",
+                "has",
+                "had",
+                "do",
+                "does",
+                "did",
+                "the",
+                "this",
+                "that",
+                "these",
+                "those",
+                "here",
+                "there",
+                "where",
+                "when",
+                "how",
+                "what",
+                "which",
+                "who",
+                "why",
+                "please",
+                "check",
+                "following",
+                "look",
+                "see",
+                "you",
+                "we",
+                "they",
+                "i",
+                "can",
+                "could",
+                "should",
+                "would",
+                "will",
+            ];
+
+            let has_conversational_word = s.split(|c: char| !c.is_alphabetic()).any(|w| {
+                let lower = w.to_ascii_lowercase();
+                CONVERSATIONAL_STOP_WORDS.contains(&lower.as_str())
+            });
+
+            if has_conversational_word {
+                trace!(
+                    "is_plausible_file_path: '{}' rejected (contains conversational stop word)",
+                    s
+                );
+                return false;
+            }
+
+            if !has_slash && s.chars().filter(|c| c.is_whitespace()).count() > 4 {
+                trace!(
+                    "is_plausible_file_path: unquoted standalone filename '{}' rejected (> 4 spaces without slash)",
+                    s
+                );
+                return false;
+            }
+
+            if s.split(['/', '\\'])
+                .any(|seg| seg.chars().filter(|c| c.is_whitespace()).count() > 4)
+            {
+                trace!(
+                    "is_plausible_file_path: '{}' rejected (single path component has > 4 spaces)",
+                    s
+                );
+                return false;
             }
         }
-        if !s.contains('.') && !s.contains('/') && !s.contains('\\') {
+        if !s.contains('.') && !has_slash {
             return false;
         }
     }
@@ -4624,7 +4701,9 @@ pub fn extract_file_path_from_line(line: &str) -> Option<PathBuf> {
                 for (end, end_ch) in chars.by_ref() {
                     if end_ch == quote_char {
                         let candidate = trimmed[start + 1..end].trim();
-                        if is_plausible_file_path(candidate) {
+                        if is_plausible_file_path(&trimmed[start..=end])
+                            || is_plausible_file_path(candidate)
+                        {
                             let path = normalize_candidate_path(candidate);
                             trace!("extract_file_path_from_line: detected quoted path {:?} in line '{}'", path, trimmed);
                             return path;
