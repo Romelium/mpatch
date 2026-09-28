@@ -1,14 +1,13 @@
 use indoc::indoc;
 use mpatch::{
     apply_hunk_to_lines, apply_patch_to_file, apply_patch_to_lines, apply_patches_to_dir,
-    apply_patches_to_dir_atomic, detect_patch, extract_file_path_from_line, find_hunk_location,
-    find_hunk_location_in_lines, format_inline_diff, invert_patches, is_comment_line,
-    merge_patches, merge_three_way, parse_aider, parse_auto, parse_diffs, parse_patches,
-    parse_patches_from_lines, parse_single_patch, patch_content_str, suggest_close_file_paths,
-    try_apply_patch_to_content, try_apply_patch_to_file, try_apply_patch_to_lines, window_lengths,
-    ApplyOptions, DefaultHunkFinder, Hunk, HunkApplyError, HunkApplyStatus, HunkFinder,
-    HunkLocation, MatchType, ParseError, Patch, PatchError, PatchFormat, StrictApplyError,
-    WindowLengthIter,
+    apply_patches_to_dir_atomic, detect_patch, find_hunk_location, find_hunk_location_in_lines,
+    format_inline_diff, invert_patches, is_comment_line, merge_patches, merge_three_way,
+    parse_aider, parse_auto, parse_diffs, parse_patches, parse_patches_from_lines,
+    parse_single_patch, patch_content_str, suggest_close_file_paths, try_apply_patch_to_content,
+    try_apply_patch_to_file, try_apply_patch_to_lines, window_lengths, ApplyOptions,
+    DefaultHunkFinder, Hunk, HunkApplyError, HunkApplyStatus, HunkFinder, HunkLocation, MatchType,
+    ParseError, Patch, PatchError, PatchFormat, StrictApplyError, WindowLengthIter,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -15264,5 +15263,139 @@ mod structural_path_scoping_tests {
         assert_eq!(patches[0].hunks.len(), 2);
         assert_eq!(patches[0].hunks[0].added_lines(), vec!["init_a_v2();"]);
         assert_eq!(patches[0].hunks[1].added_lines(), vec!["init_b_v2();"]);
+    }
+}
+
+mod proportional_window_clamp_tests {
+    use indoc::indoc;
+    use mpatch::{apply_patch_to_file, parse_auto, ApplyOptions};
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_large_hunk_proportional_reduction_tolerates_deleted_lines() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("refactor.rs");
+
+        // Target file: 100-line function with 25 lines deleted during refactoring (75 lines remain)
+        let mut target_lines = Vec::with_capacity(75);
+        for i in 0..100 {
+            // Delete lines 40..65 from the target file
+            if !(40..65).contains(&i) {
+                target_lines.push(format!("    let step_{} = compute_value({});", i, i));
+            }
+        }
+        fs::write(&file_path, target_lines.join("\n") + "\n").unwrap();
+
+        // Patch expects the original 100 lines and modifies step_80
+        let mut patch_lines = vec![
+            "--- a/refactor.rs".to_string(),
+            "+++ b/refactor.rs".to_string(),
+            "@@ -1,100 +1,100 @@".to_string(),
+        ];
+        for i in 0..100 {
+            if i == 80 {
+                patch_lines.push(format!("-    let step_{} = compute_value({});", i, i));
+                patch_lines.push(format!("+    let step_{} = compute_value_v2({});", i, i));
+            } else {
+                patch_lines.push(format!("     let step_{} = compute_value({});", i, i));
+            }
+        }
+
+        let patch = parse_auto(&patch_lines.join("\n")).unwrap().remove(0);
+        let options = ApplyOptions::new(); // Fuzz threshold 0.70
+        let result = apply_patch_to_file(&patch, dir.path(), options).unwrap();
+
+        assert!(
+            result.report.all_applied_cleanly(),
+            "100-line hunk with 25 deleted lines must apply cleanly under proportional reduction (min_len <= 75)"
+        );
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("let step_80 = compute_value_v2(80);"));
+    }
+
+    #[test]
+    fn test_large_hunk_proportional_expansion_tolerates_added_lines() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("service_expand.rs");
+
+        // Target file: 200-line function with 55 lines of local additions (255 lines total)
+        let mut target_lines = Vec::with_capacity(255);
+        for i in 0..200 {
+            target_lines.push(format!("    let phase_{} = execute_step({});", i, i));
+            if (50..105).contains(&i) {
+                target_lines.push(format!("    telemetry_audit_probe({});", i));
+            }
+        }
+        fs::write(&file_path, target_lines.join("\n") + "\n").unwrap();
+
+        // Patch expects 200 lines and updates phase_150
+        let mut patch_lines = vec![
+            "--- a/service_expand.rs".to_string(),
+            "+++ b/service_expand.rs".to_string(),
+            "@@ -1,200 +1,200 @@".to_string(),
+        ];
+        for i in 0..200 {
+            if i == 150 {
+                patch_lines.push(format!("-    let phase_{} = execute_step({});", i, i));
+                patch_lines.push(format!("+    let phase_{} = execute_step_fast({});", i, i));
+            } else {
+                patch_lines.push(format!("     let phase_{} = execute_step({});", i, i));
+            }
+        }
+
+        let patch = parse_auto(&patch_lines.join("\n")).unwrap().remove(0);
+        let options = ApplyOptions::new(); // Fuzz threshold 0.70
+        let result = apply_patch_to_file(&patch, dir.path(), options).unwrap();
+
+        assert!(
+            result.report.all_applied_cleanly(),
+            "200-line hunk with 55 added lines must apply cleanly under proportional expansion (max_len >= 255)"
+        );
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("let phase_150 = execute_step_fast(150);"));
+    }
+
+    #[test]
+    fn test_small_hunk_bounded_expansion_prevents_runaway_gap() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("guard.rs");
+
+        // Target file has anchor lines separated by 12 lines of unrelated code
+        let mut original = String::from("pub fn worker_a() {\n");
+        original.push_str("    acquire_lock();\n");
+        for i in 0..12 {
+            original.push_str(&format!("    unrelated_operation_{}();\n", i));
+        }
+        original.push_str("    release_lock();\n");
+        original.push_str("}\n");
+        fs::write(&file_path, &original).unwrap();
+
+        // 2-line hunk matching acquire_lock and release_lock
+        let diff = indoc! {r#"
+            ```diff
+            --- a/guard.rs
+            +++ b/guard.rs
+            @@ -2,2 +2,3 @@
+                 acquire_lock();
+            +    injected_rogue_statement();
+                 release_lock();
+            ```
+        "#};
+
+        let patch = parse_auto(diff).unwrap().remove(0);
+        let options = ApplyOptions::new();
+        let result = apply_patch_to_file(&patch, dir.path(), options).unwrap();
+
+        // A 2-line hunk must not expand by 12+ lines across unrelated operations
+        assert!(
+            !result.report.all_applied_cleanly(),
+            "2-line hunk must not over-expand to swallow 12 lines of intervening operations"
+        );
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, original);
     }
 }

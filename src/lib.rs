@@ -13791,10 +13791,23 @@ impl<'a> DefaultHunkFinder<'a> {
 
             let len = match_block.len();
             // Define how far to search for different-sized windows.
-            // Expand generously based on hunk size so local doc comments or inserted
-            // statements don't push the target block outside the search window.
-            let max_expansion = ((len / 2) + 20).clamp(15, 50);
-            let min_reduction = ((len as f64 * 0.75) as usize).clamp(3, 20);
+            // Use proportional, threshold-aware bounds to avoid over-expanding tiny hunks
+            // or suffocating large refactorings.
+            let cushion = (2 * len).min(20);
+            let raw_expansion = (len / 2) + cushion;
+            let min_expansion_floor = (2 * len).min(15);
+            let max_expansion_ceil = 150;
+            let max_expansion = raw_expansion.clamp(min_expansion_floor, max_expansion_ceil);
+
+            let threshold = f64::from(self.options.fuzz_factor);
+            let max_reduction_ratio = if threshold > 0.0 && threshold < 2.0 {
+                ((2.0 * (1.0 - threshold)) / (2.0 - threshold) + 0.05).clamp(0.10, 0.50)
+            } else {
+                0.50
+            };
+            let raw_reduction = (len as f64 * max_reduction_ratio).round() as usize;
+            let min_reduction = raw_reduction.min(150);
+
             let min_len = len.saturating_sub(min_reduction).max(1).max(min_span);
             let max_len = len.saturating_add(max_expansion);
             let fuzz_distance = max_expansion;
