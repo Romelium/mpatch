@@ -12572,11 +12572,11 @@ fn score_window(
         return (1.0, 1.0, ratio_lines as f64, 1.0);
     }
 
-    if line_score >= threshold || len > 30 {
+    if line_score >= threshold || len > 80 {
         return (line_score, line_score, ratio_lines as f64, line_score);
     }
 
-    let max_word_bonus = if len > 10 { 0.25 } else { 0.70 };
+    let max_word_bonus = 1.0 / (len.max(1) as f64).sqrt();
     let max_strict =
         0.3 * ratio_lines as f64 + 0.7 * (ratio_lines as f64 + max_word_bonus).min(1.0);
     let max_loose = 0.3 * ratio_loose_lines + 0.7 * (ratio_loose_lines + max_word_bonus).min(1.0);
@@ -12834,6 +12834,9 @@ struct WindowScorer<'a, 't, 'm> {
     min_len: usize,
     max_len: usize,
     threshold: f64,
+    /// Exact score of the best window found during the seeding pass (or `-1.0` if none).
+    /// Windows whose upper bound falls strictly below this cannot become the top candidate.
+    seed_score: f64,
 }
 
 /// Evaluates and scores candidate sliding windows across the provided search ranges sequentially.
@@ -12851,6 +12854,54 @@ struct WindowScorer<'a, 't, 'm> {
 ///
 /// A vector of [`ScoredWindow`] objects representing all evaluated windows.
 impl WindowScorer<'_, '_, '_> {
+    /// Computes an admissible upper bound on [`score_window`] for the given window using
+    /// only prefix sums, returning `(theoretical_max, ub_lines)`.
+    fn window_upper_bound(&self, start_index: usize, window_len: usize) -> (f64, f64) {
+        let m = self.match_pre.len;
+        let c_m = self.match_pre.no_ws_chars;
+        let w_match_count = self.match_ps[start_index + window_len] - self.match_ps[start_index];
+        let w_loose_count = self.loose_ps[start_index + window_len] - self.loose_ps[start_index];
+        let w_ub_lines = (2 * w_match_count as usize) as f64 / (window_len + m) as f64;
+        let w_ub_loose = (2 * w_loose_count as usize) as f64 / (window_len + m) as f64;
+        let w_scale = if window_len > m && m > 0 {
+            let raw = (window_len + m) as f64 / (2.0 * m as f64);
+            let expansion_ratio = (window_len - m) as f64 / m as f64;
+            let penalty = (1.0 - 0.05 * expansion_ratio).max(0.60);
+            (raw * penalty).min(raw)
+        } else {
+            1.0
+        };
+        let w_ub_line_score = ((w_ub_lines * w_scale).max(w_ub_loose * w_scale)).min(1.0);
+        let w_theoretical_max = if m > 80 {
+            w_ub_line_score
+        } else {
+            let w_max_word_bonus = 1.0 / (m as f64).sqrt();
+            let w_max_strict =
+                (0.3 * w_ub_lines + 0.7 * (w_ub_lines + w_max_word_bonus).min(1.0)) * w_scale;
+            let w_max_loose =
+                (0.3 * w_ub_loose + 0.7 * (w_ub_loose + w_max_word_bonus).min(1.0)) * w_scale;
+            let w_c_w = self.pre.no_ws_line_ends[start_index + window_len - 1]
+                - self.pre.no_ws_line_starts[start_index];
+            let w_ub_no_ws = if w_c_w == 0 && c_m == 0 {
+                1.0
+            } else if w_c_w == 0 || c_m == 0 {
+                0.0
+            } else {
+                2.0 * (w_c_w.min(c_m) as f64) / ((w_c_w + c_m) as f64)
+            };
+            let w_ub_very_loose = if c_m <= 500 {
+                (0.1 * w_ub_lines + 0.9 * w_ub_no_ws) * w_scale
+            } else {
+                0.0
+            };
+            w_ub_line_score
+                .max(w_max_strict)
+                .max(w_max_loose)
+                .max(w_ub_very_loose)
+        };
+        (w_theoretical_max, w_ub_lines)
+    }
+
     fn score_candidate(
         &self,
         range_start: usize,
@@ -12865,7 +12916,6 @@ impl WindowScorer<'_, '_, '_> {
         }
 
         let m = self.match_pre.len;
-        let c_m = self.match_pre.no_ws_chars;
 
         if m > 10 {
             let max_match_count =
@@ -12873,11 +12923,15 @@ impl WindowScorer<'_, '_, '_> {
             let max_loose_count =
                 self.loose_ps[start_index + actual_max_len] - self.loose_ps[start_index];
             let max_count = max_match_count.max(max_loose_count) as f64;
-            if m > 30 && (max_count / m as f64) < self.threshold {
-                return Vec::new();
-            }
             let max_ub_lines = (2.0 * max_count) / (self.min_len + m) as f64;
             let max_ub_loose = (2.0 * max_count) / (self.min_len + m) as f64;
+            let best_ub_lines = max_ub_lines.max(max_ub_loose);
+            let word_allowance = if m > 80 { 0.0 } else { 1.0 / (m as f64).sqrt() };
+            let max_possible =
+                0.3 * best_ub_lines + 0.7 * (best_ub_lines + word_allowance).min(1.0);
+            if max_possible < self.threshold {
+                return Vec::new();
+            }
             if max_ub_lines.max(max_ub_loose) < 0.20 {
                 return Vec::new();
             }
@@ -12890,50 +12944,10 @@ impl WindowScorer<'_, '_, '_> {
         let mut best_local_score = 0.0;
         let lengths = WindowLengthIter::new(nominal_len, self.min_len, actual_max_len);
         for window_len in lengths {
-            let w_match_count =
-                self.match_ps[start_index + window_len] - self.match_ps[start_index];
-            let w_loose_count =
-                self.loose_ps[start_index + window_len] - self.loose_ps[start_index];
-            let w_ub_lines = (2 * w_match_count as usize) as f64 / (window_len + m) as f64;
-            let w_ub_loose = (2 * w_loose_count as usize) as f64 / (window_len + m) as f64;
-            let w_scale = if window_len > m && m > 0 {
-                let raw = (window_len + m) as f64 / (2.0 * m as f64);
-                let expansion_ratio = (window_len - m) as f64 / m as f64;
-                let penalty = (1.0 - 0.05 * expansion_ratio).max(0.60);
-                (raw * penalty).min(raw)
-            } else {
-                1.0
-            };
-            let w_ub_line_score = ((w_ub_lines * w_scale).max(w_ub_loose * w_scale)).min(1.0);
-            let w_theoretical_max = if m > 30 {
-                w_ub_line_score
-            } else {
-                let max_word_bonus = if m > 10 { 0.25 } else { 0.70 };
-                let w_max_strict = 0.3 * w_ub_lines + 0.7 * (w_ub_lines + max_word_bonus).min(1.0);
-                let w_max_loose = 0.3 * w_ub_loose + 0.7 * (w_ub_loose + max_word_bonus).min(1.0);
-                let w_c_w = self.pre.no_ws_line_ends[start_index + window_len - 1]
-                    - self.pre.no_ws_line_starts[start_index];
-                let w_ub_no_ws = if w_c_w == 0 && c_m == 0 {
-                    1.0
-                } else if w_c_w == 0 || c_m == 0 {
-                    0.0
-                } else {
-                    2.0 * (w_c_w.min(c_m) as f64) / ((w_c_w + c_m) as f64)
-                };
-                let w_ub_very_loose = if c_m <= 500 {
-                    0.1 * w_ub_lines + 0.9 * w_ub_no_ws
-                } else {
-                    0.0
-                };
-                w_ub_line_score
-                    .max(w_max_strict)
-                    .max(w_max_loose)
-                    .max(w_ub_very_loose)
-            };
+            let (w_theoretical_max, w_ub_lines) = self.window_upper_bound(start_index, window_len);
             if w_theoretical_max < self.threshold
-                || (m > 30
-                    && best_local_score >= self.threshold
-                    && w_theoretical_max <= best_local_score)
+                || (best_local_score >= self.threshold && w_theoretical_max <= best_local_score)
+                || (self.seed_score >= self.threshold && w_theoretical_max < self.seed_score)
             {
                 local_windows.push(ScoredWindow {
                     score: w_theoretical_max,
@@ -12964,6 +12978,56 @@ impl WindowScorer<'_, '_, '_> {
         }
         local_windows
     }
+}
+
+/// Number of most promising start positions exactly scored by [`seed_best_score`].
+const SEED_CANDIDATES: usize = 4;
+
+/// Computes a deterministic incumbent score used to prune the main window search.
+///
+/// Ranks every start position by the upper bound of its nominal-length window, exactly scores
+/// the top [`SEED_CANDIDATES`], and returns the best score found (or `-1.0` if none). Without
+/// this, large hunks only prune against the best score at the same start index, forcing an
+/// expensive line diff for nearly every window overlapping the true match.
+fn seed_best_score(scorer: &WindowScorer<'_, '_, '_>, search_ranges: &[(usize, usize)]) -> f64 {
+    let m = scorer.match_pre.len;
+    let mut top: Vec<(f64, usize, usize)> = Vec::with_capacity(SEED_CANDIDATES + 1);
+    for &(range_start, range_end) in search_ranges {
+        let target_len = range_end.saturating_sub(range_start);
+        for i in 0..=target_len.saturating_sub(scorer.min_len) {
+            let actual_max_len = scorer.max_len.min(target_len - i);
+            if actual_max_len < scorer.min_len {
+                continue;
+            }
+            let start_index = range_start + i;
+            let window_len = m.clamp(scorer.min_len, actual_max_len);
+            let (ub, _) = scorer.window_upper_bound(start_index, window_len);
+            if ub < scorer.threshold
+                || (top.len() == SEED_CANDIDATES && ub <= top[SEED_CANDIDATES - 1].0)
+            {
+                continue;
+            }
+            let pos = top.partition_point(|&(s, _, _)| s >= ub);
+            top.insert(pos, (ub, start_index, window_len));
+            top.truncate(SEED_CANDIDATES);
+        }
+    }
+
+    let seed = top
+        .iter()
+        .map(|&(_, start_index, window_len)| {
+            let window = scorer
+                .pre
+                .window_data(scorer.target_refs, start_index, window_len);
+            score_window(&window, scorer.match_pre, scorer.threshold).0
+        })
+        .fold(-1.0, f64::max);
+    trace!(
+        "        Seeded fuzzy search incumbent score {:.3} from {} candidate(s)",
+        seed,
+        top.len()
+    );
+    seed
 }
 
 /// Evaluates and scores candidate sliding windows across the provided search ranges.
@@ -13052,6 +13116,11 @@ fn compute_scored_windows(
         min_len,
         max_len,
         threshold,
+        seed_score: -1.0,
+    };
+    let scorer = WindowScorer {
+        seed_score: seed_best_score(&scorer, search_ranges),
+        ..scorer
     };
 
     #[cfg(feature = "parallel")]

@@ -15399,3 +15399,59 @@ mod proportional_window_clamp_tests {
         assert_eq!(content, original);
     }
 }
+
+#[test]
+fn test_fuzzy_matching_standard_function_exceeding_thirty_lines() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("service.rs");
+
+    // 35-line function in target file where `ctx` was renamed to `context` across 11 lines
+    let mut original = String::from(
+        "pub fn process_order_lifecycle(context: &mut OrderContext) -> Result<Receipt, Error> {\n",
+    );
+    for i in 1..=32 {
+        if i % 3 == 0 {
+            original.push_str(&format!(
+                "    let step_{} = validate_stage(context, {});\n",
+                i, i
+            ));
+        } else {
+            original.push_str(&format!("    let step_{} = compute_stage({});\n", i, i));
+        }
+    }
+    original.push_str("    finalize_order(context)\n}\n");
+    std::fs::write(&file_path, &original).unwrap();
+
+    // Patch expects the older version where `ctx` was used instead of `context`
+    // and modifies the return statement at the end of the 35-line function.
+    let mut patch_diff = String::from(indoc! {r#"
+        --- a/service.rs
+        +++ b/service.rs
+        @@ -1,35 +1,35 @@
+         pub fn process_order_lifecycle(ctx: &mut OrderContext) -> Result<Receipt, Error> {
+    "#});
+    for i in 1..=32 {
+        if i % 3 == 0 {
+            patch_diff.push_str(&format!(
+                "     let step_{} = validate_stage(ctx, {});\n",
+                i, i
+            ));
+        } else {
+            patch_diff.push_str(&format!("     let step_{} = compute_stage({});\n", i, i));
+        }
+    }
+    patch_diff.push_str("-    finalize_order(ctx)\n+    finalize_order_v2(ctx, true)\n }\n");
+
+    let patches = mpatch::parse_auto(&patch_diff).unwrap();
+    let options = mpatch::ApplyOptions::new(); // Fuzz factor 0.70
+    let result = mpatch::apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
+
+    assert!(
+        result.report.all_applied_cleanly(),
+        "35-line function with variable drift must apply cleanly via continuous sub-line word matching"
+    );
+    let content = std::fs::read_to_string(&file_path).unwrap();
+    assert!(content.contains("finalize_order_v2(ctx, true)"));
+    assert!(content.contains("validate_stage(context, 3)"));
+}
