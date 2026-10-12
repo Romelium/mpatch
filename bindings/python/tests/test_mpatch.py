@@ -455,6 +455,8 @@ def test_create_and_invert_patch():
 
     assert Path(patch.file_path).as_posix() == "src/main.rs"
     assert len(patch.hunks) == 1
+    assert patch.hunks[0].removed_lines == ['    println!("old");']
+    assert patch.hunks[0].added_lines == ['    println!("new");']
 
     # Test setters for hunks and ends_with_newline
     patch.ends_with_newline = False
@@ -465,19 +467,17 @@ def test_create_and_invert_patch():
     new_hunk = mpatch.Hunk(["-old", "+new"])
     patch.hunks = [new_hunk]
     assert len(patch.hunks) == 1
+    assert patch.hunks[0].removed_lines == ["old"]
     assert patch.hunks[0].added_lines == ["new"]
-
-    assert patch.hunks[0].removed_lines == ['    println!("old");']
-    assert patch.hunks[0].added_lines == ['    println!("new");']
 
     # Invert the patch
     inverted = patch.invert()
-    assert inverted.hunks[0].removed_lines == ['    println!("new");']
-    assert inverted.hunks[0].added_lines == ['    println!("old");']
+    assert inverted.hunks[0].removed_lines == ["new"]
+    assert inverted.hunks[0].added_lines == ["old"]
 
     # Test batch inversion helper
     inverted_list = mpatch.invert_patches([patch])
-    assert inverted_list[0].hunks[0].removed_lines == ['    println!("new");']
+    assert inverted_list[0].hunks[0].removed_lines == ["new"]
 
 
 def test_create_unified_diff_str():
@@ -636,7 +636,7 @@ def test_python_wildcard_file_apply(tmp_path: Path):
 
 
 def test_python_wildcard_runaway_gap_rejected():
-    lines = ["def alpha():\n", "    return 1\n\n"]
+    lines = ["def alpha():\n", "\n"]
     for i in range(350):
         lines.append(f"def intermediate_{i}(): pass\n")
     lines.append("\ndef beta():\n    return 1\n")
