@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Python Release Workflow:** Use Python 3.14t for free-threaded wheels, which is the minimum supported version for free-threaded interpreters in Maturin.
+- **Python Release Workflow:** Use Python 3.14t for free-threaded wheels, which is the minimum supported version for free-threaded interpreters in Maturin, and assign musllinux tags to musl builds so Linux ABI variants do not collide during artifact merging.
 
 ## [1.7.0] - 2026-10-12
 

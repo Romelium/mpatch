@@ -47,9 +47,9 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          manylinux: auto
+          manylinux: ${{ contains(matrix.platform.target, 'linux-musl') && 'musllinux_1_2' || '2_17' }}
           working-directory: bindings/python
-          # Pass `-i python3.13t` to explicitly tell maturin to build a cp313t wheel alongside abi3
+          # Pass `-i python3.14t` to explicitly tell maturin to build a free-threaded wheel alongside abi3
           args: --release --out dist --locked --compatibility pypi ${{ matrix.free-threaded && '-i python3.14t' || '' }}
           sccache: 'true'
 
