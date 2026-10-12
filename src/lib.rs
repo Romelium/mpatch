@@ -6186,6 +6186,9 @@ where
     let mut current_hunk_lines: Vec<String> = Vec::with_capacity(HUNK_BUFFER_CAPACITY);
     let mut current_hunk_old_start_line: Option<usize> = None;
     let mut current_hunk_new_start_line: Option<usize> = None;
+    let mut current_hunk_old_lines_remaining: Option<usize> = None;
+    let mut current_hunk_new_lines_remaining: Option<usize> = None;
+    let mut current_hunk_is_complete = false;
     let mut ends_with_newline_for_section = true;
 
     macro_rules! finalize_hunk {
@@ -6215,7 +6218,28 @@ where
         };
     }
 
-    for (line_idx, line) in lines.enumerate() {
+    let mut lines = lines.enumerate().peekable();
+    while let Some((line_idx, line)) = lines.next() {
+        let is_git_format_patch_signature = current_hunk_is_complete
+            && line == "-- "
+            && lines.peek().is_some_and(|(_, version)| {
+                version
+                    .trim()
+                    .split('.')
+                    .take(2)
+                    .all(|part| part.parse::<u64>().is_ok())
+            });
+        if is_git_format_patch_signature {
+            trace!("  Found Git format-patch signature after completed hunk.");
+            finalize_hunk!();
+            current_hunk_old_start_line = None;
+            current_hunk_new_start_line = None;
+            current_hunk_old_lines_remaining = None;
+            current_hunk_new_lines_remaining = None;
+            current_hunk_is_complete = false;
+            continue;
+        }
+
         if let Some(stripped_line) = line.strip_prefix("--- ") {
             trace!("  Found file header line: '{}'", line);
             // A `---` line always signals a new file section.
@@ -6242,6 +6266,9 @@ where
             current_hunk_lines.clear();
             current_hunk_old_start_line = None;
             current_hunk_new_start_line = None;
+            current_hunk_old_lines_remaining = None;
+            current_hunk_new_lines_remaining = None;
+            current_hunk_is_complete = false;
             ends_with_newline_for_section = true;
 
             let path_part = stripped_line.trim();
@@ -6267,16 +6294,21 @@ where
             if first_hunk_header_line.is_none() {
                 first_hunk_header_line = Some(line_idx + 1);
             }
-            let (old, new) = parse_hunk_header(line);
+            let (old, new, old_count, new_count) = parse_hunk_header(line);
             debug!(
-                "  Hunk header at line {}: '{}' -> old_start={:?}, new_start={:?}",
+                "  Hunk header at line {}: '{}' -> old_start={:?}, new_start={:?}, old_count={:?}, new_count={:?}",
                 line_idx + 1,
                 line,
                 old,
-                new
+                new,
+                old_count,
+                new_count
             );
             current_hunk_old_start_line = old;
             current_hunk_new_start_line = new;
+            current_hunk_old_lines_remaining = old_count;
+            current_hunk_new_lines_remaining = new_count;
+            current_hunk_is_complete = old_count == Some(0) && new_count == Some(0);
         } else if line.starts_with(['+', '-', ' ']) {
             // Only treat this as a hunk line if we're actually inside a hunk.
             if current_hunk_old_start_line.is_some() {
@@ -6286,6 +6318,29 @@ where
                     line
                 );
                 current_hunk_lines.push(line.to_string());
+                match line.as_bytes()[0] {
+                    b' ' => {
+                        if let Some(remaining) = &mut current_hunk_old_lines_remaining {
+                            *remaining = remaining.saturating_sub(1);
+                        }
+                        if let Some(remaining) = &mut current_hunk_new_lines_remaining {
+                            *remaining = remaining.saturating_sub(1);
+                        }
+                    }
+                    b'-' => {
+                        if let Some(remaining) = &mut current_hunk_old_lines_remaining {
+                            *remaining = remaining.saturating_sub(1);
+                        }
+                    }
+                    b'+' => {
+                        if let Some(remaining) = &mut current_hunk_new_lines_remaining {
+                            *remaining = remaining.saturating_sub(1);
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+                current_hunk_is_complete = current_hunk_old_lines_remaining == Some(0)
+                    && current_hunk_new_lines_remaining == Some(0);
             } else {
                 trace!("    Ignored diff line outside hunk: '{}'", line);
             }
@@ -6315,6 +6370,14 @@ where
                 line.trim_end()
             );
             current_hunk_lines.push(format!(" {}", line));
+            if let Some(remaining) = &mut current_hunk_old_lines_remaining {
+                *remaining = remaining.saturating_sub(1);
+            }
+            if let Some(remaining) = &mut current_hunk_new_lines_remaining {
+                *remaining = remaining.saturating_sub(1);
+            }
+            current_hunk_is_complete = current_hunk_old_lines_remaining == Some(0)
+                && current_hunk_new_lines_remaining == Some(0);
         }
     }
 
@@ -11151,17 +11214,32 @@ fn try_apply_hunk_at_location(
         // For Exact matches, we assume the patch's indentation is intentional and correct relative to the context.
         // We don't need dynamic adjustment because the context matched byte-for-byte.
         trace!("    Applying hunk via exact logic.");
-        let block: Vec<String> = hunk
-            .get_replace_block()
-            .iter()
-            .map(|s| {
-                if s.trim().is_empty() {
-                    String::new()
-                } else {
-                    s.to_string()
+        let mut block = Vec::with_capacity(hunk.lines.len());
+        let mut target_line_index = location.start_index;
+        for line in &hunk.lines {
+            let Some(prefix) = line.as_bytes().first().copied() else {
+                return Err(HunkApplyError::ContextNotFound);
+            };
+            match prefix {
+                b' ' => {
+                    let target_line = target_lines
+                        .get(target_line_index)
+                        .ok_or(HunkApplyError::ContextNotFound)?;
+                    block.push(target_line.clone());
+                    target_line_index += 1;
                 }
-            })
-            .collect();
+                b'-' => target_line_index += 1,
+                b'+' => {
+                    let added_line = &line[1..];
+                    block.push(if added_line.trim().is_empty() {
+                        String::new()
+                    } else {
+                        added_line.to_string()
+                    });
+                }
+                _ => return Err(HunkApplyError::ContextNotFound),
+            }
+        }
         debug!(
             "    Exact match replacement generated {} line(s) to replace {} line(s).",
             block.len(),
@@ -14811,31 +14889,38 @@ pub fn window_lengths(nominal: usize, min_len: usize, max_len: usize) -> WindowL
 ///
 /// # Returns
 ///
-/// A tuple `(old_start_line, new_start_line)` where each element is `Some(line_number)` if parsed,
-/// or `None` if the line was malformed or omitted the number.
-fn parse_hunk_header(line: &str) -> (Option<usize>, Option<usize>) {
-    // We are interested in the original file's line number, which is the first number after '-'.
+/// A tuple `(old_start_line, new_start_line, old_count, new_count)` where each element is
+/// `Some(value)` if parsed, or `None` if the line was malformed or omitted the range.
+fn parse_hunk_header(line: &str) -> (Option<usize>, Option<usize>, Option<usize>, Option<usize>) {
     // Example: @@ -21,8 +21,8 @@
     trace!("parse_hunk_header: parsing '{}'", line);
     let mut parts = line.split_whitespace();
     parts.next(); // skip "@@"
     let (Some(old_part), Some(new_part)) = (parts.next(), parts.next()) else {
-        return (None, None);
+        return (None, None, None, None);
     };
-    let old_line = old_part
-        .strip_prefix('-')
-        .and_then(|s| s.split(',').next())
-        .and_then(|s| s.parse::<usize>().ok());
-    let new_line = new_part
-        .strip_prefix('+')
-        .and_then(|s| s.split(',').next())
-        .and_then(|s| s.parse::<usize>().ok());
+    let parse_range = |part: &str, prefix: char| {
+        let Some(range) = part.strip_prefix(prefix) else {
+            return (None, None);
+        };
+        let mut range = range.split(',');
+        let start = range.next().and_then(|value| value.parse::<usize>().ok());
+        let count = match range.next() {
+            Some(count) => count.parse::<usize>().ok(),
+            None => start.map(|_| 1),
+        };
+        (start, count)
+    };
+    let (old_start, old_count) = parse_range(old_part, '-');
+    let (new_start, new_count) = parse_range(new_part, '+');
     trace!(
-        "parse_hunk_header: extracted old_start={:?}, new_start={:?}",
-        old_line,
-        new_line
+        "parse_hunk_header: extracted old=({:?}, {:?}), new=({:?}, {:?})",
+        old_start,
+        old_count,
+        new_start,
+        new_count
     );
-    (old_line, new_line)
+    (old_start, new_start, old_count, new_count)
 }
 
 /// Formats an inline word-level diff between expected context lines and actual target lines.

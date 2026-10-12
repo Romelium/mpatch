@@ -71,6 +71,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Logging:** Expanded trace and debug logging across parsing, path inference, anchor search, window scoring, candidate backtracking, and atomic application.
 - **Documentation:** Extensively updated root and Python `README.md` files with guides and examples for atomic application, Aider search/replace with wildcard ellipsis matching, 3-way merges, inline word diffs, and stdin piping. Every README example is now exercised by Rust and Python integration tests.
 
+### Fixed
+
+- **Unified Diff Parsing & Exact Application:** Recognize Git format-patch version footers after completed hunks, and preserve whitespace-only context lines verbatim during exact application.
+
 ### Performance
 
 - **Histogram Sequence Comparisons:** Switched word-level sequence comparisons in `score_window`, `find_statement_match_in_block`, and `try_apply_hunk_at_location` to `similar::Algorithm::Histogram`, eliminating quadratic Myers degradation on repetitive code.
