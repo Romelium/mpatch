@@ -1065,9 +1065,24 @@ def test_python_path_and_ellipsis_inspection():
     assert mpatch.is_plausible_file_path("src/core/main.rs") is True
     assert mpatch.is_plausible_file_path("components/Button.tsx") is True
     assert mpatch.is_plausible_file_path(".gitignore") is True
-    assert mpatch.is_plausible_file_path("src/components/My Custom Navigation Bar/Menu.tsx") is True
-    assert mpatch.is_plausible_file_path("C:/Users/Jane Doe/Documents/Visual Studio 2022/App/main.rs") is True
-    assert mpatch.is_plausible_file_path("src/ユーザ管理画面/プロフィール編集モーダル/アカウント設定ダイアログ/詳細情報確認画面.tsx") is True
+    assert (
+        mpatch.is_plausible_file_path(
+            "src/components/My Custom Navigation Bar/Menu.tsx"
+        )
+        is True
+    )
+    assert (
+        mpatch.is_plausible_file_path(
+            "C:/Users/Jane Doe/Documents/Visual Studio 2022/App/main.rs"
+        )
+        is True
+    )
+    assert (
+        mpatch.is_plausible_file_path(
+            "src/ユーザ管理画面/プロフィール編集モーダル/アカウント設定ダイアログ/詳細情報確認画面.tsx"
+        )
+        is True
+    )
     assert mpatch.is_plausible_file_path("Please check the following:") is False
 
     # extract_file_path_from_line
