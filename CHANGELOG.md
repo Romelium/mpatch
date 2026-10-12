@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-10-12
+
 ### Overview
 
 1. **Format-Agnostic LLM Ingestion & Wildcards:** Native parsing for Aider search/replace blocks with automatic path inference and multi-line wildcard ellipsis (`...`) matching that safely bridges omitted code gaps.
