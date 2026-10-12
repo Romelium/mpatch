@@ -791,6 +791,108 @@ fn test_parse_patches_with_git_headers() {
 }
 
 #[test]
+fn test_format_patch_hunk_applies_with_fuzzy_matching_disabled() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let original = indoc! {"
+        NV_CONFTEST_FUNCTION_COMPILE_TESTS += pci_domain_nr
+        NV_CONFTEST_FUNCTION_COMPILE_TESTS += dma_mapping_error
+        NV_CONFTEST_FUNCTION_COMPILE_TESTS += sg_alloc_table
+        NV_CONFTEST_FUNCTION_COMPILE_TESTS += sg_init_table
+        NV_CONFTEST_FUNCTION_COMPILE_TESTS += pci_get_domain_bus_and_slot
+        NV_CONFTEST_FUNCTION_COMPILE_TESTS += get_num_physpages
+        NV_CONFTEST_FUNCTION_COMPILE_TESTS += efi_enabled
+    "};
+    let diff = concat!(
+        r#"From ff44f24377756e4163ca1c544c5d6335257aee1e Mon Sep 17 00:00:00 2001
+From: Andreas Beckmann <anbe@debian.org>
+Subject: [PATCH] backport error on unknown conftests
+
+diff --git a/nvidia/nvidia.Kbuild b/nvidia/nvidia.Kbuild
+index d6995ca..39d8152 100644
+--- a/nvidia/nvidia.Kbuild
++++ b/nvidia/nvidia.Kbuild
+@@ -127,7 +127,7 @@
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += pci_domain_nr
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += dma_mapping_error
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += sg_alloc_table
+-NV_CONFTEST_FUNCTION_COMPILE_TESTS += sg_init_table
++#NV_CONFTEST_FUNCTION_COMPILE_TESTS += sg_init_table
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += pci_get_domain_bus_and_slot
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += get_num_physpages
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += efi_enabled
+--"#,
+        " \n2.20.1\n"
+    );
+    let patch = parse_single_patch(diff).unwrap();
+    assert_eq!(
+        patch.hunks[0].get_match_block(),
+        original.lines().collect::<Vec<_>>()
+    );
+
+    let options = ApplyOptions {
+        fuzz_factor: 0.0,
+        ..ApplyOptions::new()
+    };
+    let result = try_apply_patch_to_content(&patch, Some(original), &options).unwrap();
+    assert!(result.report.all_applied_cleanly());
+    assert_eq!(
+        result.new_content,
+        original.replace(
+            "NV_CONFTEST_FUNCTION_COMPILE_TESTS += sg_init_table",
+            "#NV_CONFTEST_FUNCTION_COMPILE_TESTS += sg_init_table"
+        )
+    );
+}
+
+#[test]
+fn test_format_patch_trailer_after_multiple_files_is_excluded() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let diff = concat!(
+        "From 1234567890abcdef Mon Sep 17 00:00:00 2001\n",
+        "Subject: [PATCH] update two files\n",
+        "\n",
+        "diff --git a/first.txt b/first.txt\n",
+        "--- a/first.txt\n",
+        "+++ b/first.txt\n",
+        "@@ -1,2 +1,2 @@\n",
+        " keep first\n",
+        "-old first\n",
+        "+new first\n",
+        "diff --git a/second.txt b/second.txt\n",
+        "--- a/second.txt\n",
+        "+++ b/second.txt\n",
+        "@@ -1,2 +1,2 @@\n",
+        " keep second\n",
+        "-old second\n",
+        "+new second\n",
+        "-- \n",
+        "2.20.1\n",
+    );
+
+    let patches = parse_patches(diff).unwrap();
+    assert_eq!(patches.len(), 2);
+    assert_eq!(patches[0].file_path.to_str().unwrap(), "first.txt");
+    assert_eq!(patches[1].file_path.to_str().unwrap(), "second.txt");
+
+    for (patch, (context, old, new)) in patches.iter().zip([
+        ("keep first", "old first", "new first"),
+        ("keep second", "old second", "new second"),
+    ]) {
+        assert_eq!(patch.hunks.len(), 1);
+        assert_eq!(patch.hunks[0].get_match_block(), vec![context, old]);
+        assert_eq!(patch.hunks[0].get_replace_block(), vec![context, new]);
+        assert!(!patch.hunks[0]
+            .get_match_block()
+            .iter()
+            .any(|line| line.starts_with("- ") || line.contains("2.20.1")));
+        assert!(!patch.hunks[0]
+            .get_replace_block()
+            .iter()
+            .any(|line| line.contains("2.20.1")));
+    }
+}
+
+#[test]
 fn test_parse_patches_merges_sections_for_same_file() {
     let _ = env_logger::builder().is_test(true).try_init();
     let raw_diff = indoc! {r#"
@@ -1360,6 +1462,27 @@ fn test_match_with_different_trailing_whitespace() {
 }
 
 #[test]
+fn test_exact_match_preserves_whitespace_only_context_lines() {
+    let original = "start\n    \nold value\nend\n";
+    let diff = concat!(
+        "--- a/test.txt\n",
+        "+++ b/test.txt\n",
+        "@@ -1,4 +1,4 @@\n",
+        " start\n",
+        "     \n",
+        "-old value\n",
+        "+new value\n",
+        " end\n",
+    );
+    let patch = parse_single_patch(diff).unwrap();
+    let result =
+        try_apply_patch_to_content(&patch, Some(original), &ApplyOptions::exact()).unwrap();
+
+    assert!(result.report.all_applied_cleanly());
+    assert_eq!(result.new_content, "start\n    \nnew value\nend\n");
+}
+
+#[test]
 fn test_ambiguous_match_fails() {
     let _ = env_logger::builder().is_test(true).try_init();
     let dir = tempdir().unwrap();
@@ -1908,6 +2031,34 @@ fn test_fuzzy_match_below_threshold_fails() {
     ));
     let content = fs::read_to_string(file_path).unwrap();
     assert_eq!(content, original_content, "File should be unchanged");
+}
+
+#[test]
+fn test_fuzzy_threshold_diagnostic_can_round_to_threshold() {
+    let error = HunkApplyError::FuzzyMatchBelowThreshold {
+        best_score: 0.6999818346957312,
+        threshold: 0.7,
+        location: HunkLocation {
+            start_index: 193,
+            length: 5,
+        },
+    };
+
+    match &error {
+        HunkApplyError::FuzzyMatchBelowThreshold {
+            best_score,
+            threshold,
+            ..
+        } => {
+            assert!(*best_score < f64::from(*threshold));
+            assert_eq!(format!("{best_score:.3}"), format!("{threshold:.3}"));
+        }
+        _ => unreachable!(),
+    }
+    assert_eq!(
+        error.to_string(),
+        "Best fuzzy match at line 194 (score: 0.700) was below threshold (0.700)"
+    );
 }
 
 #[test]

@@ -165,15 +165,17 @@ mpatch --dry-run changes.md ./src
 ```
 
 ### Adjusting Sensitivity
-If `mpatch` is matching the wrong place, increase the strictness (default is 0.7). If it's failing to find a match, lower it.
+The default fuzz factor is `0.7`. Lower it to accept fewer approximate matches, or raise it when the patch context has drifted. Set it to `0` to disable fuzzy matching; exact matching and a trailing-whitespace-insensitive exact pass are still used.
 
 ```bash
 # Stricter (needs 90% similarity)
 mpatch --fuzz-factor 0.9 changes.md ./src
 
-# Disable fuzzy matching (exact match only)
+# Disable fuzzy matching (exact matching only, with trailing-whitespace tolerance)
 mpatch --fuzz-factor 0.0 changes.md ./src
 ```
+
+For unified diffs whose full hunk context is present, use `--fuzz-factor 0` to avoid approximate relocation. It may not work when context has drifted, and does not guarantee identical behavior to the traditional `patch` command. Preview the result with `--dry-run` first.
 
 ### Reversing a Patch
 Undo a previously applied patch (swaps additions and deletions).
