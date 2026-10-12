@@ -41,7 +41,7 @@ jobs:
         if: matrix.free-threaded
         uses: actions/setup-python@v6
         with:
-          python-version: '3.13t'
+          python-version: '3.14t'
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
@@ -50,7 +50,7 @@ jobs:
           manylinux: auto
           working-directory: bindings/python
           # Pass `-i python3.13t` to explicitly tell maturin to build a cp313t wheel alongside abi3
-          args: --release --out dist --locked --compatibility pypi ${{ matrix.free-threaded && '-i python3.13t' || '' }}
+          args: --release --out dist --locked --compatibility pypi ${{ matrix.free-threaded && '-i python3.14t' || '' }}
           sccache: 'true'
 
       - name: Upload wheels
