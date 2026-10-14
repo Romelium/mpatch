@@ -428,7 +428,11 @@ def apply_version_bumps(ctx: ReleaseContext, current_ver: str, new_ver: str) -> 
     """Applies version updates across Cargo.toml files, pyproject.toml, CHANGELOG, docs, and lockfile."""
     root = ctx.root
     dry_run = ctx.dry_run
-    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()  # noqa: UP017
+    today = (
+        datetime.datetime.now(datetime.timezone(datetime.timedelta(0)))
+        .date()
+        .isoformat()
+    )
     c_esc = re.escape(current_ver)
 
     # 1. Root Cargo.toml
