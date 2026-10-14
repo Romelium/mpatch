@@ -893,6 +893,63 @@ fn test_format_patch_trailer_after_multiple_files_is_excluded() {
 }
 
 #[test]
+fn test_parse_and_apply_unified_diff_with_header_timestamps() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("foo.txt");
+    fs::write(&file_path, "line1\nline2\nline3\n").unwrap();
+    let diff = concat!(
+        "--- a/foo.txt\t2026-01-01 00:00:00.000000000 +0100\n",
+        "+++ b/foo.txt\t2026-01-01 00:00:00.000000000 +0100\n",
+        "@@ -1,3 +1,3 @@\n",
+        " line1\n",
+        "-line2\n",
+        "+line2_modified\n",
+        " line3\n",
+    );
+
+    let patches = parse_patches(diff).unwrap();
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].file_path, std::path::PathBuf::from("foo.txt"));
+    assert!(patches[0].hunks[0]
+        .get_replace_block()
+        .contains(&"line2_modified"));
+
+    let result = apply_patch_to_file(&patches[0], dir.path(), ApplyOptions::exact()).unwrap();
+    assert!(result.report.all_applied_cleanly());
+    assert_eq!(
+        fs::read_to_string(file_path).unwrap(),
+        "line1\nline2_modified\nline3\n"
+    );
+}
+
+#[test]
+fn test_parse_git_quoted_paths_and_unusual_hunk_content() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let diff = concat!(
+        "diff --git \"a/a\\040file.txt\" \"b/a\\040file.txt\"\n",
+        "index 1234567..abcdefg 100644\n",
+        "--- \"a/a\\040file.txt\"\n",
+        "+++ \"b/a\\040file.txt\"\n",
+        "@@ -1 +1 @@\n",
+        "--- old content beginning with a dash\n",
+        "+++ new content beginning with a plus\n",
+    );
+
+    let patches = parse_patches(diff).unwrap();
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].file_path, std::path::PathBuf::from("a file.txt"));
+    assert_eq!(
+        patches[0].hunks[0].removed_lines(),
+        vec!["-- old content beginning with a dash"]
+    );
+    assert_eq!(
+        patches[0].hunks[0].added_lines(),
+        vec!["++ new content beginning with a plus"]
+    );
+}
+
+#[test]
 fn test_parse_patches_merges_sections_for_same_file() {
     let _ = env_logger::builder().is_test(true).try_init();
     let raw_diff = indoc! {r#"

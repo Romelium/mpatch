@@ -4289,6 +4289,71 @@ pub fn normalize_candidate_path(s: &str) -> Option<PathBuf> {
     }
 }
 
+fn parse_unified_header_path(header: &str) -> Option<String> {
+    let path = header
+        .split_once('\t')
+        .map_or(header, |(path, _)| path)
+        .trim();
+
+    if path.starts_with('"') {
+        decode_git_quoted_path(path)
+    } else if path.is_empty() {
+        None
+    } else {
+        Some(path.to_owned())
+    }
+}
+
+fn decode_git_quoted_path(path: &str) -> Option<String> {
+    let bytes = path.as_bytes();
+    if bytes.len() < 2 || bytes[0] != b'"' || bytes[bytes.len() - 1] != b'"' {
+        return None;
+    }
+
+    let mut decoded = Vec::with_capacity(bytes.len() - 2);
+    let mut index = 1;
+    while index < bytes.len() - 1 {
+        let byte = bytes[index];
+        index += 1;
+        if byte != b'\\' {
+            if byte == b'"' {
+                return None;
+            }
+            decoded.push(byte);
+            continue;
+        }
+
+        let escaped = *bytes.get(index)?;
+        index += 1;
+        match escaped {
+            b'0'..=b'7' => {
+                let mut value = (escaped - b'0') as u16;
+                for _ in 0..2 {
+                    if let Some(next @ b'0'..=b'7') = bytes.get(index).copied() {
+                        value = value * 8 + (next - b'0') as u16;
+                        index += 1;
+                    } else {
+                        break;
+                    }
+                }
+                decoded.push(u8::try_from(value).ok()?);
+            }
+            b'a' => decoded.push(b'\x07'),
+            b'b' => decoded.push(b'\x08'),
+            b't' => decoded.push(b'\t'),
+            b'n' => decoded.push(b'\n'),
+            b'v' => decoded.push(b'\x0b'),
+            b'f' => decoded.push(b'\x0c'),
+            b'r' => decoded.push(b'\r'),
+            b'"' => decoded.push(b'"'),
+            b'\\' => decoded.push(b'\\'),
+            _ => return None,
+        }
+    }
+
+    String::from_utf8(decoded).ok()
+}
+
 /// Determines whether a string looks like a plausible file path rather than conversational prose.
 ///
 /// Evaluates candidate strings by checking for path separators (`/`, `\`), standard file
@@ -4683,9 +4748,9 @@ pub fn extract_file_path_from_line(line: &str) -> Option<PathBuf> {
     }
 
     if trimmed.starts_with("--- ") || trimmed.starts_with("+++ ") {
-        let candidate = trimmed[4..].trim();
+        let candidate = parse_unified_header_path(&trimmed[4..])?;
         if candidate != "/dev/null" && candidate != "a/dev/null" && candidate != "b/dev/null" {
-            if let Some(path) = normalize_candidate_path(candidate) {
+            if let Some(path) = normalize_candidate_path(&candidate) {
                 if is_plausible_file_path(&path.to_string_lossy()) {
                     return Some(path);
                 }
@@ -6240,7 +6305,10 @@ where
             continue;
         }
 
-        if let Some(stripped_line) = line.strip_prefix("--- ") {
+        if let Some(stripped_line) = line
+            .strip_prefix("--- ")
+            .filter(|_| current_hunk_old_start_line.is_none() || current_hunk_is_complete)
+        {
             trace!("  Found file header line: '{}'", line);
             // A `---` line always signals a new file section.
             // Finalize the previous file's patch section if it exists.
@@ -6271,22 +6339,31 @@ where
             current_hunk_is_complete = false;
             ends_with_newline_for_section = true;
 
-            let path_part = stripped_line.trim();
-            if path_part == "/dev/null" || path_part == "a/dev/null" {
-                trace!("    Path is /dev/null, indicating file creation.");
-                // File creation, path will be in `+++` line.
+            if let Some(path_part) = parse_unified_header_path(stripped_line) {
+                if path_part == "/dev/null" || path_part == "a/dev/null" {
+                    trace!("    Path is /dev/null, indicating file creation.");
+                    // File creation, path will be in `+++` line.
+                } else {
+                    let path_str = path_part.strip_prefix("a/").unwrap_or(&path_part);
+                    debug!("  Starting new patch section for file: '{}'", path_str);
+                    current_file = Some(PathBuf::from(path_str.trim()));
+                }
             } else {
-                let path_str = path_part.strip_prefix("a/").unwrap_or(path_part);
-                debug!("  Starting new patch section for file: '{}'", path_str);
-                current_file = Some(PathBuf::from(path_str.trim()));
+                warn!("Could not parse unified diff file header: '{}'", line);
             }
-        } else if let Some(stripped_line) = line.strip_prefix("+++ ") {
+        } else if let Some(stripped_line) = line
+            .strip_prefix("+++ ")
+            .filter(|_| current_hunk_old_start_line.is_none() || current_hunk_is_complete)
+        {
             trace!("  Found '+++' line: '{}'", line);
             if current_file.is_none() {
-                let path_part = stripped_line.trim();
-                let path_str = path_part.strip_prefix("b/").unwrap_or(path_part);
-                debug!("  Set file path from '+++' line: '{}'", path_str);
-                current_file = Some(PathBuf::from(path_str.trim()));
+                if let Some(path_part) = parse_unified_header_path(stripped_line) {
+                    let path_str = path_part.strip_prefix("b/").unwrap_or(&path_part);
+                    debug!("  Set file path from '+++' line: '{}'", path_str);
+                    current_file = Some(PathBuf::from(path_str.trim()));
+                } else {
+                    warn!("Could not parse unified diff file header: '{}'", line);
+                }
             }
         } else if line.starts_with("@@") {
             trace!("  Found hunk header: '{}'", line);
