@@ -791,6 +791,24 @@ fn test_parse_patches_with_git_headers() {
 }
 
 #[test]
+fn test_parse_patches_with_diff_naur_headers() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let raw_diff = indoc! {r#"
+        diff -Naur a/src/main.rs b/src/main.rs
+        --- a/src/main.rs
+        +++ b/src/main.rs
+        @@ -1 +1 @@
+        -old
+        +new
+    "#};
+    let patches = parse_patches(raw_diff).unwrap();
+    assert_eq!(patches.len(), 1);
+    let patch = &patches[0];
+    assert_eq!(patch.file_path.to_str().unwrap(), "src/main.rs");
+    assert_eq!(patch.hunks[0].get_replace_block(), vec!["new"]);
+}
+
+#[test]
 fn test_format_patch_hunk_applies_with_fuzzy_matching_disabled() {
     let _ = env_logger::builder().is_test(true).try_init();
     let original = indoc! {"

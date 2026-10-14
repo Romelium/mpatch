@@ -4747,6 +4747,23 @@ pub fn extract_file_path_from_line(line: &str) -> Option<PathBuf> {
         }
     }
 
+    if trimmed.starts_with("diff -") {
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() >= 3 {
+            let candidate = parts[2];
+            if let Some(path) = normalize_candidate_path(candidate) {
+                if is_plausible_file_path(&path.to_string_lossy()) {
+                    return Some(path);
+                }
+            }
+            if let Some(path) = normalize_candidate_path(parts[1]) {
+                if is_plausible_file_path(&path.to_string_lossy()) {
+                    return Some(path);
+                }
+            }
+        }
+    }
+
     if trimmed.starts_with("--- ") || trimmed.starts_with("+++ ") {
         let candidate = parse_unified_header_path(&trimmed[4..])?;
         if candidate != "/dev/null" && candidate != "a/dev/null" && candidate != "b/dev/null" {
@@ -4991,7 +5008,7 @@ pub fn detect_patch(content: &str) -> PatchFormat {
         }
 
         // Check for Unified Diff headers
-        let is_diff_git = line.starts_with("diff --git");
+        let is_diff_git = line.starts_with("diff --git") || line.starts_with("diff -");
         let is_unified_header =
             line.starts_with("--- ") && lines.peek().is_some_and(|l| l.starts_with("+++ "));
         let is_hunk_header = line.starts_with("@@ -") && line.contains(" @@");
@@ -5455,6 +5472,7 @@ fn has_patch_signature_at_level_1<S: AsRef<str>>(lines: &[S]) -> bool {
         if !in_nested_block
             && (line.starts_with("--- ")
                 || line.starts_with("diff --git")
+                || line.starts_with("diff -")
                 || is_aider_search_fence(trimmed)
                 || trimmed.starts_with("<<<<")
                 || trimmed.starts_with("====")
@@ -6514,6 +6532,7 @@ where
 fn is_git_header_line(line: &str) -> bool {
     const GIT_PREFIXES: &[&str] = &[
         "diff --git",
+        "diff -",
         "index ",
         "old mode ",
         "new mode ",

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Unified Diff Parsing:** Strip tab-separated timestamps from `---` / `+++` file headers, decode Git C-quoted paths, and distinguish file headers from hunk content that begins with `---` or `+++`.
+- **Unified Diff Parsing:** Recognize `diff -Naur` headers, strip tab-separated timestamps from `---` / `+++` file headers, decode Git C-quoted paths, and distinguish file headers from hunk content that begins with `---` or `+++`.
 
 ## [1.7.0] - 2026-10-12
 
