@@ -4290,10 +4290,11 @@ pub fn normalize_candidate_path(s: &str) -> Option<PathBuf> {
 }
 
 fn parse_unified_header_path(header: &str) -> Option<String> {
-    let path = header
-        .split_once('\t')
-        .map_or(header, |(path, _)| path)
-        .trim();
+    let path = match header.split_once('\t') {
+        Some((path, _)) => path,
+        None => strip_space_separated_timestamp(header),
+    }
+    .trim();
 
     if path.starts_with('"') {
         decode_git_quoted_path(path)
@@ -4302,6 +4303,103 @@ fn parse_unified_header_path(header: &str) -> Option<String> {
     } else {
         Some(path.to_owned())
     }
+}
+
+/// Removes a timestamp trailer that is separated from the header path by spaces.
+///
+/// `diff -u` separates the path from its timestamp with a tab, but copy-paste, editors, and
+/// web views often expand that tab into spaces. Only a recognizable timestamp is removed, so
+/// paths that legitimately contain spaces are preserved.
+fn strip_space_separated_timestamp(header: &str) -> &str {
+    // Peel up to six tokens off the end, remembering the text that precedes each one.
+    let mut trailing = Vec::with_capacity(6);
+    let mut rest = header;
+    while trailing.len() < 6 {
+        let Some((before, token)) = rest.trim_end().rsplit_once(char::is_whitespace) else {
+            break;
+        };
+        trailing.push((before, token));
+        rest = before;
+    }
+
+    // `token(0)` is the last token on the line, `token(1)` the one before it, and so on.
+    let token = |index: usize| trailing.get(index).map(|&(_, token)| token);
+    let zone = usize::from(token(0).is_some_and(is_timezone_offset));
+
+    // GNU `diff -u`: `2026-10-17 12:30:15.060387301 +0200`
+    let is_iso = token(zone + 1).is_some_and(is_iso_date) && token(zone).is_some_and(is_clock_time);
+    // `ctime` style (`diff -c`, Mercurial): `Sat Oct 17 12:30:15 2026`
+    let is_ctime = token(zone + 4).is_some_and(|t| WEEKDAY_ABBREVIATIONS.contains(&t))
+        && token(zone + 3).is_some_and(|t| MONTH_ABBREVIATIONS.contains(&t))
+        && token(zone + 2).is_some_and(|t| is_ascii_digits(t, 1..=2))
+        && token(zone + 1).is_some_and(is_clock_time)
+        && token(zone).is_some_and(|t| is_ascii_digits(t, 4..=4));
+
+    let timestamp_tokens = if is_iso {
+        zone + 2
+    } else if is_ctime {
+        zone + 5
+    } else {
+        return header;
+    };
+
+    let path = trailing[timestamp_tokens - 1].0.trim_end();
+    if path.trim_start().is_empty() {
+        header
+    } else {
+        trace!(
+            "strip_space_separated_timestamp: stripped timestamp from '{}' to '{}'",
+            header,
+            path
+        );
+        path
+    }
+}
+
+const WEEKDAY_ABBREVIATIONS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const MONTH_ABBREVIATIONS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+fn is_ascii_digits(s: &str, len: std::ops::RangeInclusive<usize>) -> bool {
+    len.contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Matches `YYYY-MM-DD`.
+fn is_iso_date(s: &str) -> bool {
+    let mut parts = s.split('-');
+    matches!(
+        (parts.next(), parts.next(), parts.next(), parts.next()),
+        (Some(year), Some(month), Some(day), None)
+            if is_ascii_digits(year, 4..=4)
+                && is_ascii_digits(month, 2..=2)
+                && is_ascii_digits(day, 2..=2)
+    )
+}
+
+/// Matches `HH:MM:SS` with optional fractional seconds.
+fn is_clock_time(s: &str) -> bool {
+    let (hms, fraction) = s.split_once('.').unwrap_or((s, "0"));
+    let mut parts = hms.split(':');
+    is_ascii_digits(fraction, 1..=usize::MAX)
+        && matches!(
+            (parts.next(), parts.next(), parts.next(), parts.next()),
+            (Some(hours), Some(minutes), Some(seconds), None)
+                if is_ascii_digits(hours, 2..=2)
+                    && is_ascii_digits(minutes, 2..=2)
+                    && is_ascii_digits(seconds, 2..=2)
+        )
+}
+
+/// Matches `+HHMM`, `-HHMM`, `+HH:MM`, or `-HH:MM`.
+fn is_timezone_offset(s: &str) -> bool {
+    let Some(offset) = s.strip_prefix(|c| c == '+' || c == '-') else {
+        return false;
+    };
+    is_ascii_digits(offset, 4..=4)
+        || offset.split_once(':').is_some_and(|(hours, minutes)| {
+            is_ascii_digits(hours, 2..=2) && is_ascii_digits(minutes, 2..=2)
+        })
 }
 
 fn decode_git_quoted_path(path: &str) -> Option<String> {

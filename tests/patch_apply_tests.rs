@@ -942,6 +942,72 @@ fn test_parse_and_apply_unified_diff_with_header_timestamps() {
 }
 
 #[test]
+fn test_parse_and_apply_unified_diff_with_space_separated_header_timestamps() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("foo.txt");
+    fs::write(&file_path, "line1\nline2\nline3\n").unwrap();
+    // Tabs expanded to spaces, as happens when a `diff -u` patch is copy-pasted.
+    let diff = concat!(
+        "--- a/foo.txt   2026-10-17 12:30:15.060387301 +0200\n",
+        "+++ b/foo.txt   2026-10-17 16:06:54.568679471 +0200\n",
+        "@@ -1,3 +1,3 @@\n",
+        " line1\n",
+        "-line2\n",
+        "+line2_modified\n",
+        " line3\n",
+    );
+
+    let patches = parse_patches(diff).unwrap();
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].file_path, std::path::PathBuf::from("foo.txt"));
+
+    let result = apply_patch_to_file(&patches[0], dir.path(), ApplyOptions::exact()).unwrap();
+    assert!(result.report.all_applied_cleanly());
+    assert_eq!(
+        fs::read_to_string(file_path).unwrap(),
+        "line1\nline2_modified\nline3\n"
+    );
+}
+
+#[test]
+fn test_parse_space_separated_header_timestamp_variants() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let cases = [
+        // GNU `diff -u` without fractional seconds.
+        ("a/src/main.rs  2026-10-17 12:30:15 +0200", "src/main.rs"),
+        // No timezone offset.
+        ("a/src/main.rs 2026-10-17 12:30:15.123", "src/main.rs"),
+        // `ctime` style, as used by `diff -c` and older tools.
+        ("a/src/main.rs  Sat Oct 17 12:30:15 2026", "src/main.rs"),
+        // Mercurial: `ctime` style followed by an offset.
+        (
+            "a/src/main.rs Thu Jan  1 00:00:00 1970 +0000",
+            "src/main.rs",
+        ),
+        // Paths with spaces keep their spaces when a timestamp is stripped.
+        ("a/my file.txt  2026-10-17 12:30:15 +0200", "my file.txt"),
+        // Without a recognizable timestamp, nothing is stripped.
+        ("a/my file 2026.txt", "my file 2026.txt"),
+        ("a/notes 2026-10-17.md", "notes 2026-10-17.md"),
+    ];
+
+    for (header, expected) in cases {
+        let diff = format!(
+            "--- {header}\n+++ {}\n@@ -1 +1 @@\n-old\n+new\n",
+            header.replacen("a/", "b/", 1)
+        );
+        let patches = parse_patches(&diff).unwrap();
+        assert_eq!(patches.len(), 1, "header: {header:?}");
+        assert_eq!(
+            patches[0].file_path,
+            std::path::PathBuf::from(expected),
+            "header: {header:?}"
+        );
+    }
+}
+
+#[test]
 fn test_parse_git_quoted_paths_and_unusual_hunk_content() {
     let _ = env_logger::builder().is_test(true).try_init();
     let diff = concat!(
@@ -15642,6 +15708,31 @@ mod cli_tests {
         assert_exit_code(&output, 1);
         assert_stderr_contains(&output, "Fuzz factor must be between 0.0 and 1.0");
         assert_eq!(read(dir.path(), "x.c"), "line1\nline2\nline3\n");
+    }
+
+    #[test]
+    fn test_cli_applies_space_separated_header_timestamps() {
+        // The reproducer from issue #3: the timestamp's tab separator was expanded to spaces.
+        let dir = tempdir().unwrap();
+        fs::create_dir(dir.path().join("nvidia-drm")).unwrap();
+        fs::write(dir.path().join("nvidia-drm/nvidia-drm.Kbuild"), "a\nb\nc\n").unwrap();
+        let patch = concat!(
+            "--- a/nvidia-drm/nvidia-drm.Kbuild  2026-10-17 12:30:14.994523077 +0200\n",
+            "+++ b/nvidia-drm/nvidia-drm.Kbuild  2026-10-17 16:33:34.582415788 +0200\n",
+            "@@ -1,3 +1,4 @@\n",
+            " a\n",
+            " b\n",
+            "+added\n",
+            " c\n",
+        );
+
+        let output = run(patch, dir.path(), &["--atomic"]);
+
+        assert_exit_code(&output, 0);
+        assert_eq!(
+            read(dir.path(), "nvidia-drm/nvidia-drm.Kbuild"),
+            "a\nb\nadded\nc\n"
+        );
     }
 
     #[test]
