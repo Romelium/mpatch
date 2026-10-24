@@ -16303,14 +16303,22 @@ mod cli_tests {
 
     #[test]
     fn test_cli_succeeds_without_changes_when_input_has_no_patches() {
-        let dir = tempdir().unwrap();
-        write_x(dir.path());
+        let cases = [
+            "Just some prose without any diff.\n",
+            // A hunk copied without its file headers doesn't say which file to patch.
+            "```diff\n@@ -1,3 +1,3 @@\n line1\n-line2\n+line2_modified\n line3\n```\n",
+        ];
+        for input in cases {
+            let dir = tempdir().unwrap();
+            write_x(dir.path());
 
-        let output = run("Just some prose without any diff.\n", dir.path(), &["-v"]);
+            // The warning is shown without -v, but the exit status stays 0.
+            let output = run(input, dir.path(), &[]);
 
-        assert_exit_code(&output, 0);
-        assert_stderr_contains(&output, "No valid patches found");
-        assert_eq!(read(dir.path(), "x.c"), "line1\nline2\nline3\n");
+            assert_exit_code(&output, 0);
+            assert_stderr_contains(&output, "No patches found");
+            assert_eq!(read(dir.path(), "x.c"), "line1\nline2\nline3\n");
+        }
     }
 
     #[test]

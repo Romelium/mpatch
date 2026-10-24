@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Input Without Patches:** Warn when the input contains no patch, such as a chat reply without a diff or a hunk copied without its `---` / `+++` file headers. Previously the CLI printed nothing unless `-v` was given. The exit status is still `0`.
 - **Unchanged Files:** Don't rewrite a file when none of its hunks apply or all of them are already applied. The file's modification time no longer changes, and the log no longer says partial changes were written.
 
 ## [1.8.0] - 2026-10-24

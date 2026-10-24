@@ -172,7 +172,14 @@ fn run(args: Args) -> Result<()> {
     // --- Core Patching Logic ---
     if all_patches.is_empty() {
         if mode_changes.is_empty() {
-            info!("No valid patches found or processed in the input.");
+            // Warn instead of failing, so scripts that expect status 0 for input without
+            // a patch keep working, but a reply whose diff wasn't recognized isn't silent.
+            warn!(
+                "No patches found in the input, so nothing was modified. A unified diff needs \
+                 '--- a/<path>' and '+++ b/<path>' lines before its '@@' hunks, and a \
+                 search/replace block needs a file path, such as on the line before it."
+            );
+            finalize_report(None);
             return Ok(());
         }
         let failures = apply_mode_changes(&mode_changes, &actual_target_dir, args.dry_run);
