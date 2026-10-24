@@ -39,7 +39,9 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           toolchain: stable
-          cache: 'cargo'
+          cache: true
+          # sccache (below) caches compiled crates, so only cache the cargo registry here.
+          cache-targets: false
 
       - name: Setup sccache
         if: steps.changed_files.outputs.docs_relevant_any_changed == 'true'

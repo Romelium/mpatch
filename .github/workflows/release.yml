@@ -74,7 +74,9 @@ jobs:
         with:
           toolchain: stable
           target: ${{ matrix.target }}
-          cache: 'cargo'
+          # Caches saved from a tag build can't be restored by later releases,
+          # so caching here would only use up the repository's cache storage.
+          cache: false
 
       # --- Auto-detect Binary Name ---
       - name: Get Binary Name
@@ -229,7 +231,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           toolchain: stable
-          cache: 'cargo'
+          cache: false
 
       # --- Auto-detect Binary Name ---
       - name: Get Binary Name
