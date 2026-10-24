@@ -14370,33 +14370,40 @@ mod readme_examples_tests {
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
 
-    /// Verifies the "The Problem and the Solution" comparison table from README.md:
-    /// A local file with an extra comment line is modified cleanly by an AI patch
-    /// with stale context via fuzzy matching.
+    /// Verifies the "Why mpatch?" example from README.md:
+    /// A local file with an extra comment line between two changed lines is modified
+    /// cleanly by an AI patch that omits the comment, keeping the comment in place.
     #[test]
-    fn test_readme_problem_and_solution_table() {
+    fn test_readme_why_mpatch_example() {
         let _ = env_logger::builder().is_test(true).try_init();
         let original = indoc! {r#"
             fn main() {
+                let name = "World";
                 // Forgettable comment
-                println!("Hello");
+                println!("Hello, {name}!");
+                println!("Goodbye, {name}!");
             }
         "#};
 
         let patch = indoc! {r#"
             --- a/main.rs
             +++ b/main.rs
-            @@ -1,4 +1,4 @@
+            @@ -1,5 +1,5 @@
              fn main() {
-            -    println!("Hello");
-            +    println!("World");
+            -    let name = "World";
+            +    let name = "Ferris";
+                 println!("Hello, {name}!");
+            -    println!("Goodbye, {name}!");
+            +    println!("See you, {name}!");
              }
         "#};
 
         let expected = indoc! {r#"
             fn main() {
+                let name = "Ferris";
                 // Forgettable comment
-                println!("World");
+                println!("Hello, {name}!");
+                println!("See you, {name}!");
             }
         "#};
 
