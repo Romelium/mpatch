@@ -9256,6 +9256,9 @@ pub fn try_apply_patch_to_lines<T: AsRef<str>>(
 /// for `original_content`. For file modification patches, pass `Some(content)`.
 /// If the patch removes all lines, the resulting `new_content` string will be empty.
 ///
+/// Line endings of `original_content` are preserved: unchanged lines keep their own
+/// ending (`\n` or `\r\n`), and added lines use the file's most common ending.
+///
 /// # Arguments
 ///
 /// **Note:** For improved performance when content is already available as a slice
@@ -9321,12 +9324,74 @@ pub fn apply_patch_to_content(
             s.ends_with('\n')
         }
     });
-    apply_patch_to_lines_internal(
+    let mut result = apply_patch_to_lines_internal(
         patch,
         original_lines.as_deref(),
         options,
         original_ends_with_newline,
-    )
+    );
+    if let Some(original) = original_content {
+        result.new_content = restore_line_endings(original, result.new_content);
+    }
+    result
+}
+
+/// Restores the `\r\n` line endings that `str::lines` drops before hunks are matched.
+///
+/// Unchanged lines keep their original ending and added lines use the most common ending,
+/// so only the lines the patch touches can change in a mixed-ending file.
+fn restore_line_endings(original: &str, patched: String) -> String {
+    let crlf_count = original.matches("\r\n").count();
+    if crlf_count == 0 {
+        return patched;
+    }
+    let lf_count = original.matches('\n').count() - crlf_count;
+    if lf_count == 0 {
+        return patched.replace('\n', "\r\n");
+    }
+
+    let default_ending = if crlf_count >= lf_count { "\r\n" } else { "\n" };
+    let old_lines: Vec<&str> = original.split_inclusive('\n').collect();
+    let new_lines: Vec<&str> = patched.split_inclusive('\n').collect();
+    let strip = |line: &str| -> String {
+        line.strip_suffix('\n')
+            .map_or(line, |l| l.strip_suffix('\r').unwrap_or(l))
+            .to_owned()
+    };
+    let old_keys: Vec<String> = old_lines.iter().map(|l| strip(l)).collect();
+    let new_keys: Vec<String> = new_lines.iter().map(|l| strip(l)).collect();
+
+    // The ending each new line should get, defaulting to the file's most common one.
+    let mut endings = vec![default_ending; new_lines.len()];
+    for op in similar::capture_diff_slices(similar::Algorithm::Myers, &old_keys, &new_keys) {
+        if let similar::DiffOp::Equal {
+            old_index,
+            new_index,
+            len,
+        } = op
+        {
+            for offset in 0..len {
+                let old_line = old_lines[old_index + offset];
+                if old_line.ends_with("\r\n") {
+                    endings[new_index + offset] = "\r\n";
+                } else if old_line.ends_with('\n') {
+                    endings[new_index + offset] = "\n";
+                }
+            }
+        }
+    }
+
+    let mut restored = String::with_capacity(patched.len() + crlf_count);
+    for (line, ending) in new_lines.iter().zip(endings) {
+        match line.strip_suffix('\n') {
+            Some(content) => {
+                restored.push_str(content);
+                restored.push_str(ending);
+            }
+            None => restored.push_str(line),
+        }
+    }
+    restored
 }
 
 /// A strict variant of [`apply_patch_to_content()`] that treats partial applications as an error.

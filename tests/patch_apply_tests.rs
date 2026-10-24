@@ -1199,6 +1199,86 @@ fn test_apply_keeps_leading_directory_when_target_exists_or_is_created() {
 }
 
 #[test]
+fn test_apply_preserves_line_endings() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let lf_patch = concat!(
+        "--- a/x.c\n",
+        "+++ b/x.c\n",
+        "@@ -1,3 +1,4 @@\n",
+        " a\n",
+        "-b\n",
+        "+b_mod\n",
+        "+added\n",
+        " c\n",
+    );
+    let crlf_patch = lf_patch.replace('\n', "\r\n");
+    let cases = [
+        (lf_patch, "a\r\nb\r\nc\r\n", "a\r\nb_mod\r\nadded\r\nc\r\n"),
+        // No final newline, outside the hunk.
+        (
+            lf_patch,
+            "a\r\nb\r\nc\r\nd",
+            "a\r\nb_mod\r\nadded\r\nc\r\nd",
+        ),
+        (
+            crlf_patch.as_str(),
+            "a\r\nb\r\nc\r\n",
+            "a\r\nb_mod\r\nadded\r\nc\r\n",
+        ),
+        (crlf_patch.as_str(), "a\nb\nc\n", "a\nb_mod\nadded\nc\n"),
+        // Mixed endings: untouched lines keep theirs, new lines use the majority (CRLF).
+        (
+            lf_patch,
+            "a\nb\r\nc\r\nd\r\n",
+            "a\nb_mod\r\nadded\r\nc\r\nd\r\n",
+        ),
+    ];
+
+    for (patch_text, original, expected) in cases {
+        let patch = parse_single_patch(patch_text).unwrap();
+        let result = mpatch::apply_patch_to_content(&patch, Some(original), &ApplyOptions::exact());
+        assert!(
+            result.report.all_applied_cleanly(),
+            "original: {original:?}"
+        );
+        assert_eq!(result.new_content, expected, "original: {original:?}");
+    }
+}
+
+#[test]
+fn test_apply_to_file_preserves_crlf_on_disk() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("x.c");
+    fs::write(&file_path, "a\r\nb\r\nc\r\n").unwrap();
+    let patch =
+        parse_single_patch("--- a/x.c\n+++ b/x.c\n@@ -1,3 +1,3 @@\n a\n-b\n+b_mod\n c\n").unwrap();
+
+    for atomic in [false, true] {
+        fs::write(&file_path, "a\r\nb\r\nc\r\n").unwrap();
+        let batch = if atomic {
+            apply_patches_to_dir_atomic(
+                std::slice::from_ref(&patch),
+                dir.path(),
+                ApplyOptions::exact(),
+            )
+        } else {
+            apply_patches_to_dir(
+                std::slice::from_ref(&patch),
+                dir.path(),
+                ApplyOptions::exact(),
+            )
+        };
+        assert!(batch.all_applied_cleanly(), "atomic={atomic}");
+        assert_eq!(
+            fs::read(&file_path).unwrap(),
+            b"a\r\nb_mod\r\nc\r\n",
+            "atomic={atomic}"
+        );
+    }
+}
+
+#[test]
 fn test_parse_git_quoted_paths_and_unusual_hunk_content() {
     let _ = env_logger::builder().is_test(true).try_init();
     let diff = concat!(
@@ -6882,14 +6962,14 @@ mod extended_stress_tests {
             "--- a/crlf.txt\n+++ b/crlf.txt\n@@ -1,3 +1,3 @@\n line1\n-line2\n+line two\n line3\n";
 
         let patches = parse_auto(diff).unwrap();
-        // Exact match should work because mpatch normalizes line endings during parsing/reading
+        // Exact match should work because mpatch ignores line endings when matching
         let options = ApplyOptions::exact();
         let result = apply_patch_to_file(&patches[0], dir.path(), options).unwrap();
 
         assert!(result.report.all_applied_cleanly());
         let content = fs::read_to_string(&file_path).unwrap();
-        // Output is normalized to LF by mpatch
-        assert_eq!(content, "line1\nline two\nline3\n");
+        // The file keeps its CRLF line endings
+        assert_eq!(content, "line1\r\nline two\r\nline3\r\n");
     }
 
     #[test]
@@ -15939,6 +16019,20 @@ mod cli_tests {
         assert_exit_code(&output, 0);
         assert_stderr_contains(&output, "stripped leading directory 'kernel'");
         assert_eq!(read(dir.path(), "x.c"), "line1\nline2_modified\nline3\n");
+    }
+
+    #[test]
+    fn test_cli_preserves_crlf_line_endings() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("x.c"), "line1\r\nline2\r\nline3\r\n").unwrap();
+
+        let output = run(MODIFY_X, dir.path(), &[]);
+
+        assert_exit_code(&output, 0);
+        assert_eq!(
+            fs::read(dir.path().join("x.c")).unwrap(),
+            b"line1\r\nline2_modified\r\nline3\r\n"
+        );
     }
 
     #[test]
