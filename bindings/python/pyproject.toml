@@ -1,5 +1,6 @@
 [build-system]
-requires = ["maturin>=1.6,<2.0"]
+# maturin 1.14 added abi3t (PEP 803) wheel tags; 1.15 fixes its abi3t module-export check.
+requires = ["maturin>=1.15,<2.0"]
 build-backend = "maturin"
 
 [project]
@@ -32,6 +33,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Text Processing",
 ]

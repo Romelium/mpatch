@@ -17,7 +17,7 @@ It was built for diffs written by **LLMs (ChatGPT, Gemini, Claude)**, which ofte
 pip install mpatch
 ```
 
-Wheels are published for Windows, macOS, and Linux (including Alpine) on x64 and ARM, for CPython 3.8 and later and free-threaded CPython 3.14. On other platforms, pip builds from source, which needs a [Rust toolchain](https://rustup.rs).
+Wheels are published for Windows, macOS, and Linux (including Alpine) on x64 and ARM, for CPython 3.8 and later and free-threaded CPython 3.14 and later. On other platforms, pip builds from source, which needs a [Rust toolchain](https://rustup.rs).
 
 This installs the library only. For the `mpatch` command, see [Installation](https://github.com/romelium/mpatch#installation) in the main repository.
 

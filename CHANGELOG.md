@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Python 3.15 Wheels:** Publish `cp315-abi3.abi3t` wheels built on the stable ABI for free-threaded builds (PEP 803), so CPython 3.15 and later, with or without the GIL, install a prebuilt wheel. Previously free-threaded 3.15 had no wheel, so pip built from source, which needs a Rust toolchain. The Python bindings now use PyO3 0.29 and need maturin 1.15 or later to build from source.
+
 ## [1.8.1] - 2026-10-24
 
 ### Fixed
