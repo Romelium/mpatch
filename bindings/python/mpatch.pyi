@@ -132,7 +132,7 @@ class Patch:
         Args:
             file_path (str | os.PathLike): The relative path of the file to be patched.
             hunks (list[Hunk]): A list of hunks to be applied to the file.
-            ends_with_newline (bool, optional): Indicates whether the file should end with a newline. Defaults to True.
+            ends_with_newline (bool, optional): Whether the patch's last line ends with a newline. It applies only when a line added by the patch ends up last in the file. Defaults to True.
         """
         ...
     @classmethod
@@ -179,7 +179,7 @@ class Patch:
         ...
     @property
     def ends_with_newline(self) -> bool:
-        """Indicates whether the file should end with a newline."""
+        """Whether the patch's last line ends with a newline. It applies only when a line added by the patch ends up last in the file."""
         ...
     @ends_with_newline.setter
     def ends_with_newline(self, ends_with_newline: bool) -> None:

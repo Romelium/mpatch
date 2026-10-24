@@ -1246,6 +1246,51 @@ fn test_apply_preserves_line_endings() {
 }
 
 #[test]
+fn test_final_newline_follows_the_last_line() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    const NO_NEWLINE: &str = "\\ No newline at end of file\n";
+    let context_at_eof = "@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n";
+    let append = "@@ -2,2 +2,3 @@\n b\n c\n+d\n";
+    let replace_last = "@@ -2,2 +2,2 @@\n b\n-c\n+C\n";
+    let delete_last = "@@ -2,2 +2,1 @@\n b\n-c\n";
+    let add_newline = format!("@@ -2,2 +2,2 @@\n b\n-c\n{NO_NEWLINE}+c\n");
+    let remove_newline = format!("@@ -2,2 +2,2 @@\n b\n-c\n+c\n{NO_NEWLINE}");
+    let marked_context = format!("{context_at_eof}{NO_NEWLINE}");
+    let marked_deletion = format!("{delete_last}{NO_NEWLINE}");
+
+    // Each expected result matches GNU `patch`.
+    let cases = [
+        // A line kept from the file keeps its own newline, with or without a marker.
+        (context_at_eof, "a\nb\nc\n", "a\nB\nc\n"),
+        (context_at_eof, "a\nb\nc", "a\nB\nc"),
+        (marked_context.as_str(), "a\nb\nc\n", "a\nB\nc\n"),
+        (marked_context.as_str(), "a\nb\nc", "a\nB\nc"),
+        // A line the patch adds follows the patch's marker.
+        (append, "a\nb\nc\n", "a\nb\nc\nd\n"),
+        (append, "a\nb\nc", "a\nb\nc\nd\n"),
+        (replace_last, "a\nb\nc\n", "a\nb\nC\n"),
+        (add_newline.as_str(), "a\nb\nc", "a\nb\nc\n"),
+        (remove_newline.as_str(), "a\nb\nc\n", "a\nb\nc"),
+        // A line that was followed by the deleted tail had a newline.
+        (delete_last, "a\nb\nc\n", "a\nb\n"),
+        (marked_deletion.as_str(), "a\nb\nc", "a\nb\n"),
+    ];
+
+    for (hunk, original, expected) in cases {
+        let patch = parse_single_patch(&format!("--- a/f\n+++ b/f\n{hunk}")).unwrap();
+        let result = mpatch::apply_patch_to_content(&patch, Some(original), &ApplyOptions::exact());
+        assert!(
+            result.report.all_applied_cleanly(),
+            "hunk {hunk:?} on {original:?}"
+        );
+        assert_eq!(
+            result.new_content, expected,
+            "hunk {hunk:?} on {original:?}"
+        );
+    }
+}
+
+#[test]
 fn test_apply_to_file_preserves_crlf_on_disk() {
     let _ = env_logger::builder().is_test(true).try_init();
     let dir = tempdir().unwrap();

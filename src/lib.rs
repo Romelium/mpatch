@@ -3101,9 +3101,10 @@ pub struct Patch {
     /// assert!(patch.hunks.is_empty());
     /// ```
     pub hunks: Vec<Hunk>,
-    /// Indicates whether the file should end with a newline.
+    /// Indicates whether the patch's last line ends with a newline.
     /// This is determined by the presence of `\ No newline at end of file`
-    /// in the diff.
+    /// in the diff. It sets the file's final newline only when a line added by
+    /// the patch ends up last; a line kept from the file keeps its own newline.
     ///
     /// # Examples
     ///
@@ -8644,8 +8645,8 @@ pub struct HunkApplier<'a> {
     patch_ends_with_newline: bool,
     /// Whether the original target content ended with a newline.
     original_ends_with_newline: bool,
-    /// Tracks whether any applied hunk touched or modified the end of the file.
-    touched_eof: bool,
+    /// Whether the file's last line ends with a newline, once an applied hunk reaches the end.
+    eof_newline: Option<bool>,
     completed_edits: Vec<(usize, isize)>,
     /// 1-based line number in current_lines where the last hunk finished applying.
     last_applied_line: Option<usize>,
@@ -8716,7 +8717,7 @@ impl<'a> HunkApplier<'a> {
             options,
             patch_ends_with_newline: patch.ends_with_newline,
             original_ends_with_newline: true,
-            touched_eof: false,
+            eof_newline: None,
             completed_edits: Vec::new(),
             last_applied_line: None,
         }
@@ -8851,10 +8852,10 @@ impl<'a> HunkApplier<'a> {
 
     /// Consumes the applier and returns the final content as a single string.
     ///
-    /// This method joins the final lines with newlines and ensures the content
-    /// has a trailing newline if required by the patch's `ends_with_newline`
-    /// property. It is the most common way to get the final result from a
-    /// `HunkApplier`.
+    /// This method joins the final lines with newlines. The final newline follows the
+    /// line that ends up last: a line added by the patch uses the patch's
+    /// `ends_with_newline` property, and a line kept from the file keeps its own.
+    /// It is the most common way to get the final result from a `HunkApplier`.
     ///
     /// # Returns
     ///
@@ -8880,19 +8881,15 @@ impl<'a> HunkApplier<'a> {
     /// ```
     pub fn into_content(self) -> String {
         debug!(
-            "HunkApplier::into_content: assembling final content from {} line(s) (touched_eof={}, patch_ends_with_newline={}, original_ends_with_newline={})",
+            "HunkApplier::into_content: assembling final content from {} line(s) (eof_newline={:?}, patch_ends_with_newline={}, original_ends_with_newline={})",
             self.current_lines.len(),
-            self.touched_eof,
+            self.eof_newline,
             self.patch_ends_with_newline,
             self.original_ends_with_newline
         );
         let mut new_content = self.current_lines.join("\n");
 
-        let should_have_newline = if self.touched_eof {
-            self.patch_ends_with_newline
-        } else {
-            self.original_ends_with_newline
-        };
+        let should_have_newline = self.eof_newline.unwrap_or(self.original_ends_with_newline);
 
         if should_have_newline && !self.current_lines.is_empty() {
             new_content.push('\n');
@@ -8904,6 +8901,26 @@ impl<'a> HunkApplier<'a> {
             should_have_newline
         );
         new_content
+    }
+}
+
+/// Returns whether the line a hunk leaves at the end of the file ends with a newline.
+///
+/// Each line keeps the newline it came with, as `patch` does: a line the hunk added follows
+/// the patch's `\ No newline at end of file` marker, and a line from the file keeps its own.
+fn hunk_eof_newline(
+    hunk: &Hunk,
+    patch_ends_with_newline: bool,
+    file_ends_with_newline: bool,
+) -> bool {
+    let last_kept = hunk.lines.iter().rev().find(|line| !line.starts_with('-'));
+    if last_kept.is_some_and(|line| line.starts_with('+')) {
+        patch_ends_with_newline
+    } else if hunk.lines.last().is_some_and(|line| line.starts_with('-')) {
+        // The file line before the deleted tail was followed by more lines, so it had a newline.
+        true
+    } else {
+        file_ends_with_newline
     }
 }
 
@@ -8999,13 +9016,19 @@ impl<'a> Iterator for HunkApplier<'a> {
             self.completed_edits.push((orig_pos, delta));
             let inserted_len = (location.length as isize + delta) as usize;
             if location.start_index + inserted_len >= new_len {
+                let eof_newline = hunk_eof_newline(
+                    hunk_to_apply,
+                    self.patch_ends_with_newline,
+                    self.eof_newline.unwrap_or(self.original_ends_with_newline),
+                );
                 trace!(
-                    "  HunkApplier: hunk touched EOF (start={}, inserted={}, total={})",
+                    "  HunkApplier: hunk touched EOF (start={}, inserted={}, total={}, eof_newline={})",
                     location.start_index,
                     inserted_len,
-                    new_len
+                    new_len,
+                    eof_newline
                 );
-                self.touched_eof = true;
+                self.eof_newline = Some(eof_newline);
             }
             self.last_applied_line = Some(location.start_index + inserted_len + 1);
         }

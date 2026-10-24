@@ -296,7 +296,7 @@ impl PyPatch {
     /// Args:
     ///     file_path (str | os.PathLike): The relative path of the file to be patched.
     ///     hunks (list[Hunk]): A list of hunks to be applied to the file.
-    ///     ends_with_newline (bool, optional): Indicates whether the file should end with a newline. Defaults to True.
+    ///     ends_with_newline (bool, optional): Whether the patch's last line ends with a newline. It applies only when a line added by the patch ends up last in the file. Defaults to True.
     #[new]
     #[pyo3(signature = (file_path, hunks, *, ends_with_newline=true))]
     fn py_new(file_path: PathBuf, hunks: Vec<PyHunk>, ends_with_newline: bool) -> Self {
@@ -377,7 +377,7 @@ impl PyPatch {
     }
 
     #[getter]
-    /// Indicates whether the file should end with a newline.
+    /// Whether the patch's last line ends with a newline. It applies only when a line added by the patch ends up last in the file.
     fn ends_with_newline(&self) -> bool {
         self.inner.ends_with_newline
     }
