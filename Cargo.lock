@@ -694,7 +694,7 @@ dependencies = [
 
 [[package]]
 name = "mpatch"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -712,7 +712,7 @@ dependencies = [
 
 [[package]]
 name = "mpatch_py"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "mpatch",
  "pyo3",

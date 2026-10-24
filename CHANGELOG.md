@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-10-24
+
 ### Added
 
 - **Patch Target Paths:** Resolve targets the way `patch -p1` does for directory-tree diffs (`diff -Naur pkg.orig pkg`, including created and deleted files) and for backup-file diffs (`diff -u file.orig file`). When a target is missing but exists without its leading directory, patch that file and print a warning.
