@@ -60,7 +60,7 @@ jobs:
 
       - name: Get changed files
         id: changed_files
-        uses: tj-actions/changed-files@v45
+        uses: tj-actions/changed-files@ed68ef82c095e0d48ec87eccea555d944a631a4c # v46
         with:
           base_sha: ${{ steps.last_successful_commit.outputs.base }}
           files_yaml: |
