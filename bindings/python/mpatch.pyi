@@ -678,7 +678,9 @@ def apply_directory(
         atomic (bool, optional): If True, only writes to disk if all patches and hunks apply cleanly. Default is False.
 
     Returns:
-        bool: True if all patches succeeded, False if any hard errors occurred.
+        bool: With atomic=True, True only if every hunk of every patch applied.
+            Otherwise True unless a file couldn't be read or written, even if some
+            hunks failed. Use `apply_patches_to_dir` to see which hunks failed.
 
     Raises:
         ParseError: If parsing diff headers or hunk syntax fails.
