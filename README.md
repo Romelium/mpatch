@@ -116,7 +116,7 @@ Each archive has a GPG signature (`.sig`), and each release includes the signing
 
 ```bash
 gpg --import public.key
-gpg --verify mpatch-x86_64-unknown-linux-gnu-v1.8.0.tar.gz.sig mpatch-x86_64-unknown-linux-gnu-v1.8.0.tar.gz
+gpg --verify mpatch-x86_64-unknown-linux-gnu-v1.8.1.tar.gz.sig mpatch-x86_64-unknown-linux-gnu-v1.8.1.tar.gz
 ```
 
 ## CLI Usage
@@ -172,14 +172,14 @@ Use the library to build `mpatch` into an editor, a coding agent, or another too
 
 ```toml
 [dependencies]
-mpatch = "1.8.0"
+mpatch = "1.8.1"
 ```
 
 The default features are `parallel` (multi-threaded fuzzy search with Rayon) and `clipboard` (the CLI's `-c` flag). Library users can turn off both, or keep only `parallel`:
 
 ```toml
 [dependencies]
-mpatch = { version = "1.8.0", default-features = false, features = ["parallel"] }
+mpatch = { version = "1.8.1", default-features = false, features = ["parallel"] }
 ```
 
 Patch a string in memory:
