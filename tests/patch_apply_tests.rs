@@ -1291,6 +1291,129 @@ fn test_final_newline_follows_the_last_line() {
 }
 
 #[test]
+fn test_reapplying_patch_skips_hunks_already_applied() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let cases = [
+        // After the first run, fuzzy matching would find the context and insert again.
+        ("@@ -2,3 +2,4 @@\n b\n c\n+inserted\n d\n", "a\nb\nc\nd\ne\n"),
+        // Tab-indented file, space-indented patch.
+        (
+            "@@ -1,5 +1,6 @@\n int f(void)\n {\n         int a = 1;\n+        int b = 2;\n         return a;\n }\n",
+            "int f(void)\n{\n\tint a = 1;\n\treturn a;\n}\n",
+        ),
+        ("@@ -1,3 +1,3 @@\n a\n-b\n+b_modified\n c\n", "a\nb\nc\n"),
+    ];
+
+    for (hunk, original) in cases {
+        let patch = parse_single_patch(&format!("--- a/f\n+++ b/f\n{hunk}")).unwrap();
+        let options = ApplyOptions::new();
+        let once = mpatch::apply_patch_to_content(&patch, Some(original), &options);
+        assert!(once.report.all_applied_cleanly(), "first run: {hunk:?}");
+
+        let twice = mpatch::apply_patch_to_content(&patch, Some(&once.new_content), &options);
+
+        assert!(twice.report.all_applied_cleanly(), "second run: {hunk:?}");
+        assert_eq!(
+            twice.report.hunk_results,
+            vec![HunkApplyStatus::SkippedNoChanges],
+            "{hunk:?}"
+        );
+        assert_eq!(twice.new_content, once.new_content, "{hunk:?}");
+    }
+}
+
+#[test]
+fn test_already_applied_hunk_does_not_block_later_hunks() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    // The first hunk was applied by hand; the second still needs applying.
+    let original = "one\ntwo\nthree\nNEW_A\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\n";
+    let diff = concat!(
+        "--- a/f\n",
+        "+++ b/f\n",
+        "@@ -2,3 +2,4 @@\n",
+        " two\n",
+        " three\n",
+        "+NEW_A\n",
+        " four\n",
+        "@@ -9,3 +10,4 @@\n",
+        " nine\n",
+        " ten\n",
+        "+NEW_B\n",
+        " eleven\n",
+    );
+    let patch = parse_single_patch(diff).unwrap();
+
+    let result = mpatch::apply_patch_to_content(&patch, Some(original), &ApplyOptions::new());
+
+    assert!(result.report.all_applied_cleanly());
+    assert_eq!(
+        result.report.hunk_results[0],
+        HunkApplyStatus::SkippedNoChanges
+    );
+    assert!(matches!(
+        result.report.hunk_results[1],
+        HunkApplyStatus::Applied { .. }
+    ));
+    assert_eq!(
+        result.new_content,
+        "one\ntwo\nthree\nNEW_A\nfour\nfive\nsix\nseven\neight\nnine\nten\nNEW_B\neleven\n"
+    );
+}
+
+#[test]
+fn test_intentional_duplicates_are_still_applied() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    // Hunks whose context still matches exactly always apply, even if they add a line that
+    // the file already has.
+    let cases = [
+        (
+            "@@ -1,3 +1,4 @@\n a\n b\n+b\n c\n",
+            "a\nb\nc\n",
+            "a\nb\nb\nc\n",
+        ),
+        ("@@ -2,2 +2,3 @@\n y\n z\n+z\n", "x\ny\nz\n", "x\ny\nz\nz\n"),
+    ];
+    for (hunk, original, expected) in cases {
+        let patch = parse_single_patch(&format!("--- a/f\n+++ b/f\n{hunk}")).unwrap();
+        let result = mpatch::apply_patch_to_content(&patch, Some(original), &ApplyOptions::new());
+        assert!(result.report.all_applied_cleanly(), "{hunk:?}");
+        assert_eq!(result.new_content, expected, "{hunk:?}");
+    }
+
+    // A neighbouring block already has the change, but this drifted block still needs it.
+    let original = concat!(
+        "open_channel(alpha);\n",
+        "configure_channel_options();\n",
+        "close_channel(alpha);\n",
+        "open_channel(beta_v2);\n",
+        "close_channel(beta);\n",
+    );
+    let diff = concat!(
+        "--- a/f\n",
+        "+++ b/f\n",
+        "@@ -4,2 +4,3 @@\n",
+        " open_channel(beta);\n",
+        "+configure_channel_options();\n",
+        " close_channel(beta);\n",
+    );
+    let patch = parse_single_patch(diff).unwrap();
+
+    let result = mpatch::apply_patch_to_content(&patch, Some(original), &ApplyOptions::new());
+
+    assert!(matches!(
+        result.report.hunk_results[0],
+        HunkApplyStatus::Applied { .. }
+    ));
+    assert_eq!(
+        result
+            .new_content
+            .matches("configure_channel_options();")
+            .count(),
+        2
+    );
+}
+
+#[test]
 fn test_apply_to_file_preserves_crlf_on_disk() {
     let _ = env_logger::builder().is_test(true).try_init();
     let dir = tempdir().unwrap();
@@ -15997,6 +16120,19 @@ mod cli_tests {
         let output = run(&patch, dir.path(), &["--fuzz-factor", "0", "--atomic"]);
         assert_exit_code(&output, 1);
         assert_eq!(read(dir.path(), "y.c"), "old\n");
+    }
+
+    #[test]
+    fn test_cli_skips_already_applied_patch() {
+        let dir = tempdir().unwrap();
+        write_x(dir.path());
+        assert_exit_code(&run(MODIFY_X, dir.path(), &[]), 0);
+
+        let output = run(MODIFY_X, dir.path(), &[]);
+
+        assert_exit_code(&output, 0);
+        assert_stderr_contains(&output, "Hunk appears to be already applied at line 1");
+        assert_eq!(read(dir.path(), "x.c"), "line1\nline2_modified\nline3\n");
     }
 
     #[test]

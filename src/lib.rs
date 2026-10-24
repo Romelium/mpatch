@@ -1393,7 +1393,8 @@ pub enum HunkApplyStatus {
         /// ```
         replaced_lines: Vec<String>,
     },
-    /// The hunk was skipped because it contained no effective changes.
+    /// The hunk was skipped because it contained no effective changes, or because
+    /// its result is already in the file (the hunk was applied before).
     ///
     /// # Examples
     ///
@@ -11191,7 +11192,8 @@ fn normalize_line_delimiters(s: &str) -> String {
 ///
 /// A [`HunkApplyStatus`] indicating the outcome:
 /// - [`HunkApplyStatus::Applied`]: The hunk was successfully applied. The `location` and `match_type` are provided.
-/// - [`HunkApplyStatus::SkippedNoChanges`]: The hunk contained only context lines and was skipped.
+/// - [`HunkApplyStatus::SkippedNoChanges`]: The hunk contained only context lines, or it could
+///   only be placed by fuzzy matching and its result is already at that place, so it was skipped.
 /// - [`HunkApplyStatus::Failed`]: The hunk could not be applied. The reason is provided in the associated [`HunkApplyError`].
 ///
 /// # Examples
@@ -11253,6 +11255,15 @@ pub fn apply_hunk_to_lines(
         }
     };
 
+    // Exact matches always apply, so hunks whose result still contains their own context stay
+    // re-applicable. A hunk placed by fuzzy matching is first checked for its result already
+    // being at the candidate, like `patch -N` checks for a reversed patch only after an exact
+    // forward match fails. Checking each candidate just before it is tried keeps a result
+    // elsewhere in the file from stopping the hunk at a better-ranked location.
+    let check_applied_result = !candidates
+        .iter()
+        .any(|(_, match_type)| !matches!(match_type, MatchType::Fuzzy { .. }));
+
     let candidate_count = candidates.len();
     debug!(
         "  Found {} candidate location(s) for hunk. Testing sequentially...",
@@ -11270,6 +11281,15 @@ pub fn apply_hunk_to_lines(
             location,
             match_type
         );
+        if check_applied_result {
+            if let Some(line_index) = find_applied_result(hunk, target_lines, &location) {
+                warn!(
+                    "  Hunk appears to be already applied at line {}; skipping it.",
+                    line_index + 1
+                );
+                return HunkApplyStatus::SkippedNoChanges;
+            }
+        }
         match try_apply_hunk_at_location(hunk, target_lines, location, match_type, options, false) {
             Ok(status) => {
                 debug!(
@@ -11324,6 +11344,45 @@ pub fn apply_hunk_to_lines(
         candidate_count, last_error
     );
     HunkApplyStatus::Failed(last_error)
+}
+
+/// Returns the line where the hunk's result already appears around a fuzzy candidate location.
+///
+/// Whitespace runs are compared as single spaces, so tab-expanded patches are recognized too.
+/// Hunks that only remove lines leave no result to find, so they are never reported.
+fn find_applied_result(
+    hunk: &Hunk,
+    target_lines: &[String],
+    location: &HunkLocation,
+) -> Option<usize> {
+    let adds_content = hunk.lines.iter().any(|line| {
+        line.strip_prefix('+')
+            .is_some_and(|added| !added.trim().is_empty())
+    });
+    if !adds_content {
+        return None;
+    }
+    let normalize = |line: &str| line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let result: Vec<String> = hunk
+        .get_replace_block()
+        .iter()
+        .map(|line| normalize(line))
+        .collect();
+    if result.is_empty() || result.len() > target_lines.len() {
+        return None;
+    }
+
+    // Only a result that overlaps the candidate counts: one that merely sits next to it may be
+    // a neighbouring block that already has the change, while this one still needs it.
+    let first = (location.start_index + 1).saturating_sub(result.len());
+    let last =
+        (location.start_index + location.length.max(1) - 1).min(target_lines.len() - result.len());
+    (first..=last).find(|&start| {
+        target_lines[start..start + result.len()]
+            .iter()
+            .zip(&result)
+            .all(|(line, expected)| normalize(line) == *expected)
+    })
 }
 
 /// Attempts to apply a hunk at a specific candidate location within `target_lines`.
