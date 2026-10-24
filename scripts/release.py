@@ -1,4 +1,102 @@
 #!/usr/bin/env python3
+"""Release orchestrator for mpatch.
+
+Verifies the build, bumps the version, and commits, tags and pushes a
+release. Pushing the tag starts the GitHub workflows that build and
+publish everything else.
+
+Usage
+-----
+    python scripts/release.py <level> [options]
+
+    <level> is 'patch', 'minor', 'major', or an explicit version such as
+    '1.8.0' (it must be greater than the current version). Choose it from
+    the [Unreleased] section of CHANGELOG.md: only "Fixed" entries -> patch,
+    any "Added" entries -> minor, breaking changes -> major.
+
+    -n, --dry-run       Show what would change without touching files or git
+                        (the checks and tests still run).
+    -y, --yes           Answer yes to every prompt; also pushes unless
+                        --no-push is given.
+    --push / --no-push  Push the commit and tag without asking / don't push.
+    --skip-tests        Skip fmt, clippy, doc, package, test, ruff and pytest.
+    --skip-git-check    Skip the branch, clean-tree, remote and tag checks.
+
+One-time setup
+--------------
+Local tools (the script checks for these before every release):
+- git, with push access to the repository and an identity set:
+  `git config --global user.name "Your Name"` and
+  `git config --global user.email "you@example.com"`
+- Rust stable from https://rustup.rs, plus
+  `rustup component add rustfmt clippy`
+- Python 3 with ruff: `pip install ruff`
+- Optional, to also run the Python tests:
+  `pip install -e bindings/python[test]`
+
+crates.io (used by .github/workflows/crates.yml):
+- As an owner of the mpatch crate, open its Settings > Trusted Publishing
+  page on crates.io and add a GitHub publisher: owner romelium, repository
+  mpatch, workflow crates.yml, environment crates-io.
+- Trusted Publishing can only be configured for a crate that exists on
+  crates.io. If the crate has never been published, publish the first
+  version by hand with an API token: `cargo login`, then
+  `cargo publish -p mpatch`.
+
+PyPI (used by .github/workflows/pypi.yml):
+- As an owner of the mpatch project, open its Manage > Publishing page on
+  PyPI and add a GitHub publisher: owner romelium, repository mpatch,
+  workflow pypi.yml, environment pypi.
+- If the project does not exist on PyPI yet, add the same details as a
+  pending publisher from your account's Publishing page instead; the first
+  upload then creates the project.
+
+GitHub (optional):
+- Signing: release.yml signs the release archives and attaches public.key
+  only when the repository secrets GPG_PRIVATE_KEY and GPG_PASSPHRASE are
+  set. Create a key with `gpg --full-generate-key`, then under Settings >
+  Secrets and variables > Actions store the output of
+  `gpg --armor --export-secret-keys <key-id>` as GPG_PRIVATE_KEY and the
+  key's passphrase as GPG_PASSPHRASE.
+- Approval: the publish jobs run in the crates-io and pypi environments.
+  To approve each upload before it runs, add required reviewers to those
+  environments under Settings > Environments.
+
+Each release
+------------
+Before running the script:
+1. Merge everything into main, run `git checkout main && git pull`, and
+   make sure CI passes. The working tree must be clean.
+2. Write the release notes under `## [Unreleased]` in CHANGELOG.md. The
+   script renames that section to `## [X.Y.Z] - <date>`, and release.yml
+   uses it as the GitHub release notes.
+3. Do a dry run, e.g. `python scripts/release.py minor --dry-run`.
+
+What the script does:
+1. Checks the tools, the git identity, that you are on main with a clean
+   tree that is not behind the remote, and that the tag does not exist yet.
+2. Runs cargo fmt --check, cargo clippy (-D warnings), cargo doc
+   (-D warnings), cargo package, cargo test, ruff on bindings/python and
+   scripts/, and pytest when the bindings are installed.
+3. Bumps the version in Cargo.toml, bindings/python/Cargo.toml,
+   bindings/python/pyproject.toml, CHANGELOG.md, src/lib.rs and README.md,
+   and syncs Cargo.lock.
+4. Commits "chore: release vX.Y.Z", creates the annotated tag vX.Y.Z, and
+   pushes the branch and the tag.
+If a step fails before the commit, the changed files are restored.
+
+After the script:
+1. The pushed tag runs .github/workflows/release.yml, which builds the
+   binaries for every target and creates a *draft* GitHub release.
+2. When that finishes, open the draft under Releases on GitHub, check its
+   assets and notes, and click "Publish release".
+3. Publishing runs .github/workflows/crates.yml (crates.io) and
+   .github/workflows/pypi.yml (PyPI) in parallel.
+4. Check the new version on crates.io, docs.rs and PyPI.
+If a publish workflow fails, re-run its failed jobs from the Actions tab.
+To start one manually instead, use "Run workflow" and pick the release tag
+as the ref; running it on main publishes whatever version main contains.
+"""
 
 from __future__ import annotations
 
