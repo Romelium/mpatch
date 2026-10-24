@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Unified Diff Parsing:** Recognize `diff -Naur` headers, strip timestamps from `---` / `+++` file headers (including timestamps whose tab separator was expanded to spaces), decode Git C-quoted paths, and distinguish file headers from hunk content that begins with `---` or `+++`.
+- **CLI Failure Reporting:** Exit with an error instead of succeeding silently when the input contains context diffs (`diff -c`), Git renames or copies, Git binary patches, or symlink and submodule modes. Warn when a Git executable-mode change is not applied.
 
 ## [1.7.0] - 2026-10-12
 

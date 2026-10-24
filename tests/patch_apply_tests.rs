@@ -15952,4 +15952,139 @@ mod cli_tests {
         assert_stderr_contains(&output, "No valid patches found");
         assert_eq!(read(dir.path(), "x.c"), "line1\nline2\nline3\n");
     }
+
+    #[test]
+    fn test_cli_rejects_unsupported_changes() {
+        let cases = [
+            (
+                "context diff",
+                concat!(
+                    "*** a/x.c\t2026-10-17 12:30:15.060387301 +0200\n",
+                    "--- b/x.c\t2026-10-17 12:30:15.060387301 +0200\n",
+                    "***************\n",
+                    "*** 1,3 ****\n",
+                    "  line1\n",
+                    "! line2\n",
+                    "  line3\n",
+                    "--- 1,3 ----\n",
+                    "  line1\n",
+                    "! line2_modified\n",
+                    "  line3\n",
+                ),
+                "(`diff -c` format) are not supported",
+            ),
+            (
+                "rename",
+                concat!(
+                    "diff --git a/x.c b/renamed.c\n",
+                    "similarity index 80%\n",
+                    "rename from x.c\n",
+                    "rename to renamed.c\n",
+                    "--- a/x.c\n",
+                    "+++ b/renamed.c\n",
+                    "@@ -1,3 +1,3 @@\n",
+                    " line1\n",
+                    "-line2\n",
+                    "+line2_modified\n",
+                    " line3\n",
+                ),
+                "Git rename of 'x.c' to 'renamed.c'",
+            ),
+            (
+                "copy",
+                concat!(
+                    "diff --git a/x.c b/copied.c\n",
+                    "similarity index 100%\n",
+                    "copy from x.c\n",
+                    "copy to copied.c\n",
+                ),
+                "Git copy of 'x.c' to 'copied.c'",
+            ),
+            (
+                "binary",
+                concat!(
+                    "diff --git a/image.bin b/image.bin\n",
+                    "index 1234567..89abcde 100644\n",
+                    "GIT binary patch\n",
+                    "literal 4\n",
+                    "LcmZ?l|Nnpd00961\n",
+                    "\n",
+                ),
+                "Git binary patch for 'a/image.bin b/image.bin'",
+            ),
+            (
+                "symlink",
+                concat!(
+                    "diff --git a/link b/link\n",
+                    "new file mode 120000\n",
+                    "index 0000000..1234567\n",
+                    "--- /dev/null\n",
+                    "+++ b/link\n",
+                    "@@ -0,0 +1 @@\n",
+                    "+x.c\n",
+                    "\\ No newline at end of file\n",
+                ),
+                "Git file mode 120000 for 'a/link b/link'",
+            ),
+        ];
+
+        for (name, patch, expected) in cases {
+            let dir = tempdir().unwrap();
+            write_x(dir.path());
+
+            let output = run(patch, dir.path(), &[]);
+
+            assert_exit_code(&output, 1);
+            assert!(
+                stderr(&output).contains(expected),
+                "{name}: expected {expected:?} in:\n{}",
+                stderr(&output)
+            );
+            assert_eq!(read(dir.path(), "x.c"), "line1\nline2\nline3\n", "{name}");
+            let entries = fs::read_dir(dir.path()).unwrap().count();
+            assert_eq!(entries, 1, "{name}: no files may be created");
+        }
+    }
+
+    #[test]
+    fn test_cli_unsupported_change_aborts_before_supported_ones() {
+        let dir = tempdir().unwrap();
+        write_x(dir.path());
+        let rename = concat!(
+            "diff --git a/old.c b/new.c\n",
+            "similarity index 100%\n",
+            "rename from old.c\n",
+            "rename to new.c\n",
+        );
+        let patch = format!("{MODIFY_X}{rename}");
+
+        let output = run(&patch, dir.path(), &[]);
+
+        assert_exit_code(&output, 1);
+        assert_stderr_contains(&output, "nothing was modified");
+        assert_eq!(read(dir.path(), "x.c"), "line1\nline2\nline3\n");
+    }
+
+    #[test]
+    fn test_cli_warns_about_executable_mode_but_applies_content() {
+        let dir = tempdir().unwrap();
+        let patch = concat!(
+            "diff --git a/run.sh b/run.sh\n",
+            "new file mode 100755\n",
+            "index 0000000..1234567\n",
+            "--- /dev/null\n",
+            "+++ b/run.sh\n",
+            "@@ -0,0 +1 @@\n",
+            "+echo hello\n",
+        );
+
+        let output = run(patch, dir.path(), &[]);
+
+        assert_exit_code(&output, 0);
+        assert_stderr_contains(
+            &output,
+            "mode change to 100755 for 'a/run.sh b/run.sh' is not applied",
+        );
+        assert_eq!(read(dir.path(), "run.sh"), "echo hello\n");
+    }
 }

@@ -148,6 +148,20 @@ fn run(args: Args) -> Result<()> {
             write_report_footer(report, &args, &all_patches, batch_result);
         }
     };
+    // --- Unsupported Input ---
+    // These are skipped by the parser, so applying the rest would silently drop them.
+    let unsupported = find_unsupported_features(&content);
+    for warning in &unsupported.warnings {
+        warn!("{}", warning);
+    }
+    if !unsupported.errors.is_empty() {
+        finalize_report(None);
+        return Err(anyhow!(
+            "The input contains changes mpatch cannot apply, so nothing was modified:\n  - {}",
+            unsupported.errors.join("\n  - ")
+        ));
+    }
+
     // --- Core Patching Logic ---
     if all_patches.is_empty() {
         info!("No valid patches found or processed in the input.");
@@ -262,6 +276,100 @@ fn run(args: Args) -> Result<()> {
 
     finalize_report(Some(&batch_result));
     Ok(())
+}
+
+/// Diff features that the parser skips without producing hunks.
+#[derive(Debug, Default)]
+struct UnsupportedFeatures {
+    /// Changes that would be lost, so the run must fail.
+    errors: Vec<String>,
+    /// Changes whose content still applies, but whose metadata is not carried over.
+    warnings: Vec<String>,
+}
+
+/// Scans the raw patch input for Git extended headers and context diffs that mpatch cannot apply.
+fn find_unsupported_features(content: &str) -> UnsupportedFeatures {
+    let mut found = UnsupportedFeatures::default();
+    let mut has_context_diff = false;
+    // The paths of the `diff --git` header whose extended header lines are being read.
+    let mut git_paths: Option<&str> = None;
+    let mut rename_from: Option<&str> = None;
+    let mut copy_from: Option<&str> = None;
+
+    let mut lines = content.lines().peekable();
+    while let Some(line) = lines.next() {
+        if line == "***************" && lines.peek().is_some_and(|next| is_context_hunk_range(next))
+        {
+            has_context_diff = true;
+        }
+
+        if let Some(paths) = line.strip_prefix("diff --git ") {
+            git_paths = Some(paths);
+            continue;
+        }
+        // Extended header lines end where the file headers or hunks begin.
+        if line.starts_with("--- ") || line.starts_with("@@") {
+            git_paths = None;
+        }
+        let Some(paths) = git_paths else {
+            continue;
+        };
+
+        if let Some(from) = line.strip_prefix("rename from ") {
+            rename_from = Some(from);
+        } else if let Some(to) = line.strip_prefix("rename to ") {
+            found.errors.push(format!(
+                "Git rename of '{}' to '{}' (renames are not supported)",
+                rename_from.take().unwrap_or("?"),
+                to
+            ));
+        } else if let Some(from) = line.strip_prefix("copy from ") {
+            copy_from = Some(from);
+        } else if let Some(to) = line.strip_prefix("copy to ") {
+            found.errors.push(format!(
+                "Git copy of '{}' to '{}' (copies are not supported)",
+                copy_from.take().unwrap_or("?"),
+                to
+            ));
+        } else if line == "GIT binary patch" {
+            found.errors.push(format!(
+                "Git binary patch for '{}' (binary patches are not supported)",
+                paths
+            ));
+        } else if let Some(mode) = line
+            .strip_prefix("new file mode ")
+            .or_else(|| line.strip_prefix("new mode "))
+        {
+            match mode.trim() {
+                "100644" => {}
+                "100755" => found.warnings.push(format!(
+                    "Git mode change to 100755 for '{}' is not applied; set the executable bit manually.",
+                    paths
+                )),
+                other => found.errors.push(format!(
+                    "Git file mode {} for '{}' (symlinks and submodules are not supported)",
+                    other, paths
+                )),
+            }
+        }
+    }
+
+    if has_context_diff {
+        found.errors.push(
+            "Context diff hunks (`diff -c` format) are not supported; regenerate the patch with `diff -u`."
+                .to_string(),
+        );
+    }
+    found
+}
+
+/// Matches a context diff range line such as `*** 1,3 ****`.
+fn is_context_hunk_range(line: &str) -> bool {
+    line.strip_prefix("*** ")
+        .and_then(|rest| rest.strip_suffix(" ****"))
+        .is_some_and(|range| {
+            !range.is_empty() && range.chars().all(|c| c.is_ascii_digit() || c == ',')
+        })
 }
 
 /// Reads complete patch content from standard input (stdin).
