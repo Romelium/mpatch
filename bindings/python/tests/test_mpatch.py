@@ -1,3 +1,4 @@
+import re
 import textwrap
 from pathlib import Path
 
@@ -1186,6 +1187,34 @@ def test_python_merge_patches():
 
 
 # --- README Examples Tests ---
+
+README = Path(__file__).resolve().parent.parent / "README.md"
+README_EXAMPLES = [
+    code
+    for _, code in re.findall(
+        r"^(`{3,})python\n(.*?)^\1$",
+        README.read_text(encoding="utf-8"),
+        re.MULTILINE | re.DOTALL,
+    )
+]
+
+
+def test_readme_has_examples():
+    assert README_EXAMPLES
+
+
+@pytest.mark.parametrize(
+    "code",
+    README_EXAMPLES,
+    ids=[f"example-{i}" for i in range(1, len(README_EXAMPLES) + 1)],
+)
+def test_readme_example_runs(
+    code: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # Runs each Python example in README.md as written, so they can't silently break.
+    # Examples that create files do so relative to the working directory.
+    monkeypatch.chdir(tmp_path)
+    exec(compile(code, str(README), "exec"), {"__name__": "__main__"})
 
 
 def test_python_readme_problem_and_solution_table():

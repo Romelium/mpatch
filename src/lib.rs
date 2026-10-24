@@ -577,6 +577,11 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 
+// Runs the Rust examples in README.md as doctests, so they can't silently break.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 // --- Error Types ---
 
 /// Represents errors that can occur during the parsing of a diff file.
