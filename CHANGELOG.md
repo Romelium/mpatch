@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Input Without Patches:** Warn when the input contains no patch, such as a chat reply without a diff or a hunk copied without its `---` / `+++` file headers. Previously the CLI printed nothing unless `-v` was given. The exit status is still `0`.
 - **Unchanged Files:** Don't rewrite a file when none of its hunks apply or all of them are already applied. The file's modification time no longer changes, and the log no longer says partial changes were written.
 
+### Performance
+
+- **Fuzzy Search Without a Match:** Skip the character-level diff at a candidate location when the characters it shares with the hunk can't reach the fuzz threshold. Searching a 10,000-line file for a 3-line hunk that isn't there now takes about 0.36 s instead of 1.7 s. Hunks that match land in the same place as before; when no location reaches the threshold, the best score in `FuzzyMatchBelowThreshold` can be lower than before.
+
 ## [1.8.0] - 2026-10-24
 
 ### Added

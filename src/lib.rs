@@ -13126,6 +13126,8 @@ struct MatchPrecomputed<'a> {
     no_ws_chars: usize,
     /// Indicates whether `no_ws` contains exclusively ASCII characters.
     is_ascii: bool,
+    /// Counts of the characters in `no_ws`, bucketed as in [`shared_char_upper_bound`].
+    no_ws_char_counts: [u32; CHAR_BUCKETS],
     hunk_hashes: std::collections::HashSet<u64>,
     loose_hunk_hashes: std::collections::HashSet<u64>,
     /// Number of lines in the match block.
@@ -13153,6 +13155,10 @@ fn precompute_match<'a>(match_block: &[&'a str]) -> MatchPrecomputed<'a> {
     let no_ws_chars = no_ws.chars().count();
     let is_ascii = no_ws.is_ascii();
     let len = match_block.len();
+    let mut no_ws_char_counts = [0u32; CHAR_BUCKETS];
+    for c in no_ws.chars() {
+        no_ws_char_counts[c as usize % CHAR_BUCKETS] += 1;
+    }
 
     let hunk_hashes: std::collections::HashSet<u64> =
         stripped_lines.iter().map(|s| hash_str_fast(s)).collect();
@@ -13167,10 +13173,33 @@ fn precompute_match<'a>(match_block: &[&'a str]) -> MatchPrecomputed<'a> {
         no_ws,
         no_ws_chars,
         is_ascii,
+        no_ws_char_counts,
         hunk_hashes,
         loose_hunk_hashes,
         len,
     }
+}
+
+/// Number of buckets characters are counted in by [`shared_char_upper_bound`].
+const CHAR_BUCKETS: usize = 128;
+
+/// Returns an upper bound on how many characters a character-level diff of `window_no_ws`
+/// against the match block can pair as equal.
+///
+/// A diff only pairs identical characters, so it pairs at most as many as the two texts have
+/// in common, counting each occurrence once. Characters that share a bucket only loosen the
+/// bound.
+fn shared_char_upper_bound(window_no_ws: &str, match_counts: &[u32; CHAR_BUCKETS]) -> usize {
+    let mut remaining = *match_counts;
+    let mut shared = 0;
+    for c in window_no_ws.chars() {
+        let count = &mut remaining[c as usize % CHAR_BUCKETS];
+        if *count > 0 {
+            *count -= 1;
+            shared += 1;
+        }
+    }
+    shared
 }
 
 /// Borrowed window view representing a contiguous candidate slice of target lines.
@@ -13370,10 +13399,18 @@ fn score_window(
     } else if window.no_ws == match_data.no_ws {
         1.0
     } else {
-        similar::TextDiff::configure()
-            .algorithm(similar::Algorithm::Histogram)
-            .diff_chars(window.no_ws, &match_data.no_ws)
-            .ratio()
+        // Computed like `TextDiff::ratio`, so the bound is never below the ratio the diff returns.
+        let shared = shared_char_upper_bound(window.no_ws, &match_data.no_ws_char_counts);
+        let ub_chars = 2.0 * shared as f32 / (c_w + c_m) as f32;
+        let ub_chars_very_loose = 0.1 * ratio_lines as f64 + 0.9 * ub_chars as f64;
+        if ub_chars_very_loose <= current_max || ub_chars_very_loose < threshold {
+            0.0
+        } else {
+            similar::TextDiff::configure()
+                .algorithm(similar::Algorithm::Histogram)
+                .diff_chars(window.no_ws, &match_data.no_ws)
+                .ratio()
+        }
     };
 
     let ratio_very_loose = 0.1 * ratio_lines as f64 + 0.9 * ratio_no_ws as f64;
