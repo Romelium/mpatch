@@ -8105,6 +8105,17 @@ pub fn apply_patch_to_file(
                     patch.file_path.display()
                 );
             }
+        } else if !is_new_file && new_content == original_content {
+            // Every hunk failed or was already applied. Leave the file untouched so
+            // its modification time doesn't change and editors and build tools don't react.
+            if apply_result.all_applied_cleanly() {
+                info!("  No changes needed for '{}'", patch.file_path.display());
+            } else {
+                warn!(
+                    "  No hunks applied, left '{}' unchanged",
+                    patch.file_path.display()
+                );
+            }
         } else {
             if let Some(parent) = safe_target_path.parent() {
                 trace!("  Ensuring parent directory exists: '{}'", parent.display());

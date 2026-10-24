@@ -2353,6 +2353,41 @@ fn test_partial_apply_fails_on_second_hunk() {
 }
 
 #[test]
+fn test_apply_leaves_file_untouched_when_no_hunk_applies() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("untouched.txt");
+    fs::write(&file_path, "line 1\nline 2\n").unwrap();
+    let old_mtime =
+        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    fs::File::options()
+        .write(true)
+        .open(&file_path)
+        .unwrap()
+        .set_modified(old_mtime)
+        .unwrap();
+
+    let diff = indoc! {"
+        --- a/untouched.txt
+        +++ b/untouched.txt
+        @@ -1,2 +1,2 @@
+         line 1
+        -line WRONG
+        +line two
+    "};
+    let patch = parse_single_patch(diff).unwrap();
+    let result = apply_patch_to_file(&patch, dir.path(), ApplyOptions::exact()).unwrap();
+
+    assert!(!result.report.all_applied_cleanly());
+    assert_eq!(fs::read_to_string(&file_path).unwrap(), "line 1\nline 2\n");
+    // The file is not rewritten, so editors and build tools don't see a change.
+    assert_eq!(
+        fs::metadata(&file_path).unwrap().modified().unwrap(),
+        old_mtime
+    );
+}
+
+#[test]
 fn test_creation_patch_fails_on_non_empty_file() {
     let _ = env_logger::builder().is_test(true).try_init();
     let dir = tempdir().unwrap();
