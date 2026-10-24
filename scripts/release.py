@@ -248,25 +248,8 @@ def check_python_module(module_name: str) -> bool:
         return False
 
 
-def verify_crates_io_auth() -> bool:
-    """Checks if credentials exist for publishing to crates.io."""
-    if os.environ.get("CARGO_REGISTRY_TOKEN") or os.environ.get(
-        "CARGO_REGISTRIES_CRATES_IO_TOKEN"
-    ):
-        return True
-    home = Path.home()
-    cred_toml = home / ".cargo" / "credentials.toml"
-    cred_plain = home / ".cargo" / "credentials"
-    for p in [cred_toml, cred_plain]:
-        if p.exists() and "token" in p.read_text(encoding="utf-8", errors="ignore"):
-            return True
-    return False
-
-
 # --- Pre-flight Tool Diagnostics ---
-def run_tool_diagnostics(
-    root: Path, skip_tests: bool, publish_cargo: bool
-) -> list[str]:
+def run_tool_diagnostics(root: Path, skip_tests: bool) -> list[str]:
     """Validates all required tools and runtime environments before execution."""
     info("Step 1: Running Pre-flight Environment & Tool Diagnostics")
     issues: list[str] = []
@@ -374,13 +357,6 @@ def run_tool_diagnostics(
         )
     else:
         print("  - pytest:       not installed in active Python environment (optional)")
-
-    # 6. Crates.io authentication check (if cargo publish requested)
-    if publish_cargo and not verify_crates_io_auth():
-        warn(
-            "No crates.io token detected in CARGO_REGISTRY_TOKEN or ~/.cargo/credentials[.toml]. "
-            "'cargo publish' may prompt or fail if unauthenticated."
-        )
 
     return issues
 
@@ -680,13 +656,6 @@ def main() -> None:
         help="Do not push git commit and tag to remote.",
     )
 
-    parser.add_argument(
-        "--publish-cargo",
-        action="store_true",
-        default=False,
-        help="Publish the core crate to crates.io after tagging.",
-    )
-
     args = parser.parse_args()
     root = get_repo_root()
     os.chdir(root)
@@ -704,7 +673,7 @@ def main() -> None:
 
     try:
         # --- Step 1: Pre-flight Tool Diagnostics ---
-        issues = run_tool_diagnostics(root, args.skip_tests, args.publish_cargo)
+        issues = run_tool_diagnostics(root, args.skip_tests)
         if issues:
             error("Pre-flight checks identified blocking issues:")
             for issue in issues:
@@ -923,38 +892,7 @@ def main() -> None:
                 f"&& git push {remote_name} {tag_name}"
             )
 
-        # --- Step 7: Crates.io Publishing ---
-        print()
-        info("Step 7: Publishing to Crates.io")
-        pkg_name = read_package_name(root)
-        should_publish_cargo = args.publish_cargo
-        if not should_publish_cargo and not args.dry_run and not args.yes:
-            ans = (
-                input("Do you want to publish the Rust crate to Crates.io now? [y/N]: ")
-                .strip()
-                .lower()
-            )
-            should_publish_cargo = ans == "y"
-
-        if should_publish_cargo:
-            if args.dry_run:
-                info(f"[DRY RUN] Would execute: cargo publish -p {pkg_name}")
-            else:
-                try:
-                    run_cmd(["cargo", "publish", "-p", pkg_name], cwd=root)
-                    success(f"Published {pkg_name} to Crates.io!")
-                except (RuntimeError, OSError) as e:
-                    warn(
-                        f"Crates.io publish failed ({e}). "
-                        f"You can publish manually later with: cargo publish -p {pkg_name}"
-                    )
-        else:
-            info(
-                f"Skipped cargo publish. Publish manually later using: "
-                f"cargo publish -p {pkg_name}"
-            )
-
-        # --- Step 8: Summary & Guidance ---
+        # --- Step 7: Summary & Guidance ---
         print(f"\n{Style.BOLD}{'=' * 56}{Style.RESET}")
         print(
             f"{Style.GREEN}{Style.BOLD}             "
@@ -970,14 +908,18 @@ def main() -> None:
             f"    It compiles multi-platform binaries and creates a "
             f"{Style.BOLD}Draft Release{Style.RESET}."
         )
-        print(f" 2. {Style.BOLD}Publish Draft on GitHub & Trigger PyPI:{Style.RESET}")
+        print(
+            f" 2. {Style.BOLD}Publish Draft on GitHub & Trigger crates.io + PyPI:"
+            f"{Style.RESET}"
+        )
         print("    • Navigate to your repository -> Releases.")
         print(
             f"    • Open Draft Release {tag_name} and click "
             f"{Style.GREEN}'Publish Release'{Style.RESET}."
         )
-        print("    • This automatically triggers `.github/workflows/pypi.yml` to build")
-        print("      and publish all Python wheels to PyPI.")
+        print("    • This automatically triggers `.github/workflows/crates.yml` to")
+        print("      publish the crate to crates.io and `.github/workflows/pypi.yml`")
+        print("      to build and publish all Python wheels to PyPI.")
         print()
 
     except KeyboardInterrupt:
