@@ -378,6 +378,35 @@ def test_apply_directory_batch(tmp_path: Path):
     assert (tmp_path / "file2.txt").read_text() == "qux\n"
 
 
+@pytest.mark.parametrize("atomic", [False, True])
+def test_apply_directory_result_when_a_hunk_fails(tmp_path: Path, atomic: bool):
+    # The second file's hunk doesn't match, so the diff only partly applies.
+    multi_file_diff = textwrap.dedent("""\
+        --- a/file1.txt
+        +++ b/file1.txt
+        @@ -1 +1 @@
+        -foo
+        +bar
+        --- a/file2.txt
+        +++ b/file2.txt
+        @@ -1 +1 @@
+        -something else entirely
+        +qux
+    """)
+
+    (tmp_path / "file1.txt").write_text("foo\n")
+    (tmp_path / "file2.txt").write_text("baz\n")
+
+    # Atomic mode reports whether every hunk applied. Otherwise, only file I/O
+    # errors count as failure.
+    success = mpatch.apply_directory(multi_file_diff, tmp_path, atomic=atomic)
+    assert success is (not atomic)
+
+    # Without atomic mode, the hunk that matched is still written.
+    assert (tmp_path / "file1.txt").read_text() == ("foo\n" if atomic else "bar\n")
+    assert (tmp_path / "file2.txt").read_text() == "baz\n"
+
+
 def test_apply_patches_to_dir_detailed(tmp_path: Path):
     # Tests the detailed BatchResult return type
     (tmp_path / "file.txt").write_text("line 1\nline 2\nline 3\n")
