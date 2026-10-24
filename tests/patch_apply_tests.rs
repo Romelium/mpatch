@@ -1447,6 +1447,56 @@ fn test_apply_to_file_preserves_crlf_on_disk() {
 }
 
 #[test]
+fn test_parse_git_mode_changes() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let diff = concat!(
+        "diff --git a/run.sh b/run.sh\n",
+        "old mode 100644\n",
+        "new mode 100755\n",
+        // Git leaves spaces in paths unquoted.
+        "diff --git a/my script.sh b/my script.sh\n",
+        "new file mode 100755\n",
+        "index 0000000..1234567\n",
+        "--- /dev/null\n",
+        "+++ b/my script.sh\n",
+        "@@ -0,0 +1 @@\n",
+        "+echo hi\n",
+        "diff --git \"a/tab\\tname\" \"b/tab\\tname\"\n",
+        "old mode 100755\n",
+        "new mode 100644\n",
+        // `git diff --no-prefix`
+        "diff --git src/x.c src/x.c\n",
+        "new file mode 100644\n",
+        // Renames name two paths and are not reported.
+        "diff --git a/old.c b/new.c\n",
+        "similarity index 100%\n",
+        "rename from old.c\n",
+        "rename to new.c\n",
+        "old mode 100644\n",
+        "new mode 100755\n",
+    );
+
+    let changes: Vec<_> = mpatch::parse_git_mode_changes(diff)
+        .into_iter()
+        .map(|change| (change.file_path, change.old_mode, change.new_mode))
+        .collect();
+
+    assert_eq!(
+        changes,
+        vec![
+            (std::path::PathBuf::from("run.sh"), Some(0o100644), 0o100755),
+            (std::path::PathBuf::from("my script.sh"), None, 0o100755),
+            (
+                std::path::PathBuf::from("tab\tname"),
+                Some(0o100755),
+                0o100644
+            ),
+            (std::path::PathBuf::from("src/x.c"), None, 0o100644),
+        ]
+    );
+}
+
+#[test]
 fn test_parse_git_quoted_paths_and_unusual_hunk_content() {
     let _ = env_logger::builder().is_test(true).try_init();
     let diff = concat!(
@@ -16340,26 +16390,118 @@ mod cli_tests {
         assert_eq!(read(dir.path(), "x.c"), "line1\nline2\nline3\n");
     }
 
+    const CREATE_EXECUTABLE: &str = concat!(
+        "diff --git a/run.sh b/run.sh\n",
+        "new file mode 100755\n",
+        "index 0000000..1234567\n",
+        "--- /dev/null\n",
+        "+++ b/run.sh\n",
+        "@@ -0,0 +1 @@\n",
+        "+echo hello\n",
+    );
+
+    #[cfg(unix)]
+    const MAKE_X_EXECUTABLE: &str = "diff --git a/x.c b/x.c\nold mode 100644\nnew mode 100755\n";
+
+    #[cfg(not(unix))]
     #[test]
     fn test_cli_warns_about_executable_mode_but_applies_content() {
         let dir = tempdir().unwrap();
-        let patch = concat!(
-            "diff --git a/run.sh b/run.sh\n",
-            "new file mode 100755\n",
-            "index 0000000..1234567\n",
-            "--- /dev/null\n",
-            "+++ b/run.sh\n",
-            "@@ -0,0 +1 @@\n",
-            "+echo hello\n",
-        );
 
-        let output = run(patch, dir.path(), &[]);
+        let output = run(CREATE_EXECUTABLE, dir.path(), &[]);
 
         assert_exit_code(&output, 0);
         assert_stderr_contains(
             &output,
-            "mode change to 100755 for 'a/run.sh b/run.sh' is not applied",
+            "mode change to 100755 for 'a/run.sh b/run.sh' is not applied on this platform",
         );
         assert_eq!(read(dir.path(), "run.sh"), "echo hello\n");
+    }
+
+    #[cfg(unix)]
+    fn mode(dir: &Path, name: &str) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(dir.join(name)).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    fn set_mode(dir: &Path, name: &str, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir.join(name), fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cli_sets_executable_bit_on_created_file() {
+        let dir = tempdir().unwrap();
+
+        let output = run(CREATE_EXECUTABLE, dir.path(), &[]);
+
+        assert_exit_code(&output, 0);
+        assert_eq!(stderr(&output), "");
+        assert_eq!(read(dir.path(), "run.sh"), "echo hello\n");
+        assert_ne!(mode(dir.path(), "run.sh") & 0o100, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cli_applies_and_reverses_mode_only_change() {
+        let dir = tempdir().unwrap();
+        write_x(dir.path());
+        set_mode(dir.path(), "x.c", 0o644);
+
+        let output = run(MAKE_X_EXECUTABLE, dir.path(), &[]);
+        assert_exit_code(&output, 0);
+        assert_eq!(mode(dir.path(), "x.c"), 0o755);
+
+        let output = run(MAKE_X_EXECUTABLE, dir.path(), &["-R"]);
+        assert_exit_code(&output, 0);
+        assert_eq!(mode(dir.path(), "x.c"), 0o644);
+        assert_eq!(read(dir.path(), "x.c"), "line1\nline2\nline3\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cli_dry_run_reports_mode_change_without_applying() {
+        let dir = tempdir().unwrap();
+        write_x(dir.path());
+        set_mode(dir.path(), "x.c", 0o644);
+
+        let output = run(MAKE_X_EXECUTABLE, dir.path(), &["--dry-run"]);
+
+        assert_exit_code(&output, 0);
+        assert!(stdout(&output).contains("----- Proposed Mode Change for x.c: 100755 -----"));
+        assert_eq!(mode(dir.path(), "x.c"), 0o644);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cli_skips_mode_changes_when_atomic_apply_fails() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("x.c"), "unrelated\ncontent\n").unwrap();
+        fs::write(dir.path().join("run.sh"), "echo hello\n").unwrap();
+        set_mode(dir.path(), "run.sh", 0o644);
+        let patch =
+            format!("{MODIFY_X}diff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755\n");
+
+        let output = run(&patch, dir.path(), &["--atomic", "--fuzz-factor", "0"]);
+
+        assert_exit_code(&output, 1);
+        assert_eq!(mode(dir.path(), "run.sh"), 0o644);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cli_rejects_mode_change_for_missing_file() {
+        let dir = tempdir().unwrap();
+        write_x(dir.path());
+        let patch =
+            format!("{MODIFY_X}diff --git a/gone.sh b/gone.sh\nold mode 100644\nnew mode 100755\n");
+
+        let output = run(&patch, dir.path(), &[]);
+
+        assert_exit_code(&output, 1);
+        assert_stderr_contains(&output, "Cannot set the mode of 'gone.sh'");
+        assert_eq!(read(dir.path(), "x.c"), "line1\nline2\nline3\n");
     }
 }

@@ -162,9 +162,24 @@ fn run(args: Args) -> Result<()> {
         ));
     }
 
+    // --- Git Mode Changes ---
+    let mode_changes = planned_mode_changes(&content, args.reverse);
+    if let Err(e) = check_mode_change_targets(&mode_changes, &all_patches, &actual_target_dir) {
+        finalize_report(None);
+        return Err(e);
+    }
+
     // --- Core Patching Logic ---
     if all_patches.is_empty() {
-        info!("No valid patches found or processed in the input.");
+        if mode_changes.is_empty() {
+            info!("No valid patches found or processed in the input.");
+            return Ok(());
+        }
+        let failures = apply_mode_changes(&mode_changes, &actual_target_dir, args.dry_run);
+        finalize_report(None);
+        if failures > 0 {
+            return Err(anyhow!("Failed to set the mode of {} file(s).", failures));
+        }
         return Ok(());
     }
 
@@ -245,6 +260,27 @@ fn run(args: Args) -> Result<()> {
                 });
             }
         }
+    }
+
+    // Modes follow the content: skip them when an atomic batch was discarded, and for files
+    // whose own hunks failed.
+    if !(args.atomic && fail_count > 0) {
+        let failed: Vec<&Path> = batch_result
+            .results
+            .iter()
+            .zip(&all_patches)
+            .filter(|((_, result), _)| {
+                !result
+                    .as_ref()
+                    .is_ok_and(|patch_result| patch_result.report.all_applied_cleanly())
+            })
+            .map(|(_, patch)| patch.file_path.as_path())
+            .collect();
+        let applicable: Vec<(PathBuf, bool)> = mode_changes
+            .into_iter()
+            .filter(|(path, _)| !failed.contains(&path.as_path()))
+            .collect();
+        fail_count += apply_mode_changes(&applicable, &actual_target_dir, args.dry_run);
     }
 
     // --- Final Summary ---
@@ -341,9 +377,11 @@ fn find_unsupported_features(content: &str) -> UnsupportedFeatures {
             .or_else(|| line.strip_prefix("new mode "))
         {
             match mode.trim() {
+                // Applied after the content, see `planned_mode_changes`.
                 "100644" => {}
+                "100755" if cfg!(unix) => {}
                 "100755" => found.warnings.push(format!(
-                    "Git mode change to 100755 for '{}' is not applied; set the executable bit manually.",
+                    "Git mode change to 100755 for '{}' is not applied on this platform; set the executable bit manually.",
                     paths
                 )),
                 other => found.errors.push(format!(
@@ -370,6 +408,109 @@ fn is_context_hunk_range(line: &str) -> bool {
         .is_some_and(|range| {
             !range.is_empty() && range.chars().all(|c| c.is_ascii_digit() || c == ',')
         })
+}
+
+/// Returns the executable-bit changes to make after the content is applied, as
+/// `(path, executable)` pairs.
+///
+/// Only Unix has an executable bit, so the list is empty elsewhere. A created file already
+/// gets the default, non-executable mode, so only created executables are listed for it.
+fn planned_mode_changes(content: &str, reverse: bool) -> Vec<(PathBuf, bool)> {
+    if cfg!(not(unix)) {
+        return Vec::new();
+    }
+    mpatch::parse_git_mode_changes(content)
+        .into_iter()
+        .filter_map(|change| {
+            // Reversing a creation deletes the file, so there is no mode to restore.
+            let mode = if reverse {
+                change.old_mode?
+            } else {
+                change.new_mode
+            };
+            let executable = mode & 0o111 != 0;
+            (executable || change.old_mode.is_some()).then_some((change.file_path, executable))
+        })
+        .collect()
+}
+
+/// Fails before anything is written when a mode change names a file that neither exists nor
+/// is created by the patch.
+fn check_mode_change_targets(
+    changes: &[(PathBuf, bool)],
+    patches: &[Patch],
+    target_dir: &Path,
+) -> Result<()> {
+    for (path, _) in changes {
+        let safe_path = mpatch::ensure_path_is_safe(target_dir, path)?;
+        let created = patches
+            .iter()
+            .any(|patch| patch.file_path == *path && patch.is_creation());
+        if !safe_path.is_file() && !created {
+            return Err(anyhow!(
+                "Cannot set the mode of '{}': the file does not exist and the patch does not create it, so nothing was modified.",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Sets or clears the executable bits, or reports them in a dry run. Returns the number of
+/// files whose mode could not be set.
+fn apply_mode_changes(changes: &[(PathBuf, bool)], target_dir: &Path, dry_run: bool) -> usize {
+    let mut failures = 0;
+    for (path, executable) in changes {
+        let mode = if *executable { "100755" } else { "100644" };
+        if dry_run {
+            println!(
+                "----- Proposed Mode Change for {}: {} -----",
+                path.display(),
+                mode
+            );
+            continue;
+        }
+        let result = mpatch::ensure_path_is_safe(target_dir, path)
+            .map_err(|e| e.to_string())
+            .and_then(|safe_path| {
+                set_executable(&safe_path, *executable).map_err(|e| e.to_string())
+            });
+        match result {
+            Ok(()) => info!("Set mode {} on '{}'.", mode, path.display()),
+            Err(e) => {
+                failures += 1;
+                error!("Failed to set mode {} on '{}': {}", mode, path.display(), e);
+            }
+        }
+    }
+    failures
+}
+
+#[cfg(unix)]
+fn set_executable(path: &Path, executable: bool) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(executable_mode(permissions.mode(), executable));
+    fs::set_permissions(path, permissions)
+}
+
+#[cfg(not(unix))]
+fn set_executable(_path: &Path, _executable: bool) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "this platform has no executable bit",
+    ))
+}
+
+/// Returns `mode` with the executable bits set wherever a read bit is set, like `chmod +x`
+/// for each reader, or with every executable bit cleared.
+#[cfg(any(unix, test))]
+fn executable_mode(mode: u32, executable: bool) -> u32 {
+    if executable {
+        mode | ((mode & 0o444) >> 2)
+    } else {
+        mode & !0o111
+    }
 }
 
 /// Reads complete patch content from standard input (stdin).
@@ -1136,4 +1277,20 @@ fn anonymize_command_args(args: &Args) -> String {
 /// `true` if the normalized patches are identical, `false` otherwise.
 fn compare_patches(original: &Patch, recreated: &Patch) -> bool {
     format_normalized_patch(original) == format_normalized_patch(recreated)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::executable_mode;
+
+    #[test]
+    fn test_executable_mode_follows_read_bits() {
+        assert_eq!(executable_mode(0o644, true), 0o755);
+        assert_eq!(executable_mode(0o600, true), 0o700);
+        assert_eq!(executable_mode(0o640, true), 0o750);
+        assert_eq!(executable_mode(0o100644, true), 0o100755);
+        assert_eq!(executable_mode(0o755, false), 0o644);
+        assert_eq!(executable_mode(0o4755, false), 0o4644);
+        assert_eq!(executable_mode(0o755, true), 0o755);
+    }
 }

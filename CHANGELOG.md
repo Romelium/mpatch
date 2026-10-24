@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Patch Target Paths:** Resolve targets the way `patch -p1` does for directory-tree diffs (`diff -Naur pkg.orig pkg`, including created and deleted files) and for backup-file diffs (`diff -u file.orig file`). When a target is missing but exists without its leading directory, patch that file and print a warning.
 - **Already-Applied Hunks:** Skip a hunk with a warning when it can only be placed by fuzzy matching and its result is already in the file, so re-applying a patch no longer duplicates its changes. Hunks whose context still matches exactly always apply, so intentional duplicates keep working. Hunks that only delete lines, and hunks whose context still matches exactly after they were applied (such as appends at the end of a list), are not detected.
+- **Git Executable Mode:** Apply Git mode changes between `100644` and `100755` on Unix after the content is written, including created files (`new file mode 100755`), mode-only patches, `-R`, and `--dry-run`. A mode change for a file that neither exists nor is created by the patch fails before anything is written, and `--atomic` skips modes when the batch is discarded. Library callers can read the changes with `parse_git_mode_changes()`.
 
 ### Fixed
 

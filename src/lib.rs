@@ -6717,6 +6717,148 @@ where
     Ok(merged_patches)
 }
 
+/// A Git file-mode change from a `diff --git` extended header, such as `new mode 100755`.
+///
+/// Returned by [`parse_git_mode_changes()`]. Modes are the octal values Git writes:
+/// `0o100644` for a regular file and `0o100755` for an executable one.
+///
+/// # Examples
+///
+/// ```
+/// use mpatch::parse_git_mode_changes;
+///
+/// let diff = "diff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755\n";
+/// let change = &parse_git_mode_changes(diff)[0];
+///
+/// assert_eq!(change.file_path.to_str(), Some("run.sh"));
+/// assert_eq!(change.old_mode, Some(0o100644));
+/// assert_eq!(change.new_mode, 0o100755);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ModeChange {
+    /// The file's path relative to the target directory, without Git's `a/` and `b/` prefixes.
+    /// It matches the [`Patch::file_path`] of the file's hunks.
+    pub file_path: PathBuf,
+    /// The mode before the change, or `None` when the patch creates the file.
+    pub old_mode: Option<u32>,
+    /// The mode after the change.
+    pub new_mode: u32,
+}
+
+/// Reads the file-mode changes from the `diff --git` sections of a patch.
+///
+/// The patch parsers such as [`parse_auto()`] only read hunks, so a mode change such as
+/// `old mode 100644` / `new mode 100755`, or `new file mode 100755` for a created file, is
+/// reported here instead. Callers can apply the modes after writing the content.
+///
+/// Renames and copies, whose headers name two different paths, are not reported.
+///
+/// # Arguments
+///
+/// * `content` - The raw patch text.
+///
+/// # Returns
+///
+/// The mode changes in the order they appear, including created files with the default
+/// mode (`new file mode 100644`).
+///
+/// # Examples
+///
+/// ```
+/// use mpatch::parse_git_mode_changes;
+///
+/// let diff = concat!(
+///     "diff --git a/build.sh b/build.sh\n",
+///     "new file mode 100755\n",
+///     "--- /dev/null\n",
+///     "+++ b/build.sh\n",
+///     "@@ -0,0 +1 @@\n",
+///     "+make\n",
+/// );
+/// let changes = parse_git_mode_changes(diff);
+///
+/// assert_eq!(changes.len(), 1);
+/// assert_eq!(changes[0].file_path.to_str(), Some("build.sh"));
+/// assert_eq!(changes[0].old_mode, None);
+/// assert_eq!(changes[0].new_mode, 0o100755);
+/// ```
+pub fn parse_git_mode_changes(content: &str) -> Vec<ModeChange> {
+    let mut changes = Vec::new();
+    // The path of the `diff --git` header whose extended header lines are being read.
+    let mut header_path: Option<PathBuf> = None;
+    let mut old_mode = None;
+
+    for line in content.lines() {
+        if let Some(paths) = line.strip_prefix("diff --git ") {
+            header_path = parse_git_header_path(paths);
+            old_mode = None;
+            continue;
+        }
+        // Extended header lines end where the file headers or hunks begin.
+        if line.starts_with("--- ") || line.starts_with("@@") {
+            header_path = None;
+            continue;
+        }
+        let Some(file_path) = &header_path else {
+            continue;
+        };
+
+        let parse_mode = |mode: &str| u32::from_str_radix(mode.trim(), 8).ok();
+        if let Some(mode) = line.strip_prefix("old mode ") {
+            old_mode = parse_mode(mode);
+        } else if let Some(mode) = line.strip_prefix("new mode ") {
+            if let Some(new_mode) = parse_mode(mode) {
+                changes.push(ModeChange {
+                    file_path: file_path.clone(),
+                    old_mode,
+                    new_mode,
+                });
+            }
+        } else if let Some(new_mode) = line.strip_prefix("new file mode ").and_then(parse_mode) {
+            changes.push(ModeChange {
+                file_path: file_path.clone(),
+                old_mode: None,
+                new_mode,
+            });
+        }
+    }
+
+    debug!(
+        "parse_git_mode_changes: found {} mode change(s)",
+        changes.len()
+    );
+    changes
+}
+
+/// Returns the path a `diff --git` header names when both sides are the same file.
+///
+/// Git leaves spaces in paths unquoted, so `a/my file b/my file` is split in the middle,
+/// where the two halves match. Quoted paths are decoded.
+fn parse_git_header_path(paths: &str) -> Option<PathBuf> {
+    if paths.starts_with('"') {
+        let bytes = paths.as_bytes();
+        let mut end = 1;
+        while end < bytes.len() && bytes[end] != b'"' {
+            end += if bytes[end] == b'\\' { 2 } else { 1 };
+        }
+        let path = decode_git_quoted_path(paths.get(..=end)?)?;
+        return Some(PathBuf::from(path.strip_prefix("a/").unwrap_or(&path)));
+    }
+
+    // `a/P b/P` and `P P` both have an odd length with a space in the middle.
+    let middle = paths.len() / 2;
+    if paths.len().is_multiple_of(2) || paths.as_bytes()[middle] != b' ' {
+        return None;
+    }
+    let (old, new) = (&paths[..middle], &paths[middle + 1..]);
+    match (old.strip_prefix("a/"), new.strip_prefix("b/")) {
+        (Some(old), Some(new)) if old == new => Some(PathBuf::from(old)),
+        _ if old == new => Some(PathBuf::from(old)),
+        _ => None,
+    }
+}
+
 /// Checks if a line is a standard Git diff header that should be ignored when parsing hunks.
 ///
 /// Git extended diff output frequently includes metadata headers (such as `index`,
