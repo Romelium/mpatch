@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Patch Target Paths:** Resolve targets the way `patch -p1` does for directory-tree diffs (`diff -Naur pkg.orig pkg`, including created and deleted files) and for backup-file diffs (`diff -u file.orig file`). When a target is missing but exists without its leading directory, patch that file and print a warning.
+
 ### Fixed
 
 - **Unified Diff Parsing:** Recognize `diff -Naur` headers, strip timestamps from `---` / `+++` file headers (including timestamps whose tab separator was expanded to spaces), decode Git C-quoted paths, and distinguish file headers from hunk content that begins with `---` or `+++`.

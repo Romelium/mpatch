@@ -570,10 +570,11 @@ use log::{debug, info, trace, warn};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use similar::TextDiff;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 
 // --- Error Types ---
@@ -4305,6 +4306,50 @@ fn parse_unified_header_path(header: &str) -> Option<String> {
     }
 }
 
+/// Backup suffixes that `diff -u file.orig file` style headers put on the `---` side.
+const BACKUP_SUFFIXES: [&str; 4] = [".orig", ".old", ".bak", "~"];
+
+/// Chooses the target path when the `---` and `+++` headers name different paths, matching
+/// what `patch -p1` resolves for common layouts. Returns `None` to keep the `---` path.
+///
+/// * `diff -Naur pkg.orig pkg` puts each side under a different top-level directory, so the
+///   shared remainder is the target. The stripped directories are added to `tree_prefixes`.
+/// * `diff -u file.orig file` names a backup copy on the `---` side, so the `+++` path is the
+///   target.
+fn reconcile_header_paths(
+    old: &str,
+    new: &str,
+    tree_prefixes: &mut Vec<String>,
+) -> Option<PathBuf> {
+    if let (Some((old_prefix, old_rest)), Some((new_prefix, new_rest))) =
+        (old.split_once('/'), new.split_once('/'))
+    {
+        let is_tree_diff = !old_prefix.is_empty()
+            && !new_prefix.is_empty()
+            && old_prefix != new_prefix
+            && !old_rest.is_empty()
+            && old_rest == new_rest;
+        if is_tree_diff {
+            // `a/` and `b/` are already stripped wherever they appear on their own.
+            if (old_prefix, new_prefix) != ("a", "b") {
+                for prefix in [old_prefix, new_prefix] {
+                    if !tree_prefixes.iter().any(|p| p == prefix) {
+                        tree_prefixes.push(prefix.to_owned());
+                    }
+                }
+            }
+            return Some(PathBuf::from(old_rest));
+        }
+    }
+
+    let old = old.strip_prefix("a/").unwrap_or(old);
+    let new = new.strip_prefix("b/").unwrap_or(new);
+    BACKUP_SUFFIXES
+        .iter()
+        .any(|suffix| old.strip_suffix(suffix) == Some(new))
+        .then(|| PathBuf::from(new))
+}
+
 /// Removes a timestamp trailer that is separated from the header path by spaces.
 ///
 /// `diff -u` separates the path from its timestamp with a tab, but copy-paste, editors, and
@@ -6371,6 +6416,13 @@ where
     let mut current_hunk_new_lines_remaining: Option<usize> = None;
     let mut current_hunk_is_complete = false;
     let mut ends_with_newline_for_section = true;
+    // The raw `---` path, kept to reconcile it with the `+++` path.
+    let mut current_old_header: Option<String> = None;
+    // Whether the section's path came from a single header because the other side is `/dev/null`.
+    let mut current_path_is_one_sided = false;
+    // Top-level directories stripped from `diff -Naur old new` style headers.
+    let mut tree_prefixes: Vec<String> = Vec::new();
+    let mut one_sided_sections: Vec<usize> = Vec::new();
 
     macro_rules! finalize_hunk {
         () => {
@@ -6436,6 +6488,9 @@ where
                         existing_file.display(),
                         current_hunks.len()
                     );
+                    if current_path_is_one_sided {
+                        one_sided_sections.push(unmerged_patches.len());
+                    }
                     unmerged_patches.push(Patch {
                         file_path: existing_file.clone(),
                         hunks: std::mem::take(&mut current_hunks),
@@ -6447,6 +6502,8 @@ where
             // Reset for the new file section.
             trace!("  Resetting parser state for new file section.");
             current_file = None;
+            current_old_header = None;
+            current_path_is_one_sided = false;
             current_hunk_lines.clear();
             current_hunk_old_start_line = None;
             current_hunk_new_start_line = None;
@@ -6463,6 +6520,7 @@ where
                     let path_str = path_part.strip_prefix("a/").unwrap_or(&path_part);
                     debug!("  Starting new patch section for file: '{}'", path_str);
                     current_file = Some(PathBuf::from(path_str.trim()));
+                    current_old_header = Some(path_part);
                 }
             } else {
                 warn!("Could not parse unified diff file header: '{}'", line);
@@ -6472,14 +6530,37 @@ where
             .filter(|_| current_hunk_old_start_line.is_none() || current_hunk_is_complete)
         {
             trace!("  Found '+++' line: '{}'", line);
-            if current_file.is_none() {
-                if let Some(path_part) = parse_unified_header_path(stripped_line) {
+            match parse_unified_header_path(stripped_line) {
+                Some(path_part) if current_file.is_none() => {
                     let path_str = path_part.strip_prefix("b/").unwrap_or(&path_part);
                     debug!("  Set file path from '+++' line: '{}'", path_str);
                     current_file = Some(PathBuf::from(path_str.trim()));
-                } else {
+                    current_path_is_one_sided = !path_part.starts_with("b/");
+                }
+                Some(path_part) if path_part == "/dev/null" => {
+                    current_path_is_one_sided = current_old_header
+                        .as_deref()
+                        .is_some_and(|old| !old.starts_with("a/"));
+                }
+                Some(path_part) => {
+                    if let Some(old_header) = current_old_header.as_deref() {
+                        if let Some(path) =
+                            reconcile_header_paths(old_header, &path_part, &mut tree_prefixes)
+                        {
+                            debug!(
+                                "  Reconciled '---' / '+++' paths '{}' and '{}' to '{}'",
+                                old_header,
+                                path_part,
+                                path.display()
+                            );
+                            current_file = Some(path);
+                        }
+                    }
+                }
+                None if current_file.is_none() => {
                     warn!("Could not parse unified diff file header: '{}'", line);
                 }
+                None => {}
             }
         } else if line.starts_with("@@") {
             trace!("  Found hunk header: '{}'", line);
@@ -6585,6 +6666,9 @@ where
                 file_path.display(),
                 current_hunks.len()
             );
+            if current_path_is_one_sided {
+                one_sided_sections.push(unmerged_patches.len());
+            }
             unmerged_patches.push(Patch {
                 file_path,
                 hunks: current_hunks,
@@ -6598,6 +6682,24 @@ where
             error_line
         );
         return Err(ParseError::MissingFileHeader { line: error_line });
+    }
+
+    // Created and deleted files name only one side (the other is `/dev/null`), so strip the
+    // same top-level directory that the two-sided sections of this diff used.
+    for index in one_sided_sections {
+        let patch = &mut unmerged_patches[index];
+        let mut components = patch.file_path.components();
+        let Some(Component::Normal(leading_dir)) = components.next() else {
+            continue;
+        };
+        let rest = components.as_path();
+        if !rest.as_os_str().is_empty() && tree_prefixes.iter().any(|p| leading_dir == p.as_str()) {
+            debug!(
+                "  Stripping tree prefix from one-sided header path '{}'",
+                patch.file_path.display()
+            );
+            patch.file_path = rest.to_path_buf();
+        }
     }
 
     // Merge patch sections for the same file.
@@ -6958,7 +7060,8 @@ pub fn apply_patches_to_dir(
                 patch.file_path.display(),
                 patch.hunks.len()
             );
-            let result = apply_patch_to_file(patch, target_dir, options);
+            let patch = resolve_patch_target(patch, target_dir);
+            let result = apply_patch_to_file(&patch, target_dir, options);
             (patch.file_path.clone(), result)
         })
         .collect();
@@ -6971,6 +7074,36 @@ pub fn apply_patches_to_dir(
         batch.all_applied_cleanly()
     );
     batch
+}
+
+/// Re-roots `patch` one directory down when its target is missing but exists without the
+/// leading directory, the way `patch -p1` resolves `--- pkg/file` headers.
+///
+/// File creations are left alone, since a missing target is expected for them.
+fn resolve_patch_target<'a>(patch: &'a Patch, target_dir: &Path) -> Cow<'a, Patch> {
+    if target_dir.join(&patch.file_path).exists() || patch.is_creation() {
+        return Cow::Borrowed(patch);
+    }
+    let mut components = patch.file_path.components();
+    let Some(Component::Normal(leading_dir)) = components.next() else {
+        return Cow::Borrowed(patch);
+    };
+    let stripped = components.as_path();
+    let stripped_is_file = !stripped.as_os_str().is_empty()
+        && ensure_path_is_safe(target_dir, stripped).is_ok_and(|path| path.is_file());
+    if !stripped_is_file {
+        return Cow::Borrowed(patch);
+    }
+
+    warn!(
+        "Target file '{}' not found; patching '{}' instead (stripped leading directory '{}', as `patch -p1` would).",
+        patch.file_path.display(),
+        stripped.display(),
+        leading_dir.to_string_lossy()
+    );
+    let mut resolved = patch.clone();
+    resolved.file_path = stripped.to_path_buf();
+    Cow::Owned(resolved)
 }
 
 /// Internal representation of applied file actions used during atomic disk commit rollback.
@@ -7110,6 +7243,12 @@ pub fn apply_patches_to_dir_atomic(
             patch.file_path.display(),
             patch.hunks.len()
         );
+        // A file staged by an earlier patch in this batch is not on disk yet, but it exists.
+        let resolved = match ensure_path_is_safe(target_dir, &patch.file_path) {
+            Ok(path) if staged_files.contains_key(&path) => Cow::Borrowed(patch),
+            _ => resolve_patch_target(patch, target_dir),
+        };
+        let patch = &*resolved;
         let safe_target_path = match ensure_path_is_safe(target_dir, &patch.file_path) {
             Ok(p) => p,
             Err(e) => {
@@ -7691,6 +7830,8 @@ pub fn apply_patch_to_file(
     target_dir: &Path,
     options: ApplyOptions,
 ) -> Result<PatchResult, PatchError> {
+    let resolved = resolve_patch_target(patch, target_dir);
+    let patch = &*resolved;
     info!("Applying patch to: {}", patch.file_path.display());
     debug!(
         "  apply_patch_to_file: target_dir='{}', hunks={}, dry_run={}, fuzz={:.2}",

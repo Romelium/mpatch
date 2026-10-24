@@ -1008,6 +1008,197 @@ fn test_parse_space_separated_header_timestamp_variants() {
 }
 
 #[test]
+fn test_parse_directory_tree_diff_strips_top_level_directories() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    // `diff -Naur kernel.orig kernel`: created and deleted files use epoch timestamps.
+    let diff = concat!(
+        "diff -Naur kernel.orig/conftest.sh kernel/conftest.sh\n",
+        "--- kernel.orig/conftest.sh\t2026-10-17 12:30:15.060387301 +0200\n",
+        "+++ kernel/conftest.sh\t2026-10-17 16:06:54.568679471 +0200\n",
+        "@@ -1 +1 @@\n",
+        "-old\n",
+        "+new\n",
+        "diff -Naur kernel.orig/nvidia/new.c kernel/nvidia/new.c\n",
+        "--- kernel.orig/nvidia/new.c\t1970-01-01 01:00:00.000000000 +0100\n",
+        "+++ kernel/nvidia/new.c\t2026-10-17 16:06:54.568679471 +0200\n",
+        "@@ -0,0 +1 @@\n",
+        "+created\n",
+    );
+
+    let patches = parse_patches(diff).unwrap();
+    let paths: Vec<_> = patches.iter().map(|p| p.file_path.clone()).collect();
+    assert_eq!(
+        paths,
+        vec![
+            std::path::PathBuf::from("conftest.sh"),
+            std::path::PathBuf::from("nvidia/new.c")
+        ]
+    );
+}
+
+#[test]
+fn test_parse_one_sided_headers_reuse_tree_prefix() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    // quilt's default `-p1` layout: new and deleted files name `/dev/null` on one side.
+    let diff = concat!(
+        "--- /dev/null\n",
+        "+++ pkg/created.c\n",
+        "@@ -0,0 +1 @@\n",
+        "+created\n",
+        "--- pkg.orig/main.c\n",
+        "+++ pkg/main.c\n",
+        "@@ -1 +1 @@\n",
+        "-old\n",
+        "+new\n",
+        "--- pkg.orig/removed.c\n",
+        "+++ /dev/null\n",
+        "@@ -1 +0,0 @@\n",
+        "-removed\n",
+    );
+
+    let patches = parse_patches(diff).unwrap();
+    let paths: Vec<_> = patches.iter().map(|p| p.file_path.clone()).collect();
+    assert_eq!(
+        paths,
+        vec![
+            std::path::PathBuf::from("created.c"),
+            std::path::PathBuf::from("main.c"),
+            std::path::PathBuf::from("removed.c")
+        ]
+    );
+}
+
+#[test]
+fn test_parse_one_sided_header_without_tree_diff_keeps_directory() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let diff = concat!(
+        "--- /dev/null\n",
+        "+++ newdir/created.c\n",
+        "@@ -0,0 +1 @@\n",
+        "+created\n",
+        "--- a/main.c\n",
+        "+++ b/main.c\n",
+        "@@ -1 +1 @@\n",
+        "-old\n",
+        "+new\n",
+    );
+
+    let patches = parse_patches(diff).unwrap();
+    assert_eq!(
+        patches[0].file_path,
+        std::path::PathBuf::from("newdir/created.c")
+    );
+}
+
+#[test]
+fn test_parse_backup_suffix_header_targets_new_path() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let cases = [
+        ("conftest.sh.orig", "conftest.sh", "conftest.sh"),
+        ("a/src/lib.rs.orig", "b/src/lib.rs", "src/lib.rs"),
+        (
+            "kernel/conftest.sh~",
+            "kernel/conftest.sh",
+            "kernel/conftest.sh",
+        ),
+        // Unrelated names keep the `---` path.
+        ("src/old_name.rs", "src/new_name.rs", "src/old_name.rs"),
+    ];
+
+    for (old, new, expected) in cases {
+        let diff = format!("--- {old}\n+++ {new}\n@@ -1 +1 @@\n-old\n+new\n");
+        let patches = parse_patches(&diff).unwrap();
+        assert_eq!(
+            patches[0].file_path,
+            std::path::PathBuf::from(expected),
+            "headers: {old:?} / {new:?}"
+        );
+    }
+}
+
+#[test]
+fn test_apply_strips_leading_directory_when_target_is_missing() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let diff = concat!(
+        "--- kernel/conftest.sh\n",
+        "+++ kernel/conftest.sh\n",
+        "@@ -1,3 +1,3 @@\n",
+        " line1\n",
+        "-line2\n",
+        "+line2_modified\n",
+        " line3\n",
+    );
+    let patches = parse_patches(diff).unwrap();
+
+    for atomic in [false, true] {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("conftest.sh");
+        fs::write(&file_path, "line1\nline2\nline3\n").unwrap();
+
+        let batch = if atomic {
+            apply_patches_to_dir_atomic(&patches, dir.path(), ApplyOptions::exact())
+        } else {
+            apply_patches_to_dir(&patches, dir.path(), ApplyOptions::exact())
+        };
+
+        assert!(batch.all_applied_cleanly(), "atomic={atomic}");
+        assert_eq!(
+            batch.results[0].0,
+            std::path::PathBuf::from("conftest.sh"),
+            "atomic={atomic}"
+        );
+        assert_eq!(
+            fs::read_to_string(&file_path).unwrap(),
+            "line1\nline2_modified\nline3\n",
+            "atomic={atomic}"
+        );
+        assert!(!dir.path().join("kernel").exists(), "atomic={atomic}");
+    }
+}
+
+#[test]
+fn test_apply_keeps_leading_directory_when_target_exists_or_is_created() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dir = tempdir().unwrap();
+    fs::create_dir(dir.path().join("kernel")).unwrap();
+    fs::write(dir.path().join("kernel/conftest.sh"), "old\n").unwrap();
+    fs::write(dir.path().join("conftest.sh"), "old\n").unwrap();
+    fs::write(dir.path().join("created.c"), "untouched\n").unwrap();
+    let diff = concat!(
+        "--- a/kernel/conftest.sh\n",
+        "+++ b/kernel/conftest.sh\n",
+        "@@ -1 +1 @@\n",
+        "-old\n",
+        "+new\n",
+        "--- /dev/null\n",
+        "+++ b/kernel/created.c\n",
+        "@@ -0,0 +1 @@\n",
+        "+created\n",
+    );
+    let patches = parse_patches(diff).unwrap();
+
+    let batch = apply_patches_to_dir(&patches, dir.path(), ApplyOptions::exact());
+
+    assert!(batch.all_applied_cleanly());
+    assert_eq!(
+        fs::read_to_string(dir.path().join("kernel/conftest.sh")).unwrap(),
+        "new\n"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("conftest.sh")).unwrap(),
+        "old\n"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("kernel/created.c")).unwrap(),
+        "created\n"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("created.c")).unwrap(),
+        "untouched\n"
+    );
+}
+
+#[test]
 fn test_parse_git_quoted_paths_and_unusual_hunk_content() {
     let _ = env_logger::builder().is_test(true).try_init();
     let diff = concat!(
@@ -15733,6 +15924,21 @@ mod cli_tests {
             read(dir.path(), "nvidia-drm/nvidia-drm.Kbuild"),
             "a\nb\nadded\nc\n"
         );
+    }
+
+    #[test]
+    fn test_cli_strips_leading_directory_with_warning() {
+        let dir = tempdir().unwrap();
+        write_x(dir.path());
+        let patch = MODIFY_X
+            .replace("a/x.c", "kernel/x.c")
+            .replace("b/x.c", "kernel/x.c");
+
+        let output = run(&patch, dir.path(), &[]);
+
+        assert_exit_code(&output, 0);
+        assert_stderr_contains(&output, "stripped leading directory 'kernel'");
+        assert_eq!(read(dir.path(), "x.c"), "line1\nline2_modified\nline3\n");
     }
 
     #[test]
